@@ -155,7 +155,7 @@ try:
 except ImportError:
     _DISCOVERY_AVAILABLE = False
 
-__version__ = "0.0.5a4"
+__version__ = "0.0.5a5"
 
 __all__ = [
     # Version

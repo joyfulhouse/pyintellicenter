@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.5a5] - 2025-11-26
+
+### Changed
+
+- **ICConnectionHandler.start()**: Now waits for first connection attempt before returning
+  - Raises exception if first connection fails (enables proper error handling in Home Assistant)
+  - Reconnection continues in background after first failure
+
 ## [0.0.5a4] - 2025-11-26
 
 ### Added
@@ -142,7 +150,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `orjson` for fast JSON serialization
 - Python 3.11+ required
 
-[Unreleased]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a4...HEAD
+[Unreleased]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a5...HEAD
+[0.0.5a5]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a4...v0.0.5a5
 [0.0.5a4]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a3...v0.0.5a4
 [0.0.5a3]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a2...v0.0.5a3
 [0.0.5a2]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a1...v0.0.5a2

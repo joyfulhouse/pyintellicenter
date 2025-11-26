@@ -831,12 +831,15 @@ class TestICConnectionHandler:
 
         mock_controller.start = failing_start
 
-        await handler.start()
+        # First attempt will fail and raise, but reconnection continues in background
+        with pytest.raises(ICConnectionError):
+            await handler.start()
+
         await asyncio.sleep(2.5)  # Allow time for retries (timeBetweenReconnects=1)
 
         handler.stop()
 
-        # Should have attempted multiple times
+        # Should have attempted multiple times (reconnection continues after first failure)
         assert call_count >= 2
 
     def test_disconnect_callback_set(self, handler, mock_controller):
@@ -886,7 +889,10 @@ class TestICConnectionHandler:
 
         mock_controller.start = always_fail
 
-        await handler.start()
+        # First attempt will fail and raise, but reconnection continues in background
+        with pytest.raises(ICConnectionError):
+            await handler.start()
+
         # Allow time for failures to accumulate (short delay between retries)
         await asyncio.sleep(0.5)
 
@@ -914,7 +920,10 @@ class TestICConnectionHandler:
 
         mock_controller.start = failing_start
 
-        await handler.start()
+        # First attempt will fail and raise, but reconnection continues in background
+        with pytest.raises(ICConnectionError):
+            await handler.start()
+
         await asyncio.sleep(5)  # Allow time for retries with backoff
 
         handler.stop()
@@ -937,7 +946,10 @@ class TestICConnectionHandler:
 
         mock_controller.start = fail_then_succeed
 
-        await handler.start()
+        # First attempt will fail and raise, but reconnection continues in background
+        with pytest.raises(ICConnectionError):
+            await handler.start()
+
         await asyncio.sleep(0.5)
 
         handler.stop()
@@ -974,7 +986,10 @@ class TestICConnectionHandler:
 
         mock_controller.start = timeout_start
 
-        await handler.start()
+        # First attempt will fail and raise, but reconnection continues in background
+        with pytest.raises(TimeoutError):
+            await handler.start()
+
         await asyncio.sleep(0.3)
 
         handler.stop()

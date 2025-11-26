@@ -707,9 +707,49 @@ class ICConnectionHandler:
         return self._controller
 
     async def start(self) -> None:
-        """Start the connection handler."""
+        """Start the connection handler.
+
+        This method waits for the first successful connection before returning.
+        If the first connection attempt fails, the exception is raised.
+        Subsequent reconnections happen automatically in the background.
+
+        Raises:
+            ICConnectionError: If the first connection attempt fails.
+        """
         if not self._starter_task:
-            self._starter_task = asyncio.create_task(self._starter())
+            # Create an event to signal first connection attempt complete
+            first_attempt_done = asyncio.Event()
+            first_attempt_error: Exception | None = None
+
+            async def starter_with_signal() -> None:
+                nonlocal first_attempt_error
+                try:
+                    await self._controller.start()
+                    # Success on first attempt
+                    self._failure_count = 0
+                    self._last_failure_time = None
+                    if self._first_time:
+                        self.on_started(self._controller)
+                        self._first_time = False
+                    self._is_connected = True
+                    self._starter_task = None
+                except (TimeoutError, OSError, ICConnectionError, ICCommandError) as err:
+                    first_attempt_error = err
+                finally:
+                    first_attempt_done.set()
+
+                # If first attempt failed, continue with normal reconnection logic
+                if first_attempt_error is not None:
+                    await self._starter(initial_delay=self._time_between_reconnects)
+
+            self._starter_task = asyncio.create_task(starter_with_signal())
+
+            # Wait for first attempt to complete
+            await first_attempt_done.wait()
+
+            # If first attempt failed, raise the error
+            if first_attempt_error is not None:
+                raise first_attempt_error
 
     def stop(self) -> None:
         """Stop the handler and controller."""
