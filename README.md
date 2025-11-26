@@ -1,10 +1,13 @@
 # pyintellicenter
 
-[![PyPI version](https://badge.fury.io/py/pyintellicenter.svg)](https://badge.fury.io/py/pyintellicenter)
+[![PyPI version](https://badge.fury.io/py/pyintellicenter.svg)](https://pypi.org/project/pyintellicenter/)
 [![Python Versions](https://img.shields.io/pypi/pyversions/pyintellicenter.svg)](https://pypi.org/project/pyintellicenter/)
+[![Tests](https://github.com/joyfulhouse/pyintellicenter/actions/workflows/test.yml/badge.svg)](https://github.com/joyfulhouse/pyintellicenter/actions/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 Python library for communicating with Pentair IntelliCenter pool control systems over local network.
+
+> ⚠️ **Alpha Release**: This library is in early development. API may change between versions.
 
 ## Features
 
@@ -13,7 +16,7 @@ Python library for communicating with Pentair IntelliCenter pool control systems
 - **Async/Await**: Built on Python asyncio for efficient I/O
 - **Type Annotations**: Full type hints for IDE support and static analysis
 - **Robust Connection Handling**: Automatic reconnection with exponential backoff
-- **Production Ready**: Circuit breaker pattern, connection metrics, comprehensive error handling
+- **Resilient**: Circuit breaker pattern, connection metrics, comprehensive error handling
 
 ## Installation
 
