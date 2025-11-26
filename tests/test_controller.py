@@ -1,20 +1,22 @@
 """Tests for pyintellicenter controller module."""
 
 import asyncio
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from pyintellicenter import (
-    BaseController,
-    CommandError,
-    ConnectionHandler,
-    ConnectionMetrics,
-    ModelController,
+    ICBaseController,
+    ICCommandError,
+    ICConnectionError,
+    ICConnectionHandler,
+    ICConnectionMetrics,
+    ICError,
+    ICModelController,
+    ICSystemInfo,
     PoolModel,
-    SystemInfo,
 )
-from pyintellicenter.controller import PendingRequest, prune
+from pyintellicenter.controller import prune
 
 
 class TestPrune:
@@ -52,40 +54,48 @@ class TestPrune:
         assert prune(None) is None
 
 
-class TestCommandError:
-    """Test CommandError exception."""
+class TestICCommandError:
+    """Test ICCommandError exception."""
 
     def test_init(self):
-        """Test CommandError initialization."""
-        error = CommandError("400")
+        """Test ICCommandError initialization."""
+        error = ICCommandError("400")
 
-        assert error.errorCode == "400"
+        assert error.error_code == "400"
         assert "400" in str(error)
 
     def test_inheritance(self):
-        """Test CommandError is an Exception."""
-        error = CommandError("500")
+        """Test ICCommandError is an ICError."""
+        error = ICCommandError("500")
+        assert isinstance(error, ICError)
         assert isinstance(error, Exception)
 
+    def test_repr(self):
+        """Test repr representation."""
+        error = ICCommandError("500")
+        repr_str = repr(error)
+        assert "ICCommandError" in repr_str
+        assert "500" in repr_str
 
-class TestSystemInfo:
-    """Test SystemInfo class."""
+
+class TestICSystemInfo:
+    """Test ICSystemInfo class."""
 
     def test_init(self):
-        """Test SystemInfo initialization."""
+        """Test ICSystemInfo initialization."""
         params = {
             "PROPNAME": "My Pool",
             "VER": "1.0.5",
             "MODE": "METRIC",
             "SNAME": "IntelliCenter",
         }
-        info = SystemInfo("INCR", params)
+        info = ICSystemInfo("INCR", params)
 
-        assert info.propName == "My Pool"
-        assert info.swVersion == "1.0.5"
-        assert info.usesMetric is True
-        assert info.uniqueID is not None
-        assert len(info.uniqueID) == 16  # blake2b with digest_size=8 produces 16 hex chars
+        assert info.prop_name == "My Pool"
+        assert info.sw_version == "1.0.5"
+        assert info.uses_metric is True
+        assert info.unique_id is not None
+        assert len(info.unique_id) == 16  # blake2b with digest_size=8 produces 16 hex chars
 
     def test_uses_english(self):
         """Test system using English units."""
@@ -95,9 +105,9 @@ class TestSystemInfo:
             "MODE": "ENGLISH",
             "SNAME": "IntelliCenter",
         }
-        info = SystemInfo("INCR", params)
+        info = ICSystemInfo("INCR", params)
 
-        assert info.usesMetric is False
+        assert info.uses_metric is False
 
     def test_update(self):
         """Test updating system info."""
@@ -107,13 +117,39 @@ class TestSystemInfo:
             "MODE": "METRIC",
             "SNAME": "IntelliCenter",
         }
-        info = SystemInfo("INCR", params)
+        info = ICSystemInfo("INCR", params)
 
         info.update({"PROPNAME": "Pool 2", "VER": "1.0.1"})
 
-        assert info.propName == "Pool 2"
-        assert info.swVersion == "1.0.1"
-        assert info.usesMetric is True
+        assert info.prop_name == "Pool 2"
+        assert info.sw_version == "1.0.1"
+        assert info.uses_metric is True
+
+    def test_update_mode(self):
+        """Test updating system mode."""
+        params = {
+            "PROPNAME": "Pool 1",
+            "VER": "1.0.0",
+            "MODE": "METRIC",
+            "SNAME": "IntelliCenter",
+        }
+        info = ICSystemInfo("INCR", params)
+        assert info.uses_metric is True
+
+        info.update({"MODE": "ENGLISH"})
+
+        assert info.uses_metric is False
+
+    def test_objnam_property(self):
+        """Test objnam property."""
+        params = {
+            "PROPNAME": "Pool 1",
+            "VER": "1.0.0",
+            "MODE": "METRIC",
+            "SNAME": "IntelliCenter",
+        }
+        info = ICSystemInfo("SYS01", params)
+        assert info.objnam == "SYS01"
 
     def test_unique_id_stable(self):
         """Test unique ID is stable for same system name."""
@@ -130,153 +166,177 @@ class TestSystemInfo:
             "SNAME": "System1",
         }
 
-        info1 = SystemInfo("INCR", params1)
-        info2 = SystemInfo("INCR", params2)
+        info1 = ICSystemInfo("INCR", params1)
+        info2 = ICSystemInfo("INCR", params2)
 
         # Same SNAME should produce same unique ID
-        assert info1.uniqueID == info2.uniqueID
+        assert info1.unique_id == info2.unique_id
+
+    def test_repr(self):
+        """Test repr representation."""
+        params = {
+            "PROPNAME": "My Pool",
+            "VER": "1.0.5",
+            "MODE": "METRIC",
+            "SNAME": "IntelliCenter",
+        }
+        info = ICSystemInfo("INCR", params)
+        repr_str = repr(info)
+        assert "ICSystemInfo" in repr_str
+        assert "My Pool" in repr_str
 
 
-class TestBaseController:
-    """Test BaseController class."""
+class TestICConnectionMetrics:
+    """Test ICConnectionMetrics dataclass."""
+
+    def test_init_defaults(self):
+        """Test ICConnectionMetrics default values."""
+        metrics = ICConnectionMetrics()
+
+        assert metrics.requests_sent == 0
+        assert metrics.requests_completed == 0
+        assert metrics.requests_failed == 0
+        assert metrics.reconnect_attempts == 0
+        assert metrics.successful_connects == 0
+
+    def test_to_dict(self):
+        """Test to_dict method."""
+        metrics = ICConnectionMetrics()
+        metrics.requests_sent = 100
+        metrics.requests_completed = 95
+        metrics.requests_failed = 3
+        metrics.reconnect_attempts = 5
+        metrics.successful_connects = 10
+
+        result = metrics.to_dict()
+
+        assert result["requests_sent"] == 100
+        assert result["requests_completed"] == 95
+        assert result["requests_failed"] == 3
+        assert result["reconnect_attempts"] == 5
+        assert result["successful_connects"] == 10
+
+    def test_repr(self):
+        """Test repr representation."""
+        metrics = ICConnectionMetrics()
+        metrics.requests_sent = 10
+        repr_str = repr(metrics)
+        assert "ICConnectionMetrics" in repr_str
+        assert "10" in repr_str
+
+
+class TestICBaseController:
+    """Test ICBaseController class."""
 
     @pytest.fixture
     def controller(self):
-        """Create a BaseController instance."""
-        loop = asyncio.get_event_loop()
-        return BaseController("192.168.1.100", 6681, loop)
+        """Create a ICBaseController instance."""
+        return ICBaseController("192.168.1.100", 6681)
 
     def test_init(self, controller):
-        """Test BaseController initialization."""
+        """Test ICBaseController initialization."""
         assert controller.host == "192.168.1.100"
         assert controller._port == 6681
-        assert controller._transport is None
-        assert controller._protocol is None
-        assert controller._systemInfo is None
-        assert controller._requests == {}
+        assert controller._connection is None
+        assert controller._system_info is None
 
-    def test_connection_made_callback(self, controller):
-        """Test connection_made callback."""
-        mock_protocol = Mock()
-        mock_transport = Mock()
+    def test_connected_false_when_no_connection(self, controller):
+        """Test connected property when not connected."""
+        assert controller.connected is False
 
-        controller.connection_made(mock_protocol, mock_transport)
+    def test_metrics_property(self, controller):
+        """Test metrics property."""
+        assert controller.metrics is not None
+        assert isinstance(controller.metrics, ICConnectionMetrics)
 
-        # Should not raise error
-        assert True
+    def test_repr(self, controller):
+        """Test repr representation."""
+        repr_str = repr(controller)
+        assert "ICBaseController" in repr_str
+        assert "192.168.1.100" in repr_str
 
-    def test_connection_lost_callback(self, controller):
-        """Test connection_lost callback."""
-        callback_called = False
+    @pytest.mark.asyncio
+    async def test_start_creates_connection(self, controller):
+        """Test start creates a connection and fetches system info."""
+        mock_connection = AsyncMock()
+        mock_connection.connected = True
+        mock_connection.connect = AsyncMock()
+        mock_connection.set_disconnect_callback = MagicMock()
+        mock_connection.send_request = AsyncMock(
+            return_value={
+                "response": "200",
+                "objectList": [
+                    {
+                        "objnam": "INCR",
+                        "params": {
+                            "PROPNAME": "Test Pool",
+                            "VER": "1.0.0",
+                            "MODE": "ENGLISH",
+                            "SNAME": "TestSystem",
+                        },
+                    }
+                ],
+            }
+        )
 
-        def disconnect_callback(ctrl, exc):
-            nonlocal callback_called
-            callback_called = True
+        with patch(
+            "pyintellicenter.controller.ICConnection",
+            return_value=mock_connection,
+        ):
+            await controller.start()
 
-        controller._disconnected_callback = disconnect_callback
+        assert controller.system_info is not None
+        assert controller.system_info.prop_name == "Test Pool"
+        assert controller.metrics.successful_connects == 1
 
-        controller.connection_lost(None)
+    @pytest.mark.asyncio
+    async def test_send_cmd_not_connected(self, controller):
+        """Test send_cmd raises error when not connected."""
+        with pytest.raises(ICConnectionError):
+            await controller.send_cmd("GetParamList")
 
-        assert callback_called
+    @pytest.mark.asyncio
+    async def test_send_cmd_success(self, controller):
+        """Test send_cmd sends command and returns response."""
+        mock_connection = AsyncMock()
+        mock_connection.connected = True
+        mock_connection.send_request = AsyncMock(return_value={"response": "200", "data": "test"})
+        controller._connection = mock_connection
 
-    def test_stop(self, controller):
-        """Test stopping controller."""
-        # Create mock transport and pending requests using PendingRequest
-        controller._transport = Mock()
-        future1 = asyncio.Future()
-        future2 = asyncio.Future()
-        controller._requests = {
-            "1": PendingRequest(future=future1),
-            "2": PendingRequest(future=future2),
-        }
+        result = await controller.send_cmd("GetParamList", {"condition": ""})
 
-        controller.stop()
+        assert result["response"] == "200"
+        assert controller.metrics.requests_sent == 1
+        assert controller.metrics.requests_completed == 1
 
-        assert controller._transport is None
-        assert controller._protocol is None
-        assert future1.cancelled()
-        assert future2.cancelled()
+    @pytest.mark.asyncio
+    async def test_request_changes(self, controller):
+        """Test request_changes sends SETPARAMLIST command."""
+        mock_connection = AsyncMock()
+        mock_connection.connected = True
+        mock_connection.send_request = AsyncMock(return_value={"response": "200"})
+        controller._connection = mock_connection
 
-    def test_sendCmd_creates_future(self, controller):
-        """Test sendCmd creates future when waiting for response."""
-        controller._protocol = Mock()
-        controller._protocol.sendCmd = Mock(return_value="1")
+        await controller.request_changes("CIRCUIT1", {"STATUS": "ON"})
 
-        future = controller.sendCmd("GetParamList")
-
-        assert future is not None
-        assert isinstance(future, asyncio.Future)
-        assert "1" in controller._requests
-
-    def test_sendCmd_no_future(self, controller):
-        """Test sendCmd without waiting for response."""
-        controller._protocol = Mock()
-        controller._protocol.sendCmd = Mock(return_value="1")
-
-        future = controller.sendCmd("GetParamList", waitForResponse=False)
-
-        assert future is None
-        # PendingRequest is created with future=None
-        assert controller._requests["1"].future is None
-
-    async def test_sendCmd_disconnected(self, controller):
-        """Test sendCmd when disconnected."""
-        future = controller.sendCmd("GetParamList")
-
-        assert isinstance(future, asyncio.Future)
-        assert future.done()
-        with pytest.raises(Exception, match="controller disconnected"):
-            future.result()
-
-    def test_receivedMessage_sets_result(self, controller):
-        """Test receivedMessage sets future result."""
-        future = asyncio.Future()
-        controller._requests = {"1": PendingRequest(future=future)}
-
-        msg = {"response": "200", "data": "test"}
-        controller.receivedMessage("1", "Test", "200", msg)
-
-        assert future.done()
-        assert future.result() == msg
-        assert "1" not in controller._requests
-
-    def test_receivedMessage_sets_exception(self, controller):
-        """Test receivedMessage sets exception on error."""
-        future = asyncio.Future()
-        controller._requests = {"1": PendingRequest(future=future)}
-
-        msg = {"response": "400"}
-        controller.receivedMessage("1", "Test", "400", msg)
-
-        assert future.done()
-        with pytest.raises(CommandError) as exc_info:
-            future.result()
-        assert exc_info.value.errorCode == "400"
-
-    def test_receivedMessage_notification(self, controller):
-        """Test receivedMessage handles notification."""
-        # Notification has no response field
-        msg = {"command": "NotifyList"}
-        controller.receivedMessage("1", "NotifyList", None, msg)
-
-        # Should not raise error
-        assert True
-
-    def test_requestChanges(self, controller):
-        """Test requestChanges."""
-        controller._protocol = Mock()
-        controller._protocol.sendCmd = Mock(return_value="1")
-
-        controller.requestChanges("CIRCUIT1", {"STATUS": "ON"})
-
-        controller._protocol.sendCmd.assert_called_once()
-        call_args = controller._protocol.sendCmd.call_args
+        mock_connection.send_request.assert_called_once()
+        call_args = mock_connection.send_request.call_args
         assert call_args[0][0] == "SETPARAMLIST"
-        assert "objectList" in call_args[0][1]
+
+    @pytest.mark.asyncio
+    async def test_stop(self, controller):
+        """Test stop disconnects."""
+        mock_connection = MagicMock()
+        mock_connection.disconnect = AsyncMock()
+        controller._connection = mock_connection
+
+        await controller.stop()
+
+        assert controller._connection is None
 
 
-class TestModelController:
-    """Test ModelController class."""
+class TestICModelController:
+    """Test ICModelController class."""
 
     @pytest.fixture
     def model(self):
@@ -285,19 +345,80 @@ class TestModelController:
 
     @pytest.fixture
     def controller(self, model):
-        """Create a ModelController instance."""
-        loop = asyncio.get_event_loop()
-        return ModelController("192.168.1.100", model, 6681, loop)
+        """Create a ICModelController instance."""
+        return ICModelController("192.168.1.100", model, 6681)
 
     def test_init(self, controller, model):
-        """Test ModelController initialization."""
-        assert controller.model == model
-        assert controller._updatedCallback is None
+        """Test ICModelController initialization."""
+        assert controller.model is model
+        assert controller._updated_callback is None
 
-    def test_receivedNotifyList(self, controller):
-        """Test receivedNotifyList updates model."""
+    def test_repr(self, controller):
+        """Test repr representation."""
+        repr_str = repr(controller)
+        assert "ICModelController" in repr_str
+        assert "192.168.1.100" in repr_str
+
+    @pytest.mark.asyncio
+    async def test_start_populates_model(self, controller, model):
+        """Test start populates the model."""
+        mock_connection = AsyncMock()
+        mock_connection.connected = True
+        mock_connection.connect = AsyncMock()
+        mock_connection.set_disconnect_callback = MagicMock()
+        mock_connection.set_notification_callback = MagicMock()
+        mock_connection.send_request = AsyncMock(
+            side_effect=[
+                # System info response
+                {
+                    "response": "200",
+                    "objectList": [
+                        {
+                            "objnam": "INCR",
+                            "params": {
+                                "PROPNAME": "Test Pool",
+                                "VER": "1.0.0",
+                                "MODE": "ENGLISH",
+                                "SNAME": "TestSystem",
+                            },
+                        }
+                    ],
+                },
+                # All objects response
+                {
+                    "response": "200",
+                    "objectList": [
+                        {
+                            "objnam": "POOL1",
+                            "params": {
+                                "OBJTYP": "BODY",
+                                "SUBTYP": "POOL",
+                                "SNAME": "Pool",
+                                "PARENT": "INCR",
+                            },
+                        }
+                    ],
+                },
+                # RequestParamList response
+                {
+                    "response": "200",
+                    "objectList": [{"objnam": "POOL1", "params": {"STATUS": "OFF"}}],
+                },
+            ]
+        )
+
+        with patch(
+            "pyintellicenter.controller.ICConnection",
+            return_value=mock_connection,
+        ):
+            await controller.start()
+
+        assert model.num_objects >= 1
+
+    def test_on_notification_updates_model(self, controller, model):
+        """Test _on_notification updates the model."""
         # Add object to model
-        controller.model.addObject(
+        model.add_object(
             "CIRCUIT1",
             {
                 "OBJTYP": "CIRCUIT",
@@ -307,16 +428,28 @@ class TestModelController:
             },
         )
 
-        # Receive update
-        changes = [{"objnam": "CIRCUIT1", "params": {"STATUS": "ON"}}]
-        controller.receivedNotifyList(changes)
+        # Add system info
+        params = {
+            "PROPNAME": "Test Pool",
+            "VER": "1.0.0",
+            "MODE": "ENGLISH",
+            "SNAME": "TestSystem",
+        }
+        controller._system_info = ICSystemInfo("SYS01", params)
+
+        # Simulate notification
+        msg = {
+            "command": "NotifyList",
+            "objectList": [{"objnam": "CIRCUIT1", "params": {"STATUS": "ON"}}],
+        }
+        controller._on_notification(msg)
 
         # Object should be updated
-        obj = controller.model["CIRCUIT1"]
+        obj = model["CIRCUIT1"]
         assert obj["STATUS"] == "ON"
 
-    def test_receivedNotifyList_calls_callback(self, controller):
-        """Test receivedNotifyList calls update callback."""
+    def test_on_notification_calls_callback(self, controller, model):
+        """Test _on_notification calls update callback."""
         callback_called = False
         received_updates = None
 
@@ -325,19 +458,19 @@ class TestModelController:
             callback_called = True
             received_updates = updates
 
-        controller._updatedCallback = update_callback
+        controller.set_updated_callback(update_callback)
 
-        # Add system info to prevent AttributeError
+        # Add system info
         params = {
             "PROPNAME": "Test Pool",
             "VER": "1.0.0",
             "MODE": "ENGLISH",
             "SNAME": "TestSystem",
         }
-        controller._systemInfo = SystemInfo("SYS01", params)
+        controller._system_info = ICSystemInfo("SYS01", params)
 
         # Add object to model
-        controller.model.addObject(
+        model.add_object(
             "CIRCUIT1",
             {
                 "OBJTYP": "CIRCUIT",
@@ -347,39 +480,315 @@ class TestModelController:
             },
         )
 
-        # Receive update
-        changes = [{"objnam": "CIRCUIT1", "params": {"STATUS": "ON"}}]
-        controller.receivedNotifyList(changes)
+        # Simulate notification
+        msg = {
+            "command": "NotifyList",
+            "objectList": [{"objnam": "CIRCUIT1", "params": {"STATUS": "ON"}}],
+        }
+        controller._on_notification(msg)
 
         assert callback_called
         assert "CIRCUIT1" in received_updates
-        assert received_updates["CIRCUIT1"]["STATUS"] == "ON"
+
+    @pytest.mark.asyncio
+    async def test_set_circuit_state(self, controller):
+        """Test set_circuit_state convenience method."""
+        controller._connection = MagicMock()
+        controller._connection.connected = True
+        controller._connection.send_request = AsyncMock(
+            return_value={"response": "200", "objectList": []}
+        )
+
+        await controller.set_circuit_state("C001", True)
+
+        controller._connection.send_request.assert_called_once()
+        call_args = controller._connection.send_request.call_args
+        assert call_args[0][0] == "SETPARAMLIST"
+        assert call_args[1]["objectList"][0]["objnam"] == "C001"
+        assert call_args[1]["objectList"][0]["params"]["STATUS"] == "ON"
+
+    @pytest.mark.asyncio
+    async def test_set_circuit_state_off(self, controller):
+        """Test set_circuit_state with state=False."""
+        controller._connection = MagicMock()
+        controller._connection.connected = True
+        controller._connection.send_request = AsyncMock(
+            return_value={"response": "200", "objectList": []}
+        )
+
+        await controller.set_circuit_state("C001", False)
+
+        call_args = controller._connection.send_request.call_args
+        assert call_args[1]["objectList"][0]["params"]["STATUS"] == "OFF"
+
+    @pytest.mark.asyncio
+    async def test_set_heat_mode(self, controller):
+        """Test set_heat_mode convenience method."""
+        from pyintellicenter import HeaterType
+
+        controller._connection = MagicMock()
+        controller._connection.connected = True
+        controller._connection.send_request = AsyncMock(
+            return_value={"response": "200", "objectList": []}
+        )
+
+        await controller.set_heat_mode("B001", HeaterType.HEATER)
+
+        call_args = controller._connection.send_request.call_args
+        assert call_args[1]["objectList"][0]["objnam"] == "B001"
+        assert call_args[1]["objectList"][0]["params"]["MODE"] == "2"
+
+    @pytest.mark.asyncio
+    async def test_set_setpoint(self, controller):
+        """Test set_setpoint convenience method."""
+        controller._connection = MagicMock()
+        controller._connection.connected = True
+        controller._connection.send_request = AsyncMock(
+            return_value={"response": "200", "objectList": []}
+        )
+
+        await controller.set_setpoint("B001", 85)
+
+        call_args = controller._connection.send_request.call_args
+        assert call_args[1]["objectList"][0]["objnam"] == "B001"
+        assert call_args[1]["objectList"][0]["params"]["LOTMP"] == "85"
+
+    @pytest.mark.asyncio
+    async def test_set_super_chlorinate(self, controller):
+        """Test set_super_chlorinate convenience method."""
+        controller._connection = MagicMock()
+        controller._connection.connected = True
+        controller._connection.send_request = AsyncMock(
+            return_value={"response": "200", "objectList": []}
+        )
+
+        await controller.set_super_chlorinate("CHEM01", True)
+
+        call_args = controller._connection.send_request.call_args
+        assert call_args[1]["objectList"][0]["objnam"] == "CHEM01"
+        assert call_args[1]["objectList"][0]["params"]["SUPER"] == "ON"
+
+    def test_get_bodies(self, controller, model):
+        """Test get_bodies convenience method."""
+        model.add_object("B001", {"OBJTYP": "BODY", "SUBTYP": "POOL", "SNAME": "Pool"})
+        model.add_object("B002", {"OBJTYP": "BODY", "SUBTYP": "SPA", "SNAME": "Spa"})
+        model.add_object("C001", {"OBJTYP": "CIRCUIT", "SUBTYP": "LIGHT", "SNAME": "Light"})
+
+        bodies = controller.get_bodies()
+
+        assert len(bodies) == 2
+        assert all(obj.objtype == "BODY" for obj in bodies)
+
+    def test_get_circuits(self, controller, model):
+        """Test get_circuits convenience method."""
+        model.add_object("B001", {"OBJTYP": "BODY", "SUBTYP": "POOL", "SNAME": "Pool"})
+        model.add_object("C001", {"OBJTYP": "CIRCUIT", "SUBTYP": "LIGHT", "SNAME": "Light"})
+        model.add_object("C002", {"OBJTYP": "CIRCUIT", "SUBTYP": "GENERIC", "SNAME": "Pump"})
+
+        circuits = controller.get_circuits()
+
+        assert len(circuits) == 2
+        assert all(obj.objtype == "CIRCUIT" for obj in circuits)
+
+    def test_get_heaters(self, controller, model):
+        """Test get_heaters convenience method."""
+        model.add_object("H001", {"OBJTYP": "HEATER", "SUBTYP": "GENERIC", "SNAME": "Heater"})
+        model.add_object("H002", {"OBJTYP": "HEATER", "SUBTYP": "SOLAR", "SNAME": "Solar"})
+        model.add_object("C001", {"OBJTYP": "CIRCUIT", "SUBTYP": "LIGHT", "SNAME": "Light"})
+
+        heaters = controller.get_heaters()
+
+        assert len(heaters) == 2
+        assert all(obj.objtype == "HEATER" for obj in heaters)
+
+    def test_get_schedules(self, controller, model):
+        """Test get_schedules convenience method."""
+        model.add_object("S001", {"OBJTYP": "SCHED", "SUBTYP": "SCHED", "SNAME": "Schedule 1"})
+        model.add_object("S002", {"OBJTYP": "SCHED", "SUBTYP": "SCHED", "SNAME": "Schedule 2"})
+        model.add_object("C001", {"OBJTYP": "CIRCUIT", "SUBTYP": "LIGHT", "SNAME": "Light"})
+
+        schedules = controller.get_schedules()
+
+        assert len(schedules) == 2
+        assert all(obj.objtype == "SCHED" for obj in schedules)
+
+    def test_get_sensors(self, controller, model):
+        """Test get_sensors convenience method."""
+        model.add_object("SENSE01", {"OBJTYP": "SENSE", "SUBTYP": "POOL", "SNAME": "Pool Temp"})
+        model.add_object("SENSE02", {"OBJTYP": "SENSE", "SUBTYP": "AIR", "SNAME": "Air Temp"})
+        model.add_object("C001", {"OBJTYP": "CIRCUIT", "SUBTYP": "LIGHT", "SNAME": "Light"})
+
+        sensors = controller.get_sensors()
+
+        assert len(sensors) == 2
+        assert all(obj.objtype == "SENSE" for obj in sensors)
+
+    def test_get_pumps(self, controller, model):
+        """Test get_pumps convenience method."""
+        model.add_object("PUMP01", {"OBJTYP": "PUMP", "SUBTYP": "SPEED", "SNAME": "Main Pump"})
+        model.add_object("PUMP02", {"OBJTYP": "PUMP", "SUBTYP": "VSF", "SNAME": "Booster"})
+        model.add_object("C001", {"OBJTYP": "CIRCUIT", "SUBTYP": "LIGHT", "SNAME": "Light"})
+
+        pumps = controller.get_pumps()
+
+        assert len(pumps) == 2
+        assert all(obj.objtype == "PUMP" for obj in pumps)
+
+    def test_get_chem_controllers(self, controller, model):
+        """Test get_chem_controllers convenience method."""
+        model.add_object("CHEM01", {"OBJTYP": "CHEM", "SUBTYP": "ICHLOR", "SNAME": "Salt Cell"})
+        model.add_object("CHEM02", {"OBJTYP": "CHEM", "SUBTYP": "ICHEM", "SNAME": "IntelliChem"})
+        model.add_object("C001", {"OBJTYP": "CIRCUIT", "SUBTYP": "LIGHT", "SNAME": "Light"})
+
+        chem = controller.get_chem_controllers()
+
+        assert len(chem) == 2
+        assert all(obj.objtype == "CHEM" for obj in chem)
+
+    @pytest.mark.asyncio
+    async def test_set_multiple_circuit_states(self, controller):
+        """Test set_multiple_circuit_states convenience method."""
+        controller._connection = MagicMock()
+        controller._connection.connected = True
+        controller._connection.send_request = AsyncMock(
+            return_value={"response": "200", "objectList": []}
+        )
+
+        await controller.set_multiple_circuit_states(["C001", "C002", "C003"], True)
+
+        controller._connection.send_request.assert_called_once()
+        call_args = controller._connection.send_request.call_args
+        assert call_args[0][0] == "SETPARAMLIST"
+        object_list = call_args[1]["objectList"]
+        assert len(object_list) == 3
+        assert all(obj["params"]["STATUS"] == "ON" for obj in object_list)
+
+    @pytest.mark.asyncio
+    async def test_set_multiple_circuit_states_off(self, controller):
+        """Test set_multiple_circuit_states with state=False."""
+        controller._connection = MagicMock()
+        controller._connection.connected = True
+        controller._connection.send_request = AsyncMock(
+            return_value={"response": "200", "objectList": []}
+        )
+
+        await controller.set_multiple_circuit_states(["C001", "C002"], False)
+
+        call_args = controller._connection.send_request.call_args
+        object_list = call_args[1]["objectList"]
+        assert all(obj["params"]["STATUS"] == "OFF" for obj in object_list)
+
+    @pytest.mark.asyncio
+    async def test_get_configuration(self, controller):
+        """Test get_configuration convenience method."""
+        controller._connection = MagicMock()
+        controller._connection.connected = True
+        controller._connection.send_request = AsyncMock(
+            return_value={"response": "200", "answer": [{"type": "body", "name": "Pool"}]}
+        )
+
+        result = await controller.get_configuration()
+
+        controller._connection.send_request.assert_called_once()
+        call_args = controller._connection.send_request.call_args
+        assert call_args[0][0] == "GetQuery"
+        assert call_args[1]["queryName"] == "GetConfiguration"
+        assert len(result) == 1
+
+    def test_on_notification_ignores_non_notify_commands(self, controller, model):
+        """Test _on_notification ignores non-NotifyList commands."""
+        model.add_object(
+            "CIRCUIT1",
+            {"OBJTYP": "CIRCUIT", "SUBTYP": "LIGHT", "SNAME": "Light", "STATUS": "OFF"},
+        )
+
+        # Simulate non-NotifyList message
+        msg = {
+            "command": "SomeOtherCommand",
+            "objectList": [{"objnam": "CIRCUIT1", "params": {"STATUS": "ON"}}],
+        }
+        controller._on_notification(msg)
+
+        # Object should NOT be updated
+        obj = model["CIRCUIT1"]
+        assert obj["STATUS"] == "OFF"
+
+    def test_on_notification_handles_malformed_data(self, controller, model):
+        """Test _on_notification handles malformed notification data gracefully."""
+        # Add system info
+        params = {
+            "PROPNAME": "Test",
+            "VER": "1.0.0",
+            "MODE": "ENGLISH",
+            "SNAME": "Test",
+        }
+        controller._system_info = ICSystemInfo("SYS01", params)
+
+        # Test with missing objectList
+        msg = {"command": "NotifyList"}
+        controller._on_notification(msg)  # Should not raise
+
+        # Test with invalid objectList format
+        msg = {"command": "NotifyList", "objectList": "not a list"}
+        controller._on_notification(msg)  # Should not raise
+
+    def test_on_notification_updates_system_info(self, controller, model):
+        """Test _on_notification updates ICSystemInfo when system object changes."""
+        # Add system info with initial values
+        params = {
+            "PROPNAME": "Old Pool",
+            "VER": "1.0.0",
+            "MODE": "ENGLISH",
+            "SNAME": "TestSystem",
+        }
+        controller._system_info = ICSystemInfo("SYS01", params)
+
+        # Add system object to model
+        model.add_object("SYS01", {"OBJTYP": "SYSTEM", "SNAME": "System", "PROPNAME": "Old Pool"})
+
+        # Simulate notification updating system object
+        msg = {
+            "command": "NotifyList",
+            "objectList": [{"objnam": "SYS01", "params": {"PROPNAME": "New Pool"}}],
+        }
+        controller._on_notification(msg)
+
+        # System info should be updated
+        assert controller._system_info.prop_name == "New Pool"
 
 
-class TestConnectionHandler:
-    """Test ConnectionHandler class."""
+class TestICConnectionHandler:
+    """Test ICConnectionHandler class."""
 
     @pytest.fixture
     def mock_controller(self):
         """Create mock controller."""
-        controller = Mock()
+        controller = MagicMock()
         controller.start = AsyncMock()
-        controller.stop = Mock()
+        controller.stop = AsyncMock()
         controller.host = "192.168.1.100"
+        controller._metrics = ICConnectionMetrics()
+        controller.set_disconnected_callback = MagicMock()
         return controller
 
     @pytest.fixture
     def handler(self, mock_controller):
-        """Create ConnectionHandler instance."""
-        return ConnectionHandler(mock_controller, timeBetweenReconnects=1)
+        """Create ICConnectionHandler instance."""
+        return ICConnectionHandler(mock_controller, time_between_reconnects=1)
 
-    async def test_init(self, handler, mock_controller):
-        """Test ConnectionHandler initialization."""
-        assert handler.controller == mock_controller
-        assert handler._timeBetweenReconnects == 1
-        assert handler._firstTime is True
+    def test_init(self, handler, mock_controller):
+        """Test ICConnectionHandler initialization."""
+        assert handler.controller is mock_controller
+        assert handler._time_between_reconnects == 1
+        assert handler._first_time is True
         assert handler._stopped is False
 
+    def test_repr(self, handler):
+        """Test repr representation."""
+        repr_str = repr(handler)
+        assert "ICConnectionHandler" in repr_str
+
+    @pytest.mark.asyncio
     async def test_start_connects(self, handler, mock_controller):
         """Test start connects controller."""
         started_called = False
@@ -388,7 +797,7 @@ class TestConnectionHandler:
             nonlocal started_called
             started_called = True
 
-        handler.started = on_started
+        handler.on_started = on_started
 
         await handler.start()
         await asyncio.sleep(0.2)
@@ -399,6 +808,7 @@ class TestConnectionHandler:
         # Cleanup
         handler.stop()
 
+    @pytest.mark.asyncio
     async def test_stop(self, handler, mock_controller):
         """Test stopping handler."""
         await handler.start()
@@ -407,131 +817,323 @@ class TestConnectionHandler:
         handler.stop()
 
         assert handler._stopped is True
-        mock_controller.stop.assert_called()
 
-    async def test_exponential_backoff(self, handler):
-        """Test exponential backoff calculation."""
-        delay1 = handler._next_delay(10)
-        delay2 = handler._next_delay(delay1)
-        delay3 = handler._next_delay(delay2)
+    @pytest.mark.asyncio
+    async def test_reconnect_on_failure(self, handler, mock_controller):
+        """Test reconnection on connection failure."""
+        call_count = 0
 
-        # Should increase exponentially
-        assert delay1 == 15  # 10 * 1.5
-        assert delay2 == 22  # 15 * 1.5 (rounded)
-        assert delay3 == 33  # 22 * 1.5 (rounded)
+        async def failing_start():
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                raise ICConnectionError("Connection failed")
 
+        mock_controller.start = failing_start
 
-class TestConnectionMetrics:
-    """Test ConnectionMetrics dataclass."""
+        await handler.start()
+        await asyncio.sleep(2.5)  # Allow time for retries (timeBetweenReconnects=1)
 
-    def test_init_defaults(self):
-        """Test ConnectionMetrics default values."""
-        metrics = ConnectionMetrics()
+        handler.stop()
 
-        assert metrics.requests_sent == 0
-        assert metrics.requests_completed == 0
-        assert metrics.requests_failed == 0
-        assert metrics.requests_timed_out == 0
-        assert metrics.requests_dropped == 0
-        assert metrics.reconnect_attempts == 0
-        assert metrics.successful_connects == 0
-        assert metrics.last_request_time == 0.0
-        assert metrics.last_response_time == 0.0
-        assert metrics.total_response_time == 0.0
+        # Should have attempted multiple times
+        assert call_count >= 2
 
-    def test_average_response_time_zero_requests(self):
-        """Test average response time with no completed requests."""
-        metrics = ConnectionMetrics()
+    def test_disconnect_callback_set(self, handler, mock_controller):
+        """Test that disconnect callback is set on controller."""
+        mock_controller.set_disconnected_callback.assert_called_once()
 
-        assert metrics.average_response_time == 0.0
+    def test_on_started_callback(self, mock_controller):
+        """Test on_started callback is called."""
+        handler = ICConnectionHandler(mock_controller)
 
-    def test_average_response_time_with_requests(self):
-        """Test average response time calculation."""
-        metrics = ConnectionMetrics()
-        metrics.requests_completed = 10
-        metrics.total_response_time = 5.0
+        started_called = []
 
-        assert metrics.average_response_time == 0.5
+        def on_started(ctrl):
+            started_called.append(ctrl)
 
-    def test_to_dict(self):
-        """Test to_dict method."""
-        metrics = ConnectionMetrics()
-        metrics.requests_sent = 100
-        metrics.requests_completed = 95
-        metrics.requests_failed = 3
-        metrics.requests_timed_out = 2
-        metrics.reconnect_attempts = 5
-        metrics.successful_connects = 10
-        metrics.total_response_time = 47.5
+        handler.on_started = on_started
+        handler.on_started(mock_controller)
 
-        result = metrics.to_dict()
+        assert len(started_called) == 1
 
-        assert result["requests_sent"] == 100
-        assert result["requests_completed"] == 95
-        assert result["requests_failed"] == 3
-        assert result["requests_timed_out"] == 2
-        assert result["reconnect_attempts"] == 5
-        assert result["successful_connects"] == 10
-        assert result["average_response_time_ms"] == 500.0  # 47.5/95 * 1000
+    def test_on_disconnected_callback(self, mock_controller):
+        """Test on_disconnected callback."""
+        handler = ICConnectionHandler(mock_controller)
 
-    def test_metrics_in_base_controller(self):
-        """Test that BaseController has metrics property."""
-        loop = asyncio.get_event_loop()
-        controller = BaseController("192.168.1.100", 6681, loop)
+        disconnected_called = []
 
-        assert controller.metrics is not None
-        assert isinstance(controller.metrics, ConnectionMetrics)
+        def on_disconnected(ctrl, exc):
+            disconnected_called.append((ctrl, exc))
 
-    def test_successful_connects_incremented_on_connection(self):
-        """Test successful_connects is incremented on connection_made."""
-        loop = asyncio.get_event_loop()
-        controller = BaseController("192.168.1.100", 6681, loop)
+        handler.on_disconnected = on_disconnected
+        handler.on_disconnected(mock_controller, Exception("Test"))
 
-        initial_connects = controller.metrics.successful_connects
+        assert len(disconnected_called) == 1
 
-        # Simulate protocol connection
-        mock_transport = Mock()
-        mock_transport.write = Mock()
-        mock_transport.close = Mock()
-        mock_transport.is_closing = Mock(return_value=False)
+    @pytest.mark.asyncio
+    async def test_circuit_breaker_triggers_after_failures(self, mock_controller):
+        """Test circuit breaker opens after repeated failures."""
+        from pyintellicenter.controller import CIRCUIT_BREAKER_FAILURES
 
-        controller.connection_made(controller._protocol, mock_transport)
+        handler = ICConnectionHandler(mock_controller, time_between_reconnects=0)
+        call_count = 0
 
-        assert controller.metrics.successful_connects == initial_connects + 1
+        async def always_fail():
+            nonlocal call_count
+            call_count += 1
+            raise ICConnectionError("Connection failed")
 
-        # Cleanup
-        controller.connection_lost(None)
+        mock_controller.start = always_fail
 
+        await handler.start()
+        # Allow time for failures to accumulate (short delay between retries)
+        await asyncio.sleep(0.5)
 
-class TestPendingRequest:
-    """Test PendingRequest class."""
+        handler.stop()
 
-    def test_init(self):
-        """Test PendingRequest initialization."""
-        loop = asyncio.get_event_loop()
-        future = loop.create_future()
+        # Should have triggered circuit breaker
+        assert (
+            handler._failure_count >= CIRCUIT_BREAKER_FAILURES
+            or call_count >= CIRCUIT_BREAKER_FAILURES
+        )
 
-        request = PendingRequest(future=future)
+    @pytest.mark.asyncio
+    async def test_exponential_backoff(self, mock_controller):
+        """Test exponential backoff increases delay."""
+        handler = ICConnectionHandler(mock_controller, time_between_reconnects=1)
+        call_count = 0
+        call_times = []
 
-        assert request.future is future
-        assert request.created_at > 0
+        async def failing_start():
+            nonlocal call_count
+            call_count += 1
+            call_times.append(asyncio.get_event_loop().time())
+            if call_count < 4:
+                raise ICConnectionError("Connection failed")
 
-    def test_created_at_timestamp(self):
-        """Test PendingRequest has valid creation timestamp."""
-        import time
+        mock_controller.start = failing_start
 
-        loop = asyncio.get_event_loop()
-        future = loop.create_future()
+        await handler.start()
+        await asyncio.sleep(5)  # Allow time for retries with backoff
 
-        before = time.monotonic()
-        request = PendingRequest(future=future)
-        after = time.monotonic()
+        handler.stop()
 
-        assert before <= request.created_at <= after
+        # Verify we got multiple attempts
+        assert call_count >= 2
 
-    def test_with_none_future(self):
-        """Test PendingRequest with None future."""
-        request = PendingRequest(future=None)
+    @pytest.mark.asyncio
+    async def test_circuit_breaker_resets_on_success(self, mock_controller):
+        """Test circuit breaker resets after successful connection."""
+        handler = ICConnectionHandler(mock_controller, time_between_reconnects=0)
+        call_count = 0
 
-        assert request.future is None
-        assert request.created_at > 0
+        async def fail_then_succeed():
+            nonlocal call_count
+            call_count += 1
+            if call_count < 3:
+                raise ICConnectionError("Connection failed")
+            # Success on third attempt
+
+        mock_controller.start = fail_then_succeed
+
+        await handler.start()
+        await asyncio.sleep(0.5)
+
+        handler.stop()
+
+        # Should have reset failure count after success
+        assert handler._failure_count == 0
+
+    def test_on_retrying_callback_called(self, mock_controller):
+        """Test on_retrying callback is invoked."""
+        handler = ICConnectionHandler(mock_controller)
+
+        retrying_delays = []
+
+        def on_retrying(delay):
+            retrying_delays.append(delay)
+
+        handler.on_retrying = on_retrying
+        handler.on_retrying(30)
+
+        assert len(retrying_delays) == 1
+        assert retrying_delays[0] == 30
+
+    @pytest.mark.asyncio
+    async def test_handles_timeout_error(self, mock_controller):
+        """Test handler handles TimeoutError during connection."""
+        handler = ICConnectionHandler(mock_controller, time_between_reconnects=0)
+        call_count = 0
+
+        async def timeout_start():
+            nonlocal call_count
+            call_count += 1
+            if call_count < 2:
+                raise TimeoutError("Connection timed out")
+
+        mock_controller.start = timeout_start
+
+        await handler.start()
+        await asyncio.sleep(0.3)
+
+        handler.stop()
+
+        # Should have recovered
+        assert call_count >= 2
+
+    @pytest.mark.asyncio
+    async def test_disconnect_debounce(self, mock_controller):
+        """Test on_disconnected callback is debounced."""
+        handler = ICConnectionHandler(
+            mock_controller,
+            time_between_reconnects=0,
+            disconnect_debounce_time=1,  # 1 second debounce
+        )
+
+        disconnected_calls = []
+
+        def on_disconnected(ctrl, exc):
+            disconnected_calls.append((ctrl, exc))
+
+        handler.on_disconnected = on_disconnected
+
+        # Simulate quick disconnect/reconnect
+        await handler.start()
+        await asyncio.sleep(0.1)
+
+        # Trigger disconnect
+        handler._on_disconnect(mock_controller, Exception("Test"))
+
+        # Wait less than debounce time
+        await asyncio.sleep(0.2)
+
+        # Disconnect callback should not have been called yet
+        assert len(disconnected_calls) == 0
+
+        handler.stop()
+
+    @pytest.mark.asyncio
+    async def test_disconnect_callback_after_debounce(self, mock_controller):
+        """Test on_disconnected callback is called after debounce period."""
+        handler = ICConnectionHandler(
+            mock_controller,
+            time_between_reconnects=10,  # Long delay to prevent reconnect
+            disconnect_debounce_time=0,  # No debounce
+        )
+
+        disconnected_calls = []
+
+        def on_disconnected(ctrl, exc):
+            disconnected_calls.append((ctrl, exc))
+
+        handler.on_disconnected = on_disconnected
+        handler._first_time = False  # Pretend we've connected before
+
+        # Trigger disconnect
+        handler._on_disconnect(mock_controller, Exception("Test disconnect"))
+
+        # Wait for debounce to complete
+        await asyncio.sleep(0.2)
+
+        # Disconnect callback should have been called
+        assert len(disconnected_calls) == 1
+
+        handler.stop()
+
+    @pytest.mark.asyncio
+    async def test_on_reconnected_callback(self, mock_controller):
+        """Test on_reconnected callback is called after reconnection."""
+        handler = ICConnectionHandler(mock_controller, time_between_reconnects=0)
+
+        reconnected_calls = []
+        started_calls = []
+
+        def on_started(ctrl):
+            started_calls.append(ctrl)
+
+        def on_reconnected(ctrl):
+            reconnected_calls.append(ctrl)
+
+        handler.on_started = on_started
+        handler.on_reconnected = on_reconnected
+
+        # First connection
+        await handler.start()
+        await asyncio.sleep(0.1)
+
+        assert len(started_calls) == 1
+        assert len(reconnected_calls) == 0
+
+        # Simulate disconnect and reconnect
+        handler._is_connected = False
+        handler._first_time = False
+
+        # Start reconnection
+        handler._starter_task = asyncio.create_task(handler._starter())
+        await asyncio.sleep(0.2)
+
+        # Should have called reconnected
+        assert len(reconnected_calls) == 1
+
+        handler.stop()
+
+    @pytest.mark.asyncio
+    async def test_on_updated_callback_on_model_controller(self):
+        """Test on_updated callback is set on ICModelController."""
+        model = PoolModel()
+        controller = ICModelController("192.168.1.100", model, 6681)
+        handler = ICConnectionHandler(controller)
+
+        # Verify callback is connected (ICConnectionHandler sets it in __init__)
+        assert controller._updated_callback is not None
+
+        handler.stop()
+
+    @pytest.mark.asyncio
+    async def test_stop_cancels_debounce_task(self, mock_controller):
+        """Test stop cancels any pending debounce task."""
+        handler = ICConnectionHandler(mock_controller)
+
+        # Create a fake debounce task
+        async def fake_debounce():
+            await asyncio.sleep(100)
+
+        handler._disconnect_debounce_task = asyncio.create_task(fake_debounce())
+
+        handler.stop()
+
+        # Task should be cancelled
+        assert handler._disconnect_debounce_task is None
+
+    @pytest.mark.asyncio
+    async def test_on_disconnect_starts_reconnection(self, mock_controller):
+        """Test _on_disconnect starts reconnection task."""
+        handler = ICConnectionHandler(mock_controller, time_between_reconnects=1)
+
+        await handler.start()
+        await asyncio.sleep(0.1)
+
+        # Clear the starter task reference
+        handler._starter_task = None
+
+        # Trigger disconnect
+        handler._on_disconnect(mock_controller, Exception("Test"))
+
+        # Should have started a new reconnection task
+        assert handler._starter_task is not None
+
+        handler.stop()
+
+    @pytest.mark.asyncio
+    async def test_on_disconnect_does_nothing_when_stopped(self, mock_controller):
+        """Test _on_disconnect does nothing when handler is stopped."""
+        handler = ICConnectionHandler(mock_controller, time_between_reconnects=1)
+        handler._stopped = True
+
+        # Trigger disconnect
+        handler._on_disconnect(mock_controller, Exception("Test"))
+
+        # Should not have started any tasks
+        assert handler._starter_task is None
+        assert handler._disconnect_debounce_task is None

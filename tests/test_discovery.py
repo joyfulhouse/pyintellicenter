@@ -1,0 +1,369 @@
+"""Tests for pyintellicenter discovery module."""
+
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from pyintellicenter.discovery import (
+    DEFAULT_DISCOVERY_TIMEOUT,
+    ICDiscoveryListener,
+    ICUnit,
+    discover_intellicenter_units,
+    find_unit_by_host,
+    find_unit_by_name,
+)
+
+
+class TestICUnit:
+    """Test ICUnit dataclass."""
+
+    def test_init(self):
+        """Test ICUnit creation."""
+        unit = ICUnit(name="Pentair Pool", host="192.168.1.100", port=6681)
+
+        assert unit.name == "Pentair Pool"
+        assert unit.host == "192.168.1.100"
+        assert unit.port == 6681
+        assert unit.model is None
+
+    def test_init_with_model(self):
+        """Test ICUnit creation with model."""
+        unit = ICUnit(name="Pentair Pool", host="192.168.1.100", port=6681, model="IntelliCenter")
+
+        assert unit.model == "IntelliCenter"
+
+    def test_repr(self):
+        """Test ICUnit repr."""
+        unit = ICUnit(name="Pentair Pool", host="192.168.1.100", port=6681)
+        repr_str = repr(unit)
+
+        assert "ICUnit" in repr_str
+        assert "Pentair Pool" in repr_str
+        assert "192.168.1.100" in repr_str
+        assert "6681" in repr_str
+
+    def test_frozen(self):
+        """Test ICUnit is immutable."""
+        unit = ICUnit(name="Pentair Pool", host="192.168.1.100", port=6681)
+
+        with pytest.raises(AttributeError):
+            unit.name = "New Name"  # type: ignore[misc]
+
+
+class TestICDiscoveryListener:
+    """Test ICDiscoveryListener class."""
+
+    @pytest.fixture
+    def mock_aiozc(self):
+        """Create mock AsyncZeroconf."""
+        aiozc = MagicMock()
+        aiozc.async_get_service_info = AsyncMock(return_value=None)
+        return aiozc
+
+    @pytest.fixture
+    def listener(self, mock_aiozc):
+        """Create listener instance."""
+        return ICDiscoveryListener(mock_aiozc)
+
+    def test_init(self, listener):
+        """Test listener initialization."""
+        assert listener.units == []
+
+    def test_units_property(self, listener):
+        """Test units property returns list copy."""
+        units1 = listener.units
+        units2 = listener.units
+        assert units1 is not units2
+
+    def test_add_service_creates_task(self, listener):
+        """Test add_service creates asyncio task."""
+        mock_zc = MagicMock()
+        with patch("asyncio.create_task") as mock_create_task:
+            listener.add_service(mock_zc, "_http._tcp.local.", "Pentair._http._tcp.local.")
+            mock_create_task.assert_called_once()
+
+    def test_remove_service(self, listener):
+        """Test remove_service removes unit."""
+        # Manually add a unit
+        unit = ICUnit(name="Pentair", host="192.168.1.100", port=6681)
+        listener._units["Pentair._http._tcp.local."] = unit
+
+        mock_zc = MagicMock()
+        listener.remove_service(mock_zc, "_http._tcp.local.", "Pentair._http._tcp.local.")
+
+        assert "Pentair._http._tcp.local." not in listener._units
+
+    def test_remove_service_not_found(self, listener):
+        """Test remove_service with non-existent service."""
+        mock_zc = MagicMock()
+        # Should not raise
+        listener.remove_service(mock_zc, "_http._tcp.local.", "Unknown._http._tcp.local.")
+
+    def test_update_service_creates_task(self, listener):
+        """Test update_service creates asyncio task."""
+        mock_zc = MagicMock()
+        with patch("asyncio.create_task") as mock_create_task:
+            listener.update_service(mock_zc, "_http._tcp.local.", "Pentair._http._tcp.local.")
+            mock_create_task.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_resolve_service_no_info(self, listener, mock_aiozc):
+        """Test _resolve_service when service info is None."""
+        mock_aiozc.async_get_service_info.return_value = None
+
+        await listener._resolve_service("_http._tcp.local.", "Test._http._tcp.local.")
+
+        assert listener.units == []
+
+    @pytest.mark.asyncio
+    async def test_resolve_service_not_intellicenter(self, listener, mock_aiozc):
+        """Test _resolve_service when service is not IntelliCenter."""
+        mock_info = MagicMock()
+        mock_info.name = "RandomDevice"
+        mock_info.properties = {}
+        mock_aiozc.async_get_service_info.return_value = mock_info
+
+        await listener._resolve_service("_http._tcp.local.", "Random._http._tcp.local.")
+
+        assert listener.units == []
+
+    @pytest.mark.asyncio
+    async def test_resolve_service_no_addresses(self, listener, mock_aiozc):
+        """Test _resolve_service when no addresses available."""
+        mock_info = MagicMock()
+        mock_info.name = "Pentair IntelliCenter"
+        mock_info.properties = {}
+        mock_info.parsed_addresses.return_value = []
+        mock_aiozc.async_get_service_info.return_value = mock_info
+
+        await listener._resolve_service("_http._tcp.local.", "Pentair._http._tcp.local.")
+
+        assert listener.units == []
+
+    @pytest.mark.asyncio
+    async def test_resolve_service_success(self, listener, mock_aiozc):
+        """Test _resolve_service successful discovery."""
+        mock_info = MagicMock()
+        mock_info.name = "Pentair IntelliCenter"
+        mock_info.properties = {b"model": b"IntelliCenter"}
+        mock_info.parsed_addresses.return_value = ["192.168.1.100"]
+        mock_info.port = 6681
+        mock_aiozc.async_get_service_info.return_value = mock_info
+
+        await listener._resolve_service("_http._tcp.local.", "Pentair._http._tcp.local.")
+
+        units = listener.units
+        assert len(units) == 1
+        assert units[0].name == "Pentair IntelliCenter"
+        assert units[0].host == "192.168.1.100"
+        assert units[0].port == 6681
+        assert units[0].model == "IntelliCenter"
+
+    @pytest.mark.asyncio
+    async def test_resolve_service_default_port(self, listener, mock_aiozc):
+        """Test _resolve_service uses default port when not specified."""
+        mock_info = MagicMock()
+        mock_info.name = "Pentair Pool"
+        mock_info.properties = {}
+        mock_info.parsed_addresses.return_value = ["192.168.1.100"]
+        mock_info.port = None
+        mock_aiozc.async_get_service_info.return_value = mock_info
+
+        await listener._resolve_service("_http._tcp.local.", "Pentair._http._tcp.local.")
+
+        units = listener.units
+        assert len(units) == 1
+        assert units[0].port == 6681
+
+    @pytest.mark.asyncio
+    async def test_resolve_service_exception(self, listener, mock_aiozc):
+        """Test _resolve_service handles exceptions."""
+        mock_aiozc.async_get_service_info.side_effect = Exception("Test error")
+
+        # Should not raise
+        await listener._resolve_service("_http._tcp.local.", "Pentair._http._tcp.local.")
+
+        assert listener.units == []
+
+    def test_is_intellicenter_by_name_pentair(self, listener):
+        """Test _is_intellicenter with Pentair in name."""
+        mock_info = MagicMock()
+        mock_info.properties = {}
+
+        assert listener._is_intellicenter("Pentair Pool Controller", mock_info) is True
+
+    def test_is_intellicenter_by_name_intellicenter(self, listener):
+        """Test _is_intellicenter with IntelliCenter in name."""
+        mock_info = MagicMock()
+        mock_info.properties = {}
+
+        assert listener._is_intellicenter("My IntelliCenter", mock_info) is True
+
+    def test_is_intellicenter_by_property_key(self, listener):
+        """Test _is_intellicenter with Pentair in property key."""
+        mock_info = MagicMock()
+        mock_info.properties = {b"pentair_model": b"something"}
+
+        assert listener._is_intellicenter("Generic Device", mock_info) is True
+
+    def test_is_intellicenter_by_property_value(self, listener):
+        """Test _is_intellicenter with Pentair in property value."""
+        mock_info = MagicMock()
+        mock_info.properties = {b"manufacturer": b"Pentair Water"}
+
+        assert listener._is_intellicenter("Generic Device", mock_info) is True
+
+    def test_is_intellicenter_false(self, listener):
+        """Test _is_intellicenter returns False for non-IntelliCenter."""
+        mock_info = MagicMock()
+        mock_info.properties = {b"manufacturer": b"SomeOtherCompany"}
+
+        assert listener._is_intellicenter("Generic Device", mock_info) is False
+
+    def test_is_intellicenter_none_value_in_properties(self, listener):
+        """Test _is_intellicenter handles None values in properties."""
+        mock_info = MagicMock()
+        mock_info.properties = {b"key": None}
+
+        # Should not raise
+        result = listener._is_intellicenter("Generic Device", mock_info)
+        assert result is False
+
+
+class TestDiscoverIntellicenterUnits:
+    """Test discover_intellicenter_units function."""
+
+    @pytest.mark.asyncio
+    async def test_discover_success(self):
+        """Test successful discovery."""
+        mock_browser = MagicMock()
+        mock_aiozc = MagicMock()
+        mock_aiozc.zeroconf = MagicMock()
+        mock_aiozc.async_close = AsyncMock()
+
+        with (
+            patch("zeroconf.asyncio.AsyncZeroconf", return_value=mock_aiozc),
+            patch("zeroconf.ServiceBrowser", return_value=mock_browser),
+            patch("asyncio.sleep", new_callable=AsyncMock),
+        ):
+            units = await discover_intellicenter_units(discovery_timeout=0.1)
+
+            assert isinstance(units, list)
+
+    @pytest.mark.asyncio
+    async def test_discover_closes_zeroconf(self):
+        """Test discovery closes AsyncZeroconf on completion."""
+        mock_browser = MagicMock()
+        mock_aiozc = MagicMock()
+        mock_aiozc.zeroconf = MagicMock()
+        mock_aiozc.async_close = AsyncMock()
+
+        with (
+            patch("zeroconf.asyncio.AsyncZeroconf", return_value=mock_aiozc),
+            patch("zeroconf.ServiceBrowser", return_value=mock_browser),
+            patch("asyncio.sleep", new_callable=AsyncMock),
+        ):
+            await discover_intellicenter_units(discovery_timeout=0.1)
+
+            mock_aiozc.async_close.assert_called_once()
+
+
+class TestFindUnitByName:
+    """Test find_unit_by_name function."""
+
+    @pytest.mark.asyncio
+    async def test_find_by_name_found(self):
+        """Test finding unit by name."""
+        mock_units = [
+            ICUnit(name="Pentair Pool", host="192.168.1.100", port=6681),
+            ICUnit(name="Other Device", host="192.168.1.101", port=80),
+        ]
+
+        with patch(
+            "pyintellicenter.discovery.discover_intellicenter_units",
+            new_callable=AsyncMock,
+            return_value=mock_units,
+        ):
+            unit = await find_unit_by_name("Pentair")
+
+            assert unit is not None
+            assert unit.name == "Pentair Pool"
+
+    @pytest.mark.asyncio
+    async def test_find_by_name_not_found(self):
+        """Test finding unit by name when not found."""
+        mock_units = [
+            ICUnit(name="Other Device", host="192.168.1.101", port=80),
+        ]
+
+        with patch(
+            "pyintellicenter.discovery.discover_intellicenter_units",
+            new_callable=AsyncMock,
+            return_value=mock_units,
+        ):
+            unit = await find_unit_by_name("Pentair")
+
+            assert unit is None
+
+    @pytest.mark.asyncio
+    async def test_find_by_name_case_insensitive(self):
+        """Test find_unit_by_name is case insensitive."""
+        mock_units = [
+            ICUnit(name="PENTAIR Pool", host="192.168.1.100", port=6681),
+        ]
+
+        with patch(
+            "pyintellicenter.discovery.discover_intellicenter_units",
+            new_callable=AsyncMock,
+            return_value=mock_units,
+        ):
+            unit = await find_unit_by_name("pentair")
+
+            assert unit is not None
+            assert unit.name == "PENTAIR Pool"
+
+
+class TestFindUnitByHost:
+    """Test find_unit_by_host function."""
+
+    @pytest.mark.asyncio
+    async def test_find_by_host_found(self):
+        """Test finding unit by host."""
+        mock_units = [
+            ICUnit(name="Pentair Pool", host="192.168.1.100", port=6681),
+            ICUnit(name="Other Device", host="192.168.1.101", port=80),
+        ]
+
+        with patch(
+            "pyintellicenter.discovery.discover_intellicenter_units",
+            new_callable=AsyncMock,
+            return_value=mock_units,
+        ):
+            unit = await find_unit_by_host("192.168.1.100")
+
+            assert unit is not None
+            assert unit.host == "192.168.1.100"
+
+    @pytest.mark.asyncio
+    async def test_find_by_host_not_found(self):
+        """Test finding unit by host when not found."""
+        mock_units = [
+            ICUnit(name="Other Device", host="192.168.1.101", port=80),
+        ]
+
+        with patch(
+            "pyintellicenter.discovery.discover_intellicenter_units",
+            new_callable=AsyncMock,
+            return_value=mock_units,
+        ):
+            unit = await find_unit_by_host("192.168.1.100")
+
+            assert unit is None
+
+
+class TestDefaultTimeout:
+    """Test default discovery timeout."""
+
+    def test_default_timeout_value(self):
+        """Test default timeout is reasonable."""
+        assert DEFAULT_DISCOVERY_TIMEOUT == 10.0

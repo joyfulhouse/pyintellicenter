@@ -111,5 +111,5 @@ def pool_model_data() -> list[dict[str, Any]]:
 def pool_model(pool_model_data: list[dict[str, Any]]) -> PoolModel:
     """Create a PoolModel populated with test data."""
     model = PoolModel()
-    model.addObjects(pool_model_data)
+    model.add_objects(pool_model_data)
     return model

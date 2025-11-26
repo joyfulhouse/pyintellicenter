@@ -1,34 +1,23 @@
-"""pyintellicenter - Python library for Pentair IntelliCenter pool control systems.
+"""Attribute definitions for Pentair IntelliCenter.
 
-This library provides the core protocol and model classes for communicating
-with Pentair IntelliCenter pool control systems over local network.
-
-Example usage:
-    ```python
-    import asyncio
-    from pyintellicenter import ICModelController, PoolModel, ICConnectionHandler
-
-    async def main():
-        model = PoolModel()
-        controller = ICModelController("192.168.1.100", model)
-        handler = ICConnectionHandler(controller)
-        await handler.start()
-
-        # Access pool equipment
-        for obj in model:
-            print(f"{obj.sname}: {obj.status}")
-
-    asyncio.run(main())
-    ```
+This package contains all attribute definitions organized by type:
+- constants: Type constants and attribute name constants
+- body: Body of water (pool/spa) attributes
+- circuit: Circuit and circuit group attributes
+- equipment: Pump, heater, chemistry, and sensor attributes
+- schedule: Schedule attributes
+- system: System, panel, module, permit, and clock attributes
+- misc: Remote, valve, external instrument, and other attributes
 """
 
-# Re-export all public names from submodules
-from .attributes import (
+from .body import BODY_ATTRIBUTES
+from .circuit import CIRCGRP_ATTRIBUTES, CIRCUIT_ATTRIBUTES
+from .constants import (
     # Attribute name constants
     ACT_ATTR,
     AVAIL_ATTR,
     BODY_ATTR,
-    # Type constants
+    # Object type constants
     BODY_TYPE,
     BOOST_ATTR,
     CHEM_TYPE,
@@ -105,6 +94,7 @@ from .attributes import (
     TIMOUT_ATTR,
     UPDATE_ATTR,
     USE_ATTR,
+    USER_PRIVILEGES,
     VACFLO_ATTR,
     VACTIM_ATTR,
     VALVE_TYPE,
@@ -113,75 +103,55 @@ from .attributes import (
     # Enums
     HeaterType,
 )
-from .connection import ICConnection
-from .controller import (
-    ICBaseController,
-    ICConnectionHandler,
-    ICConnectionHandlerCallbacks,
-    ICConnectionMetrics,
-    ICModelController,
-    ICSystemInfo,
+from .equipment import (
+    CHEM_ATTRIBUTES,
+    HEATER_ATTRIBUTES,
+    PMPCIRC_ATTRIBUTES,
+    PUMP_ATTRIBUTES,
+    SENSE_ATTRIBUTES,
 )
-from .exceptions import (
-    ICCommandError,
-    ICConnectionError,
-    ICError,
-    ICResponseError,
-    ICTimeoutError,
+from .misc import (
+    EXTINSTR_ATTRIBUTES,
+    FEATR_ATTRIBUTES,
+    PRESS_ATTRIBUTES,
+    REMBTN_ATTRIBUTES,
+    REMOTE_ATTRIBUTES,
+    VALVE_ATTRIBUTES,
 )
-from .model import PoolModel, PoolObject
-from .types import (
-    NotificationMessage,
-    ObjectEntry,
-    ObjectListRequest,
-    ObjectParams,
-    ResponseMessage,
+from .schedule import SCHED_ATTRIBUTES
+from .system import (
+    MODULE_ATTRIBUTES,
+    PANEL_ATTRIBUTES,
+    PERMIT_ATTRIBUTES,
+    SYSTEM_ATTRIBUTES,
+    SYSTIM_ATTRIBUTES,
 )
 
-# Discovery module (requires optional 'zeroconf' dependency)
-# Import conditionally to avoid ImportError when zeroconf is not installed
-try:
-    from .discovery import (  # noqa: F401
-        DEFAULT_DISCOVERY_TIMEOUT,
-        ICUnit,
-        discover_intellicenter_units,
-        find_unit_by_host,
-        find_unit_by_name,
-    )
-
-    _DISCOVERY_AVAILABLE = True
-except ImportError:
-    _DISCOVERY_AVAILABLE = False
-
-__version__ = "0.0.1"
+# Master mapping of object types to their tracked attributes
+ALL_ATTRIBUTES_BY_TYPE = {
+    BODY_TYPE: BODY_ATTRIBUTES,
+    CHEM_TYPE: CHEM_ATTRIBUTES,
+    CIRCGRP_TYPE: CIRCGRP_ATTRIBUTES,
+    CIRCUIT_TYPE: CIRCUIT_ATTRIBUTES,
+    EXTINSTR_TYPE: EXTINSTR_ATTRIBUTES,
+    FEATR_TYPE: FEATR_ATTRIBUTES,
+    HEATER_TYPE: HEATER_ATTRIBUTES,
+    MODULE_TYPE: MODULE_ATTRIBUTES,
+    PANEL_TYPE: PANEL_ATTRIBUTES,
+    PERMIT_TYPE: PERMIT_ATTRIBUTES,
+    PMPCIRC_TYPE: PMPCIRC_ATTRIBUTES,
+    PRESS_TYPE: PRESS_ATTRIBUTES,
+    PUMP_TYPE: PUMP_ATTRIBUTES,
+    REMBTN_TYPE: REMBTN_ATTRIBUTES,
+    REMOTE_TYPE: REMOTE_ATTRIBUTES,
+    SCHED_TYPE: SCHED_ATTRIBUTES,
+    SENSE_TYPE: SENSE_ATTRIBUTES,
+    SYSTEM_TYPE: SYSTEM_ATTRIBUTES,
+    SYSTIM_TYPE: SYSTIM_ATTRIBUTES,
+    VALVE_TYPE: VALVE_ATTRIBUTES,
+}
 
 __all__ = [
-    # Version
-    "__version__",
-    # Exceptions
-    "ICError",
-    "ICConnectionError",
-    "ICResponseError",
-    "ICCommandError",
-    "ICTimeoutError",
-    # Connection
-    "ICConnection",
-    # Controller classes
-    "ICBaseController",
-    "ICModelController",
-    "ICConnectionHandler",
-    "ICConnectionHandlerCallbacks",
-    "ICConnectionMetrics",
-    "ICSystemInfo",
-    # Model classes
-    "PoolModel",
-    "PoolObject",
-    # Type definitions
-    "NotificationMessage",
-    "ObjectEntry",
-    "ObjectListRequest",
-    "ObjectParams",
-    "ResponseMessage",
     # Enums
     "HeaterType",
     # Status constants
@@ -191,11 +161,13 @@ __all__ = [
     "PUMP_STATUS_OFF",
     "LIGHT_SUBTYPES",
     "COLOR_EFFECT_SUBTYPES",
-    # Object types
+    # Special values
+    "NULL_OBJNAM",
+    # Object type constants
     "BODY_TYPE",
     "CHEM_TYPE",
-    "CIRCUIT_TYPE",
     "CIRCGRP_TYPE",
+    "CIRCUIT_TYPE",
     "EXTINSTR_TYPE",
     "FEATR_TYPE",
     "HEATER_TYPE",
@@ -212,9 +184,7 @@ __all__ = [
     "SYSTEM_TYPE",
     "SYSTIM_TYPE",
     "VALVE_TYPE",
-    # Special values
-    "NULL_OBJNAM",
-    # Attributes
+    # Attribute name constants
     "ACT_ATTR",
     "AVAIL_ATTR",
     "BODY_ATTR",
@@ -266,20 +236,31 @@ __all__ = [
     "TIMOUT_ATTR",
     "UPDATE_ATTR",
     "USE_ATTR",
+    "USER_PRIVILEGES",
     "VACFLO_ATTR",
     "VACTIM_ATTR",
     "VER_ATTR",
     "VOL_ATTR",
+    # Attribute sets
+    "ALL_ATTRIBUTES_BY_TYPE",
+    "BODY_ATTRIBUTES",
+    "CHEM_ATTRIBUTES",
+    "CIRCGRP_ATTRIBUTES",
+    "CIRCUIT_ATTRIBUTES",
+    "EXTINSTR_ATTRIBUTES",
+    "FEATR_ATTRIBUTES",
+    "HEATER_ATTRIBUTES",
+    "MODULE_ATTRIBUTES",
+    "PANEL_ATTRIBUTES",
+    "PERMIT_ATTRIBUTES",
+    "PMPCIRC_ATTRIBUTES",
+    "PRESS_ATTRIBUTES",
+    "PUMP_ATTRIBUTES",
+    "REMBTN_ATTRIBUTES",
+    "REMOTE_ATTRIBUTES",
+    "SCHED_ATTRIBUTES",
+    "SENSE_ATTRIBUTES",
+    "SYSTEM_ATTRIBUTES",
+    "SYSTIM_ATTRIBUTES",
+    "VALVE_ATTRIBUTES",
 ]
-
-# Add discovery exports if available
-if _DISCOVERY_AVAILABLE:
-    __all__.extend(
-        [
-            "ICUnit",
-            "discover_intellicenter_units",
-            "find_unit_by_name",
-            "find_unit_by_host",
-            "DEFAULT_DISCOVERY_TIMEOUT",
-        ]
-    )

@@ -1,5 +1,6 @@
 """Tests for PoolModel and PoolObject classes."""
 
+from collections.abc import KeysView
 from typing import Any
 
 from pyintellicenter import (
@@ -40,17 +41,17 @@ class TestPoolObject:
         assert obj["USE"] == "WHITER"
 
     def test_pool_object_is_a_light(self, pool_object_light: PoolObject):
-        """Test isALight property for light subtypes."""
-        assert pool_object_light.isALight is True
-        assert pool_object_light.supportColorEffects is True
+        """Test is_a_light property for light subtypes."""
+        assert pool_object_light.is_a_light is True
+        assert pool_object_light.supports_color_effects is True
 
     def test_pool_object_not_a_light(self, pool_object_switch: PoolObject):
-        """Test isALight property for non-light objects."""
-        assert pool_object_switch.isALight is False
-        assert pool_object_switch.supportColorEffects is False
+        """Test is_a_light property for non-light objects."""
+        assert pool_object_switch.is_a_light is False
+        assert pool_object_switch.supports_color_effects is False
 
     def test_pool_object_light_show(self):
-        """Test isALightShow property."""
+        """Test is_a_light_show property."""
         show = PoolObject(
             "SHOW1",
             {
@@ -60,14 +61,14 @@ class TestPoolObject:
                 STATUS_ATTR: "OFF",
             },
         )
-        assert show.isALightShow is True
+        assert show.is_a_light_show is True
 
     def test_pool_object_is_featured(self, pool_object_switch: PoolObject):
-        """Test isFeatured property."""
-        assert pool_object_switch.isFeatured is True
+        """Test is_featured property."""
+        assert pool_object_switch.is_featured is True
 
     def test_pool_object_not_featured(self):
-        """Test isFeatured property for non-featured circuit."""
+        """Test is_featured property for non-featured circuit."""
         obj = PoolObject(
             "CIRC02",
             {
@@ -78,17 +79,17 @@ class TestPoolObject:
                 FEATR_ATTR: "OFF",
             },
         )
-        assert obj.isFeatured is False
+        assert obj.is_featured is False
 
     def test_pool_object_on_off_status_circuit(self, pool_object_light: PoolObject):
-        """Test onStatus and offStatus for circuit objects."""
-        assert pool_object_light.onStatus == "ON"
-        assert pool_object_light.offStatus == "OFF"
+        """Test on_status and off_status for circuit objects."""
+        assert pool_object_light.on_status == "ON"
+        assert pool_object_light.off_status == "OFF"
 
     def test_pool_object_on_off_status_pump(self, pool_object_pump: PoolObject):
-        """Test onStatus and offStatus for pump objects."""
-        assert pool_object_pump.onStatus == "10"
-        assert pool_object_pump.offStatus == "4"
+        """Test on_status and off_status for pump objects."""
+        assert pool_object_pump.on_status == "10"
+        assert pool_object_pump.off_status == "4"
 
     def test_pool_object_update_existing_attribute(self, pool_object_light: PoolObject):
         """Test updating an existing attribute."""
@@ -127,12 +128,12 @@ class TestPoolObject:
         assert pool_object_light["USE"] == "PARTY"
         assert pool_object_light["NEW_FIELD"] == "test"
 
-    def test_pool_object_attributes_property(self, pool_object_light: PoolObject):
-        """Test attributes property returns list of attribute keys."""
-        attrs = pool_object_light.attributes
-        assert isinstance(attrs, list)
-        assert SNAME_ATTR in attrs
-        assert STATUS_ATTR in attrs
+    def test_pool_object_attribute_keys_property(self, pool_object_light: PoolObject):
+        """Test attribute_keys property returns keys view."""
+        keys = pool_object_light.attribute_keys
+        assert isinstance(keys, KeysView)
+        assert SNAME_ATTR in keys
+        assert STATUS_ATTR in keys
 
     def test_pool_object_properties_property(self, pool_object_light: PoolObject):
         """Test properties property returns dict."""
@@ -148,6 +149,13 @@ class TestPoolObject:
         assert CIRCUIT_TYPE in str_repr
         assert "INTELLI" in str_repr
 
+    def test_pool_object_repr_representation(self, pool_object_light: PoolObject):
+        """Test repr representation for debugging."""
+        repr_str = repr(pool_object_light)
+        assert "PoolObject" in repr_str
+        assert "LIGHT1" in repr_str
+        assert "CIRCUIT" in repr_str
+
 
 class TestPoolModel:
     """Tests for PoolModel class."""
@@ -155,13 +163,13 @@ class TestPoolModel:
     def test_create_empty_pool_model(self):
         """Test creating an empty PoolModel."""
         model = PoolModel()
-        assert model.numObjects == 0
-        assert len(list(model.objectList)) == 0
+        assert model.num_objects == 0
+        assert len(list(model.object_values)) == 0
 
     def test_pool_model_add_object(self):
         """Test adding a single object to the model."""
         model = PoolModel()
-        obj = model.addObject(
+        obj = model.add_object(
             "LIGHT1",
             {
                 OBJTYP_ATTR: CIRCUIT_TYPE,
@@ -172,15 +180,15 @@ class TestPoolModel:
         )
 
         assert obj is not None
-        assert model.numObjects == 1
+        assert model.num_objects == 1
         assert model["LIGHT1"] == obj
 
     def test_pool_model_add_objects_batch(self, pool_model_data: list[dict[str, Any]]):
         """Test adding multiple objects at once."""
         model = PoolModel()
-        model.addObjects(pool_model_data)
+        model.add_objects(pool_model_data)
 
-        assert model.numObjects == len(pool_model_data)
+        assert model.num_objects == len(pool_model_data)
 
     def test_pool_model_getitem(self, pool_model: PoolModel):
         """Test accessing objects by objnam using bracket notation."""
@@ -191,13 +199,13 @@ class TestPoolModel:
 
     def test_pool_model_get_by_type(self, pool_model: PoolModel):
         """Test filtering objects by type."""
-        bodies = pool_model.getByType(BODY_TYPE)
+        bodies = pool_model.get_by_type(BODY_TYPE)
         assert len(bodies) == 2
         assert all(obj.objtype == BODY_TYPE for obj in bodies)
 
     def test_pool_model_get_by_type_and_subtype(self, pool_model: PoolModel):
         """Test filtering objects by type and subtype."""
-        spa = pool_model.getByType(BODY_TYPE, "SPA")
+        spa = pool_model.get_by_type(BODY_TYPE, "SPA")
         assert len(spa) == 1
         assert spa[0].objnam == "SPA01"
         assert spa[0].subtype == "SPA"
@@ -205,7 +213,7 @@ class TestPoolModel:
     def test_pool_model_get_children(self, pool_model: PoolModel):
         """Test getting children of an object."""
         # Add a parent-child relationship
-        pool_model.addObject(
+        pool_model.add_object(
             "CHILD1",
             {
                 OBJTYP_ATTR: CIRCUIT_TYPE,
@@ -216,7 +224,7 @@ class TestPoolModel:
         )
 
         pool_body = pool_model["POOL1"]
-        children = pool_model.getChildren(pool_body)
+        children = pool_model.get_children(pool_body)
 
         assert len(children) >= 1
         assert any(c.objnam == "CHILD1" for c in children)
@@ -228,12 +236,12 @@ class TestPoolModel:
             assert isinstance(obj, PoolObject)
             count += 1
 
-        assert count == pool_model.numObjects
+        assert count == pool_model.num_objects
 
-    def test_pool_model_object_list(self, pool_model: PoolModel):
-        """Test objectList property."""
-        objects = list(pool_model.objectList)
-        assert len(objects) == pool_model.numObjects
+    def test_pool_model_object_values(self, pool_model: PoolModel):
+        """Test object_values property."""
+        objects = list(pool_model.object_values)
+        assert len(objects) == pool_model.num_objects
         assert all(isinstance(obj, PoolObject) for obj in objects)
 
     def test_pool_model_objects_dict(self, pool_model: PoolModel):
@@ -256,7 +264,7 @@ class TestPoolModel:
             },
         ]
 
-        changed = pool_model.processUpdates(updates)
+        changed = pool_model.process_updates(updates)
 
         assert "LIGHT1" in changed
         assert changed["LIGHT1"][STATUS_ATTR] == "ON"
@@ -276,7 +284,7 @@ class TestPoolModel:
             },
         ]
 
-        changed = pool_model.processUpdates(updates)
+        changed = pool_model.process_updates(updates)
 
         assert changed == {}
 
@@ -289,13 +297,13 @@ class TestPoolModel:
             },
         ]
 
-        changed = pool_model.processUpdates(updates)
+        changed = pool_model.process_updates(updates)
 
         assert changed == {}
 
     def test_pool_model_attributes_to_track(self, pool_model: PoolModel):
         """Test generating attribute tracking queries."""
-        queries = pool_model.attributesToTrack()
+        queries = pool_model.attributes_to_track()
 
         assert isinstance(queries, list)
         assert len(queries) > 0
@@ -308,10 +316,10 @@ class TestPoolModel:
 
     def test_pool_model_add_existing_object_updates(self, pool_model: PoolModel, pool_model_data):
         """Test adding an object that already exists updates it."""
-        original_count = pool_model.numObjects
+        original_count = pool_model.num_objects
 
         # Add same object with different attributes
-        obj = pool_model.addObject(
+        obj = pool_model.add_object(
             "LIGHT1",
             {
                 OBJTYP_ATTR: CIRCUIT_TYPE,
@@ -324,15 +332,15 @@ class TestPoolModel:
         # Should return existing object updated
         assert obj.objnam == "LIGHT1"
         assert obj.sname == "Updated Light Name"
-        assert pool_model.numObjects == original_count  # Count unchanged
+        assert pool_model.num_objects == original_count  # Count unchanged
 
     def test_pool_model_ignore_unknown_types(self):
         """Test that objects with untracked types are not added."""
         # Create model with limited attribute map
-        model = PoolModel(attributeMap={CIRCUIT_TYPE: {STATUS_ATTR}})
+        model = PoolModel(attribute_map={CIRCUIT_TYPE: {STATUS_ATTR}})
 
         # Try to add a PUMP (not in attribute map)
-        obj = model.addObject(
+        obj = model.add_object(
             "PUMP1",
             {
                 OBJTYP_ATTR: PUMP_TYPE,
@@ -343,4 +351,10 @@ class TestPoolModel:
         )
 
         assert obj is None
-        assert model.numObjects == 0
+        assert model.num_objects == 0
+
+    def test_pool_model_repr(self, pool_model: PoolModel):
+        """Test repr representation for debugging."""
+        repr_str = repr(pool_model)
+        assert "PoolModel" in repr_str
+        assert "num_objects" in repr_str
