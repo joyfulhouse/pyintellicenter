@@ -112,9 +112,7 @@ class TestICProtocolConnection:
 class TestICProtocolDataReceived:
     """Test ICProtocol data receiving."""
 
-    async def test_data_received_complete_message(
-        self, mock_controller, mock_transport
-    ):
+    async def test_data_received_complete_message(self, mock_controller, mock_transport):
         """Test receiving complete message."""
         protocol = ICProtocol(mock_controller)
         protocol.connection_made(mock_transport)
@@ -134,9 +132,7 @@ class TestICProtocolDataReceived:
         protocol.connection_lost(None)
         await asyncio.sleep(0.1)
 
-    async def test_data_received_multiple_messages(
-        self, mock_controller, mock_transport
-    ):
+    async def test_data_received_multiple_messages(self, mock_controller, mock_transport):
         """Test receiving multiple messages in one chunk."""
         protocol = ICProtocol(mock_controller)
         protocol.connection_made(mock_transport)
@@ -213,9 +209,7 @@ class TestICProtocolHeartbeat:
         protocol.connection_lost(None)
         await asyncio.sleep(0.1)
 
-    async def test_heartbeat_detects_idle_timeout(
-        self, mock_controller, mock_transport
-    ):
+    async def test_heartbeat_detects_idle_timeout(self, mock_controller, mock_transport):
         """Test heartbeat detects idle connection."""
         protocol = ICProtocol(mock_controller)
         protocol.connection_made(mock_transport)
@@ -234,9 +228,7 @@ class TestICProtocolHeartbeat:
         # Cleanup
         await asyncio.sleep(0.1)
 
-    async def test_heartbeat_detects_flow_control_deadlock(
-        self, mock_controller, mock_transport
-    ):
+    async def test_heartbeat_detects_flow_control_deadlock(self, mock_controller, mock_transport):
         """Test heartbeat detects and resets flow control deadlock."""
         protocol = ICProtocol(mock_controller)
         protocol.connection_made(mock_transport)
@@ -260,9 +252,7 @@ class TestICProtocolHeartbeat:
         protocol.connection_lost(None)
         await asyncio.sleep(0.1)
 
-    async def test_heartbeat_cancelled_on_disconnect(
-        self, mock_controller, mock_transport
-    ):
+    async def test_heartbeat_cancelled_on_disconnect(self, mock_controller, mock_transport):
         """Test heartbeat task is cancelled on disconnect."""
         protocol = ICProtocol(mock_controller)
         protocol.connection_made(mock_transport)
@@ -280,9 +270,7 @@ class TestICProtocolHeartbeat:
 class TestICProtocolKeepalive:
     """Test ICProtocol keepalive response tracking."""
 
-    async def test_keepalive_tracking_initialization(
-        self, mock_controller, mock_transport
-    ):
+    async def test_keepalive_tracking_initialization(self, mock_controller, mock_transport):
         """Test keepalive tracking variables are initialized."""
         protocol = ICProtocol(mock_controller)
 
@@ -295,9 +283,7 @@ class TestICProtocolKeepalive:
         protocol.connection_lost(None)
         await asyncio.sleep(0.1)
 
-    async def test_keepalive_response_clears_pending_flag(
-        self, mock_controller, mock_transport
-    ):
+    async def test_keepalive_response_clears_pending_flag(self, mock_controller, mock_transport):
         """Test that receiving keepalive response clears pending flag."""
         protocol = ICProtocol(mock_controller)
         protocol.connection_made(mock_transport)
@@ -327,9 +313,7 @@ class TestICProtocolKeepalive:
         protocol.connection_lost(None)
         await asyncio.sleep(0.1)
 
-    async def test_keepalive_non_matching_id_not_cleared(
-        self, mock_controller, mock_transport
-    ):
+    async def test_keepalive_non_matching_id_not_cleared(self, mock_controller, mock_transport):
         """Test that non-matching message ID doesn't clear keepalive."""
         protocol = ICProtocol(mock_controller)
         protocol.connection_made(mock_transport)
@@ -359,9 +343,7 @@ class TestICProtocolKeepalive:
         protocol.connection_lost(None)
         await asyncio.sleep(0.1)
 
-    async def test_keepalive_error_response_not_cleared(
-        self, mock_controller, mock_transport
-    ):
+    async def test_keepalive_error_response_not_cleared(self, mock_controller, mock_transport):
         """Test that error response doesn't clear keepalive pending flag."""
         protocol = ICProtocol(mock_controller)
         protocol.connection_made(mock_transport)
@@ -398,9 +380,7 @@ class TestICProtocolKeepalive:
 class TestICProtocolFlowControl:
     """Test ICProtocol flow control."""
 
-    async def test_response_received_decrements_pending(
-        self, mock_controller, mock_transport
-    ):
+    async def test_response_received_decrements_pending(self, mock_controller, mock_transport):
         """Test responseReceived decrements pending count."""
         protocol = ICProtocol(mock_controller)
         protocol.connection_made(mock_transport)

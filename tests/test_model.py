@@ -112,9 +112,7 @@ class TestPoolObject:
 
         assert changed == {}
 
-    def test_pool_object_update_multiple_attributes(
-        self, pool_object_light: PoolObject
-    ):
+    def test_pool_object_update_multiple_attributes(self, pool_object_light: PoolObject):
         """Test updating multiple attributes at once."""
         changed = pool_object_light.update(
             {
@@ -308,9 +306,7 @@ class TestPoolModel:
             assert "keys" in query
             assert isinstance(query["keys"], list)
 
-    def test_pool_model_add_existing_object_updates(
-        self, pool_model: PoolModel, pool_model_data
-    ):
+    def test_pool_model_add_existing_object_updates(self, pool_model: PoolModel, pool_model_data):
         """Test adding an object that already exists updates it."""
         original_count = pool_model.numObjects
 

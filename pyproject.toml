@@ -85,6 +85,10 @@ ignore = [
     "E501",   # line too long (handled by formatter)
 ]
 
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ARG"]  # Unused arguments OK in tests (fixtures)
+"src/pyintellicenter/controller.py" = ["ARG002"]  # Callback signatures have required unused args
+
 [tool.ruff.lint.isort]
 known-first-party = ["pyintellicenter"]
 

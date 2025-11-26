@@ -116,11 +116,7 @@ class PoolObject:
     def __str__(self) -> str:
         """Return a friendly string representation."""
         result = f"{self.objnam} "
-        result += (
-            f"({self.objtype}/{self.subtype}):"
-            if self.subtype
-            else f"({self.objtype}):"
-        )
+        result += f"({self.objtype}/{self.subtype}):" if self.subtype else f"({self.objtype}):"
         for key in sorted(set(self._properties.keys())):
             value = self._properties[key]
             if isinstance(value, list):
@@ -189,9 +185,7 @@ class PoolModel:
         """
         self._objects: dict[str, PoolObject] = {}
         self._systemObject: PoolObject | None = None
-        self._attributeMap = (
-            attributeMap if attributeMap is not None else ALL_ATTRIBUTES_BY_TYPE
-        )
+        self._attributeMap = attributeMap if attributeMap is not None else ALL_ATTRIBUTES_BY_TYPE
 
     @property
     def objectList(self) -> list[PoolObject]:
@@ -302,9 +296,7 @@ class PoolModel:
                 query.append({"objnam": pool_obj.objnam, "keys": list(attributes)})
         return query
 
-    def processUpdates(
-        self, updates: list[dict[str, Any]]
-    ) -> dict[str, dict[str, Any]]:
+    def processUpdates(self, updates: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         """Update the state of the objects in the model.
 
         Args:

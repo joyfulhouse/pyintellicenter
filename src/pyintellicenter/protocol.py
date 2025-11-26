@@ -36,7 +36,9 @@ _LOGGER = logging.getLogger(__name__)
 HEARTBEAT_INTERVAL = 30  # Check connection health every 30 seconds
 FLOW_CONTROL_TIMEOUT = 45  # Reset flow control if stuck for 45 seconds
 KEEPALIVE_INTERVAL = 90  # Send keepalive query every 90 seconds
-CONNECTION_IDLE_TIMEOUT = 300  # Close connection if no data received for 5 minutes (should never happen with keepalives)
+CONNECTION_IDLE_TIMEOUT = (
+    300  # Close connection if no data received for 5 minutes (should never happen with keepalives)
+)
 MAX_MISSED_KEEPALIVES = 3  # Close connection after this many missed keepalive responses
 
 
@@ -53,9 +55,7 @@ class ICProtocol(asyncio.Protocol):
     - relying on IntelliCenter's NotifyList push updates to detect active connections
     """
 
-    def __init__(
-        self, controller: "BaseController", keepalive_interval: int | None = None
-    ) -> None:
+    def __init__(self, controller: "BaseController", keepalive_interval: int | None = None) -> None:
         """Initialize a protocol for a IntelliCenter system.
 
         Args:
@@ -120,7 +120,7 @@ class ICProtocol(asyncio.Protocol):
 
         # Cast BaseTransport to Transport - we know it's a TCP transport
         # since we're using create_connection() with TCP protocol
-        self._transport = cast(asyncio.Transport, transport)
+        self._transport = cast("asyncio.Transport", transport)
         self._msgID = 1
         current_time = asyncio.get_event_loop().time()
         self._last_flow_control_activity = current_time
@@ -260,9 +260,7 @@ class ICProtocol(asyncio.Protocol):
         Args:
             request: The request string to send (will be encoded to bytes).
         """
-        _LOGGER.debug(
-            f"PROTOCOL: writing to transport: (size {len(request)}): {request}"
-        )
+        _LOGGER.debug(f"PROTOCOL: writing to transport: (size {len(request)}): {request}")
         if self._transport:
             self._transport.write(request.encode())
 
@@ -400,9 +398,7 @@ class ICProtocol(asyncio.Protocol):
             _LOGGER.error(f"PROTOCOL: invalid JSON received: {message[:100]} - {err}")
         except KeyError as err:
             # Missing required field - log and continue (recoverable error)
-            _LOGGER.error(
-                f"PROTOCOL: message missing required field {err}: {message[:100]}"
-            )
+            _LOGGER.error(f"PROTOCOL: message missing required field {err}: {message[:100]}")
         except Exception as err:  # noqa: BLE001 - Protocol callback must not crash
             # Unexpected error - close connection to trigger reconnection
             _LOGGER.error(
@@ -478,9 +474,7 @@ class ICProtocol(asyncio.Protocol):
                                 "GetParamList",
                                 {
                                     "condition": "OBJTYP=SYSTEM",
-                                    "objectList": [
-                                        {"objnam": "INCR", "keys": ["MODE"]}
-                                    ],
+                                    "objectList": [{"objnam": "INCR", "keys": ["MODE"]}],
                                 },
                             )
                             self._pending_keepalive_id = keepalive_id
@@ -491,13 +485,8 @@ class ICProtocol(asyncio.Protocol):
 
                 # Check for flow control deadlock
                 if self._last_flow_control_activity:
-                    time_since_activity = (
-                        current_time - self._last_flow_control_activity
-                    )
-                    if (
-                        self._out_pending > 0
-                        and time_since_activity > FLOW_CONTROL_TIMEOUT
-                    ):
+                    time_since_activity = current_time - self._last_flow_control_activity
+                    if self._out_pending > 0 and time_since_activity > FLOW_CONTROL_TIMEOUT:
                         # Count dropped messages for logging
                         dropped_count = 0
                         while not self._out_queue.empty():

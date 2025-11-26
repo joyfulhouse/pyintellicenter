@@ -22,12 +22,11 @@ with the Pentair IntelliCenter system:
 from __future__ import annotations
 
 import asyncio
-from asyncio import AbstractEventLoop, Future, Transport
-from collections.abc import Callable
-from dataclasses import dataclass, field
-from hashlib import blake2b
 import logging
 import time
+from asyncio import AbstractEventLoop, Future, Transport
+from dataclasses import dataclass, field
+from hashlib import blake2b
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from .attributes import (
@@ -40,11 +39,12 @@ from .attributes import (
     SYSTEM_TYPE,
     VER_ATTR,
 )
-from .model import PoolModel
 from .protocol import ICProtocol
 
 if TYPE_CHECKING:
-    pass
+    from collections.abc import Callable
+
+    from .model import PoolModel
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -289,9 +289,9 @@ class BaseController:
         self._protocol: ICProtocol | None = None
         self._systemInfo: SystemInfo | None = None
 
-        self._disconnected_callback: (
-            Callable[[BaseController, Exception | None], None] | None
-        ) = None
+        self._disconnected_callback: Callable[[BaseController, Exception | None], None] | None = (
+            None
+        )
 
         # Track pending requests with creation time for timeout handling
         self._requests: dict[str, PendingRequest] = {}
@@ -370,9 +370,7 @@ class BaseController:
             },
         )
         if future is None:
-            raise RuntimeError(
-                "sendCmd returned None when waitForResponse=True - internal error"
-            )
+            raise RuntimeError("sendCmd returned None when waitForResponse=True - internal error")
         msg = await future
 
         info = msg["objectList"][0]
@@ -415,9 +413,7 @@ class BaseController:
                         stale_ids.append(msg_id)
                         if pending.future and not pending.future.done():
                             pending.future.set_exception(
-                                TimeoutError(
-                                    f"Request {msg_id} timed out after {age:.1f}s"
-                                )
+                                TimeoutError(f"Request {msg_id} timed out after {age:.1f}s")
                             )
 
                 # Remove stale requests
@@ -426,8 +422,7 @@ class BaseController:
 
                 if stale_ids:
                     _LOGGER.warning(
-                        f"CONTROLLER: cleaned up {len(stale_ids)} stale request(s): "
-                        f"{stale_ids}"
+                        f"CONTROLLER: cleaned up {len(stale_ids)} stale request(s): {stale_ids}"
                     )
 
         except asyncio.CancelledError:
@@ -511,9 +506,7 @@ class BaseController:
             },
         )
         if future is None:
-            raise RuntimeError(
-                "sendCmd returned None when waitForResponse=True - internal error"
-            )
+            raise RuntimeError("sendCmd returned None when waitForResponse=True - internal error")
         result = await future
 
         # Since we might have asked for more attributes than any given object
@@ -521,9 +514,7 @@ class BaseController:
         object_list: list[dict[str, Any]] = prune(result["objectList"])
         return object_list
 
-    async def getQuery(
-        self, queryName: str, arguments: str = ""
-    ) -> list[dict[str, Any]]:
+    async def getQuery(self, queryName: str, arguments: str = "") -> list[dict[str, Any]]:
         """Return the result of a Query.
 
         Args:
@@ -533,13 +524,9 @@ class BaseController:
         Returns:
             The query answer as a list of dictionaries
         """
-        future = self.sendCmd(
-            "GetQuery", {"queryName": queryName, "arguments": arguments}
-        )
+        future = self.sendCmd("GetQuery", {"queryName": queryName, "arguments": arguments})
         if future is None:
-            raise RuntimeError(
-                "sendCmd returned None when waitForResponse=True - internal error"
-            )
+            raise RuntimeError("sendCmd returned None when waitForResponse=True - internal error")
         result = await future
         answer: list[dict[str, Any]] = result["answer"]
         return answer
@@ -551,15 +538,12 @@ class BaseController:
     async def getCircuitTypes(self) -> dict[str, str]:
         """Return a dictionary: key: circuit's SUBTYP, value: 'friendly' readable string."""
         return {
-            v["systemValue"]: v["readableValue"]
-            for v in await self.getQuery("GetCircuitTypes")
+            v["systemValue"]: v["readableValue"] for v in await self.getQuery("GetCircuitTypes")
         }
 
     async def getHardwareDefinition(self) -> list[dict[str, Any]]:
         """Return the full hardware definition of the system."""
-        result: list[dict[str, Any]] = prune(
-            await self.getQuery("GetHardwareDefinition")
-        )
+        result: list[dict[str, Any]] = prune(await self.getQuery("GetHardwareDefinition"))
         return result
 
     async def getConfiguration(self) -> list[dict[str, Any]]:
@@ -587,9 +571,7 @@ class BaseController:
         # pending can be None if there was no corresponding request (e.g., notification)
         future = pending.future if pending else None
 
-        _LOGGER.debug(
-            f"CONTROLLER: receivedMessage: {msg_id} {command} {response} {future}"
-        )
+        _LOGGER.debug(f"CONTROLLER: receivedMessage: {msg_id} {command} {response} {future}")
 
         # Track response metrics
         current_time = time.monotonic()
@@ -682,9 +664,7 @@ class ModelController(BaseController):
         await super().start()
 
         # Retrieve all objects with their type, subtype, sname and parent
-        allObjects = await self.getAllObjects(
-            [OBJTYP_ATTR, SUBTYP_ATTR, SNAME_ATTR, PARENT_ATTR]
-        )
+        allObjects = await self.getAllObjects([OBJTYP_ATTR, SUBTYP_ATTR, SNAME_ATTR, PARENT_ATTR])
         # Process that list into our model
         self.model.addObjects(allObjects)
 
@@ -702,13 +682,9 @@ class ModelController(BaseController):
                 # A query too large can choke the protocol...
                 # Split into batches of MAX_ATTRIBUTES_PER_QUERY attributes
                 if numAttributes >= MAX_ATTRIBUTES_PER_QUERY:
-                    batch_future = self.sendCmd(
-                        "RequestParamList", {"objectList": query}
-                    )
+                    batch_future = self.sendCmd("RequestParamList", {"objectList": query})
                     if batch_future is None:
-                        raise RuntimeError(
-                            "sendCmd returned None when waitForResponse=True"
-                        )
+                        raise RuntimeError("sendCmd returned None when waitForResponse=True")
                     res = await batch_future
                     self._applyUpdates(res["objectList"])
                     query = []
@@ -717,9 +693,7 @@ class ModelController(BaseController):
             if query:
                 future = self.sendCmd("RequestParamList", {"objectList": query})
                 if future is None:
-                    raise RuntimeError(
-                        "sendCmd returned None when waitForResponse=True"
-                    )
+                    raise RuntimeError("sendCmd returned None when waitForResponse=True")
                 res = await future
                 self._applyUpdates(res["objectList"])
 
@@ -743,9 +717,7 @@ class ModelController(BaseController):
         """
         pass
 
-    def _applyUpdates(
-        self, changesAsList: list[dict[str, Any]]
-    ) -> dict[str, dict[str, Any]]:
+    def _applyUpdates(self, changesAsList: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         """Apply updates received to the model.
 
         Args:
@@ -802,9 +774,7 @@ class ModelController(BaseController):
         Args:
             objectList: List of objects received from the system
         """
-        _LOGGER.debug(
-            f"CONTROLLER: received SystemConfig for {len(objectList)} object(s)"
-        )
+        _LOGGER.debug(f"CONTROLLER: received SystemConfig for {len(objectList)} object(s)")
         # Note that here we might create new objects
         self.model.addObjects(objectList)
 
@@ -830,9 +800,7 @@ class ModelController(BaseController):
                 _LOGGER.debug(f"no handler for {command}")
         except (KeyError, IndexError) as err:
             # Missing expected fields in message
-            _LOGGER.error(
-                f"CONTROLLER: Message missing expected field: {err} in {command}"
-            )
+            _LOGGER.error(f"CONTROLLER: Message missing expected field: {err} in {command}")
         except Exception:  # noqa: BLE001 - Callback must not crash
             _LOGGER.exception(f"CONTROLLER: Unexpected error processing {command}")
 
@@ -956,10 +924,7 @@ class ConnectionHandler:
                 self._last_failure_time = None
 
                 # Cancel any pending disconnect debounce
-                if (
-                    self._disconnectDebounceTask
-                    and not self._disconnectDebounceTask.done()
-                ):
+                if self._disconnectDebounceTask and not self._disconnectDebounceTask.done():
                     self._disconnectDebounceTask.cancel()
                     self._disconnectDebounceTask = None
 
@@ -1052,9 +1017,7 @@ class ConnectionHandler:
             )
 
             # Start reconnection attempt
-            self._starterTask = asyncio.create_task(
-                self._starter(self._timeBetweenReconnects)
-            )
+            self._starterTask = asyncio.create_task(self._starter(self._timeBetweenReconnects))
 
     def started(self, controller: BaseController) -> None:
         """Handle the first time the controller is started.
@@ -1075,9 +1038,7 @@ class ConnectionHandler:
         """
         _LOGGER.info(f"will attempt to reconnect in {delay}s")
 
-    def updated(
-        self, controller: ModelController, updates: dict[str, dict[str, Any]]
-    ) -> None:
+    def updated(self, controller: ModelController, updates: dict[str, dict[str, Any]]) -> None:
         """Handle the callback that our underlying system has been modified.
 
         Only invoked if the controller has a _updatedCallback attribute.

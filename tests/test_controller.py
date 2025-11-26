@@ -85,9 +85,7 @@ class TestSystemInfo:
         assert info.swVersion == "1.0.5"
         assert info.usesMetric is True
         assert info.uniqueID is not None
-        assert (
-            len(info.uniqueID) == 16
-        )  # blake2b with digest_size=8 produces 16 hex chars
+        assert len(info.uniqueID) == 16  # blake2b with digest_size=8 produces 16 hex chars
 
     def test_uses_english(self):
         """Test system using English units."""
