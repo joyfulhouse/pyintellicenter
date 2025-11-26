@@ -192,8 +192,8 @@ class TestDiscoverIntellicenterUnits:
         mock_aiozc.async_get_service_info = AsyncMock(return_value=None)
 
         with (
-            patch("zeroconf.asyncio.AsyncZeroconf", return_value=mock_aiozc),
-            patch("zeroconf.ServiceBrowser", return_value=mock_browser),
+            patch("pyintellicenter.discovery.AsyncZeroconf", return_value=mock_aiozc),
+            patch("pyintellicenter.discovery.ServiceBrowser", return_value=mock_browser),
         ):
             units = await discover_intellicenter_units(discovery_timeout=0.1)
 
@@ -209,8 +209,8 @@ class TestDiscoverIntellicenterUnits:
         mock_aiozc.async_get_service_info = AsyncMock(return_value=None)
 
         with (
-            patch("zeroconf.asyncio.AsyncZeroconf", return_value=mock_aiozc),
-            patch("zeroconf.ServiceBrowser", return_value=mock_browser),
+            patch("pyintellicenter.discovery.AsyncZeroconf", return_value=mock_aiozc),
+            patch("pyintellicenter.discovery.ServiceBrowser", return_value=mock_browser),
         ):
             await discover_intellicenter_units(discovery_timeout=0.1)
 
@@ -226,8 +226,8 @@ class TestDiscoverIntellicenterUnits:
         mock_aiozc.async_get_service_info = AsyncMock(return_value=None)
 
         with (
-            patch("zeroconf.asyncio.AsyncZeroconf", return_value=mock_aiozc),
-            patch("zeroconf.ServiceBrowser", return_value=mock_browser),
+            patch("pyintellicenter.discovery.AsyncZeroconf", return_value=mock_aiozc),
+            patch("pyintellicenter.discovery.ServiceBrowser", return_value=mock_browser),
         ):
             await discover_intellicenter_units(discovery_timeout=0.1)
 

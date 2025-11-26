@@ -23,11 +23,9 @@ import asyncio
 import contextlib
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from zeroconf import ServiceInfo, Zeroconf
-    from zeroconf.asyncio import AsyncZeroconf
+from zeroconf import ServiceBrowser, ServiceInfo, Zeroconf
+from zeroconf.asyncio import AsyncZeroconf
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -250,22 +248,7 @@ async def discover_intellicenter_units(
 
     Returns:
         List of discovered ICUnit instances
-
-    Raises:
-        ImportError: If zeroconf package is not installed
-
-    Note:
-        Requires the 'zeroconf' package to be installed:
-        `pip install zeroconf` or `pip install pyintellicenter[discovery]`
     """
-    try:
-        from zeroconf import ServiceBrowser
-        from zeroconf.asyncio import AsyncZeroconf
-    except ImportError as err:
-        raise ImportError(
-            "mDNS discovery requires the 'zeroconf' package. Install it with: pip install zeroconf"
-        ) from err
-
     # Queue for thread-safe communication between zeroconf callbacks and async code
     queue: asyncio.Queue[tuple[str, str, str]] = asyncio.Queue(maxsize=100)
 
