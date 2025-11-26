@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.5a1] - 2025-11-26
+
+### Added
+
+- **LIGHT_EFFECTS constant**: Protocol-level mapping of IntelliCenter color effect codes to human-readable names
+  - Codes: PARTY, CARIB, SSET, ROMAN, AMERCA, ROYAL, WHITER, REDR, BLUER, GREENR, MAGNTAR
+  - Used with the `USE` attribute on lights with `COLOR_EFFECT_SUBTYPES`
+  - Enables Home Assistant integrations to import effect mappings directly from the library
+
 ## [0.0.4] - 2025-11-26
 
 ### Changed
@@ -106,7 +115,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `orjson` for fast JSON serialization
 - Python 3.11+ required
 
-[Unreleased]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.4...HEAD
+[Unreleased]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a1...HEAD
+[0.0.5a1]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.4...v0.0.5a1
 [0.0.4]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.3...v0.0.4
 [0.0.3]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.2...v0.0.3
 [0.0.2]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.1...v0.0.2

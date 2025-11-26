@@ -51,6 +51,7 @@ from .attributes import (
     HEATING_ATTR,
     HNAME_ATTR,
     HTMODE_ATTR,
+    LIGHT_EFFECTS,
     LIGHT_SUBTYPES,
     LISTORD_ATTR,
     LOTMP_ATTR,
@@ -153,7 +154,7 @@ try:
 except ImportError:
     _DISCOVERY_AVAILABLE = False
 
-__version__ = "0.0.2"
+__version__ = "0.0.5a1"
 
 __all__ = [
     # Version
@@ -191,6 +192,7 @@ __all__ = [
     "PUMP_STATUS_OFF",
     "LIGHT_SUBTYPES",
     "COLOR_EFFECT_SUBTYPES",
+    "LIGHT_EFFECTS",
     # Object types
     "BODY_TYPE",
     "CHEM_TYPE",

@@ -17,6 +17,22 @@ LIGHT_SUBTYPES = frozenset(["LIGHT", "INTELLI", "GLOW", "GLOWT", "DIMMER", "MAGI
 # Light subtypes that support color effects
 COLOR_EFFECT_SUBTYPES = frozenset(["INTELLI", "MAGIC2", "GLOW"])
 
+# Mapping of IntelliCenter color effect codes to human-readable names
+# Used with the USE attribute on lights with COLOR_EFFECT_SUBTYPES
+LIGHT_EFFECTS: dict[str, str] = {
+    "PARTY": "Party Mode",
+    "CARIB": "Caribbean",
+    "SSET": "Sunset",
+    "ROMAN": "Romance",
+    "AMERCA": "American",
+    "ROYAL": "Royal",
+    "WHITER": "White",
+    "REDR": "Red",
+    "BLUER": "Blue",
+    "GREENR": "Green",
+    "MAGNTAR": "Magenta",
+}
+
 
 class HeaterType(IntEnum):
     """Heater mode types for SetHeatMode command.

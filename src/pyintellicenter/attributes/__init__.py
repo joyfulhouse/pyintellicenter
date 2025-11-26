@@ -40,6 +40,7 @@ from .constants import (
     HEATING_ATTR,
     HNAME_ATTR,
     HTMODE_ATTR,
+    LIGHT_EFFECTS,
     LIGHT_SUBTYPES,
     LISTORD_ATTR,
     LOTMP_ATTR,
@@ -161,6 +162,7 @@ __all__ = [
     "PUMP_STATUS_OFF",
     "LIGHT_SUBTYPES",
     "COLOR_EFFECT_SUBTYPES",
+    "LIGHT_EFFECTS",
     # Special values
     "NULL_OBJNAM",
     # Object type constants
