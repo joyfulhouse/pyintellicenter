@@ -237,6 +237,7 @@ async def _resolve_service(
 
 async def discover_intellicenter_units(
     discovery_timeout: float = DEFAULT_DISCOVERY_TIMEOUT,
+    zeroconf: Zeroconf | None = None,
 ) -> list[ICUnit]:
     """Discover IntelliCenter units on the local network.
 
@@ -245,6 +246,10 @@ async def discover_intellicenter_units(
 
     Args:
         discovery_timeout: How long to wait for discovery (seconds)
+        zeroconf: Optional existing Zeroconf instance to use. If not provided,
+            a new instance will be created and closed after discovery.
+            When integrating with Home Assistant, pass the shared Zeroconf
+            instance obtained via `async_get_instance(hass)`.
 
     Returns:
         List of discovered ICUnit instances
@@ -252,14 +257,23 @@ async def discover_intellicenter_units(
     # Queue for thread-safe communication between zeroconf callbacks and async code
     queue: asyncio.Queue[tuple[str, str, str]] = asyncio.Queue(maxsize=100)
 
-    aiozc = AsyncZeroconf()
+    # Use provided zeroconf or create our own
+    own_zeroconf = zeroconf is None
+    if own_zeroconf:
+        aiozc = AsyncZeroconf()
+        zc = aiozc.zeroconf
+    else:
+        aiozc = None
+        assert zeroconf is not None  # for type checker
+        zc = zeroconf
+
     listener = ICDiscoveryListener(queue)
     browsers: list[ServiceBrowser] = []
 
     try:
         # Browse for HTTP services (IntelliCenter uses HTTP on port 6681)
         browser = ServiceBrowser(
-            aiozc.zeroconf,
+            zc,
             INTELLICENTER_SERVICE_TYPE,
             listener,  # type: ignore[arg-type]
         )
@@ -268,14 +282,18 @@ async def discover_intellicenter_units(
         # Also try to browse for any specific IntelliCenter service types
         with contextlib.suppress(Exception):
             browser2 = ServiceBrowser(
-                aiozc.zeroconf,
+                zc,
                 "_pentair._tcp.local.",
                 listener,  # type: ignore[arg-type]
             )
             browsers.append(browser2)
 
         # Process discovery events from the queue
-        await _process_discovery_queue(queue, listener, aiozc, discovery_timeout)
+        # Note: _process_discovery_queue needs AsyncZeroconf for resolution
+        # When using external zeroconf, wrap it
+        aiozc_for_resolution = AsyncZeroconf(zc=zc) if aiozc is None else aiozc
+
+        await _process_discovery_queue(queue, listener, aiozc_for_resolution, discovery_timeout)
 
         return listener.units
 
@@ -283,7 +301,9 @@ async def discover_intellicenter_units(
         # Cancel browsers before closing zeroconf
         for browser in browsers:
             browser.cancel()
-        await aiozc.async_close()
+        # Only close zeroconf if we created it
+        if own_zeroconf and aiozc is not None:
+            await aiozc.async_close()
 
 
 async def find_unit_by_name(
