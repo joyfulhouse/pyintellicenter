@@ -196,7 +196,6 @@ class PoolModel:
                          Defaults to ALL_ATTRIBUTES_BY_TYPE.
         """
         self._objects: dict[str, PoolObject] = {}
-        self._system_object: PoolObject | None = None
         self._attribute_map = attribute_map if attribute_map is not None else ALL_ATTRIBUTES_BY_TYPE
 
     @property
@@ -277,8 +276,6 @@ class PoolModel:
 
         if pool_obj is None:
             pool_obj = PoolObject(objnam, params)
-            if pool_obj.objtype == "SYSTEM":
-                self._system_object = pool_obj
             if pool_obj.objtype in self._attribute_map:
                 self._objects[objnam] = pool_obj
             else:

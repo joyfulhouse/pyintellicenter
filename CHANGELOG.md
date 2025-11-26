@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.5a2] - 2025-11-26
+
+### Added
+
+- **USER_PRIVILEGES export**: Now exported from main module for consistency with attributes submodule
+
+### Removed
+
+- **Dead code cleanup**: Removed unused `_system_object` from `PoolModel` class
+- **Redundant method**: Removed `send_command()` alias method from `ICConnection` (use `send_request()` directly)
+
+### Changed
+
+- Code review and modernization pass confirming all async patterns are up-to-date
+
 ## [0.0.5a1] - 2025-11-26
 
 ### Added
@@ -115,7 +130,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `orjson` for fast JSON serialization
 - Python 3.11+ required
 
-[Unreleased]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a1...HEAD
+[Unreleased]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a2...HEAD
+[0.0.5a2]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a1...v0.0.5a2
 [0.0.5a1]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.4...v0.0.5a1
 [0.0.4]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.3...v0.0.4
 [0.0.3]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.2...v0.0.3

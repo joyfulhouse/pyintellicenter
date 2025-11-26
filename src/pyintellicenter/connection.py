@@ -312,22 +312,6 @@ class ICConnection:
                 _LOGGER.error("Request %s timed out after %ss", command, effective_timeout)
                 raise
 
-    async def send_command(
-        self,
-        command: str,
-        **kwargs: Any,
-    ) -> dict[str, Any]:
-        """Convenience method for send_request.
-
-        Args:
-            command: The command name
-            **kwargs: Additional fields for the request
-
-        Returns:
-            The response message dictionary.
-        """
-        return await self.send_request(command, **kwargs)
-
     async def _keepalive_loop(self) -> None:
         """Send periodic keepalive requests to maintain connection health."""
         try:

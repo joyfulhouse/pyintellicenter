@@ -438,26 +438,6 @@ class TestICConnection:
             assert conn._message_id == 2
 
     @pytest.mark.asyncio
-    async def test_send_command_alias(self):
-        """Test send_command is an alias for send_request."""
-        conn = ICConnection("192.168.1.100")
-
-        mock_reader = AsyncMock()
-        mock_writer = MagicMock()
-        mock_writer.is_closing.return_value = False
-        mock_writer.write = MagicMock()
-        mock_writer.drain = AsyncMock()
-
-        response_data = b'{"response":"200"}\r\n'
-        mock_reader.readline = AsyncMock(return_value=response_data)
-
-        with patch("asyncio.open_connection", return_value=(mock_reader, mock_writer)):
-            await conn.connect()
-
-            result = await conn.send_command("TestCmd", param="value")
-            assert result["response"] == "200"
-
-    @pytest.mark.asyncio
     async def test_keepalive_cancelled_gracefully(self):
         """Test keepalive loop handles cancellation gracefully."""
         conn = ICConnection("192.168.1.100", keepalive_interval=0.05)

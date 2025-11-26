@@ -106,6 +106,7 @@ from .attributes import (
     TIMOUT_ATTR,
     UPDATE_ATTR,
     USE_ATTR,
+    USER_PRIVILEGES,
     VACFLO_ATTR,
     VACTIM_ATTR,
     VALVE_TYPE,
@@ -154,7 +155,7 @@ try:
 except ImportError:
     _DISCOVERY_AVAILABLE = False
 
-__version__ = "0.0.5a1"
+__version__ = "0.0.5a2"
 
 __all__ = [
     # Version
@@ -268,6 +269,7 @@ __all__ = [
     "TIMOUT_ATTR",
     "UPDATE_ATTR",
     "USE_ATTR",
+    "USER_PRIVILEGES",
     "VACFLO_ATTR",
     "VACTIM_ATTR",
     "VER_ATTR",
