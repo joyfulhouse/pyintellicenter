@@ -32,7 +32,11 @@ class TestICUnit:
     def test_init_with_model(self):
         """Test ICUnit creation with model."""
         unit = ICUnit(
-            name="Pentair Pool", host="192.168.1.100", port=6681, ws_port=6680, model="IntelliCenter"
+            name="Pentair Pool",
+            host="192.168.1.100",
+            port=6681,
+            ws_port=6680,
+            model="IntelliCenter",
         )
 
         assert unit.model == "IntelliCenter"
