@@ -1,0 +1,171 @@
+"""pyintellicenter - Python library for Pentair IntelliCenter pool control systems.
+
+This library provides the core protocol and model classes for communicating
+with Pentair IntelliCenter pool control systems over local network.
+
+Example usage:
+    ```python
+    import asyncio
+    from pyintellicenter import ModelController, PoolModel, ConnectionHandler
+
+    async def main():
+        model = PoolModel()
+        controller = ModelController("192.168.1.100", model)
+        handler = ConnectionHandler(controller)
+        await handler.start()
+
+        # Access pool equipment
+        for obj in model:
+            print(f"{obj.sname}: {obj.status}")
+
+    asyncio.run(main())
+    ```
+"""
+
+from .attributes import (
+    ACT_ATTR,
+    BODY_ATTR,
+    BODY_TYPE,
+    CHEM_TYPE,
+    CIRCGRP_TYPE,
+    CIRCUIT_ATTR,
+    CIRCUIT_TYPE,
+    COMUART_ATTR,
+    DLY_ATTR,
+    ENABLE_ATTR,
+    EXTINSTR_TYPE,
+    FEATR_ATTR,
+    GPM_ATTR,
+    HEATER_ATTR,
+    HEATER_TYPE,
+    HNAME_ATTR,
+    HTMODE_ATTR,
+    LISTORD_ATTR,
+    LOTMP_ATTR,
+    LSTTMP_ATTR,
+    MODE_ATTR,
+    NORMAL_ATTR,
+    NULL_OBJNAM,
+    OBJTYP_ATTR,
+    ORPTNK_ATTR,
+    ORPVAL_ATTR,
+    PARENT_ATTR,
+    PHTNK_ATTR,
+    PHVAL_ATTR,
+    PMPCIRC_TYPE,
+    PRIM_ATTR,
+    PROPNAME_ATTR,
+    PUMP_TYPE,
+    PWR_ATTR,
+    QUALTY_ATTR,
+    READY_ATTR,
+    REMBTN_TYPE,
+    REMOTE_TYPE,
+    RPM_ATTR,
+    SALT_ATTR,
+    SCHED_TYPE,
+    SEC_ATTR,
+    SELECT_ATTR,
+    SENSE_TYPE,
+    SHOMNU_ATTR,
+    SNAME_ATTR,
+    SOURCE_ATTR,
+    STATIC_ATTR,
+    STATUS_ATTR,
+    SUBTYP_ATTR,
+    SUPER_ATTR,
+    SYSTEM_TYPE,
+    TIME_ATTR,
+    TIMOUT_ATTR,
+    USE_ATTR,
+    VACFLO_ATTR,
+    VER_ATTR,
+    VOL_ATTR,
+)
+from .controller import (
+    BaseController,
+    CommandError,
+    ConnectionHandler,
+    ConnectionMetrics,
+    ModelController,
+    SystemInfo,
+)
+from .model import PoolModel, PoolObject
+
+__version__ = "1.0.0"
+
+__all__ = [
+    # Version
+    "__version__",
+    # Controller classes
+    "BaseController",
+    "CommandError",
+    "ConnectionHandler",
+    "ConnectionMetrics",
+    "ModelController",
+    "SystemInfo",
+    # Model classes
+    "PoolModel",
+    "PoolObject",
+    # Object types
+    "BODY_TYPE",
+    "CHEM_TYPE",
+    "CIRCUIT_TYPE",
+    "CIRCGRP_TYPE",
+    "EXTINSTR_TYPE",
+    "HEATER_TYPE",
+    "PMPCIRC_TYPE",
+    "PUMP_TYPE",
+    "REMBTN_TYPE",
+    "REMOTE_TYPE",
+    "SCHED_TYPE",
+    "SENSE_TYPE",
+    "SYSTEM_TYPE",
+    # Special values
+    "NULL_OBJNAM",
+    # Attributes
+    "ACT_ATTR",
+    "BODY_ATTR",
+    "CIRCUIT_ATTR",
+    "COMUART_ATTR",
+    "DLY_ATTR",
+    "ENABLE_ATTR",
+    "FEATR_ATTR",
+    "GPM_ATTR",
+    "HEATER_ATTR",
+    "HNAME_ATTR",
+    "HTMODE_ATTR",
+    "LISTORD_ATTR",
+    "LOTMP_ATTR",
+    "LSTTMP_ATTR",
+    "MODE_ATTR",
+    "NORMAL_ATTR",
+    "OBJTYP_ATTR",
+    "ORPTNK_ATTR",
+    "ORPVAL_ATTR",
+    "PARENT_ATTR",
+    "PHTNK_ATTR",
+    "PHVAL_ATTR",
+    "PRIM_ATTR",
+    "PROPNAME_ATTR",
+    "PWR_ATTR",
+    "QUALTY_ATTR",
+    "READY_ATTR",
+    "RPM_ATTR",
+    "SALT_ATTR",
+    "SEC_ATTR",
+    "SELECT_ATTR",
+    "SHOMNU_ATTR",
+    "SNAME_ATTR",
+    "SOURCE_ATTR",
+    "STATIC_ATTR",
+    "STATUS_ATTR",
+    "SUBTYP_ATTR",
+    "SUPER_ATTR",
+    "TIME_ATTR",
+    "TIMOUT_ATTR",
+    "USE_ATTR",
+    "VACFLO_ATTR",
+    "VER_ATTR",
+    "VOL_ATTR",
+]
