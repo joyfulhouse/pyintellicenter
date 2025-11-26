@@ -89,3 +89,16 @@ src/pyintellicenter/
 - Use type hints everywhere
 - Prefer async/await over callbacks
 - Keep public API minimal and well-documented
+
+## Asyncio Best Practices
+
+**IMPORTANT: Never use deprecated event loop patterns!**
+
+- **DO NOT** use `asyncio.get_event_loop()` - deprecated in Python 3.10+
+- **DO NOT** store event loop references (`self._loop = loop`)
+- **DO NOT** use `asyncio.get_running_loop()` to store for later use
+- **DO** use proper `async def` functions with `await`
+- **DO** use `AsyncServiceBrowser` with async handlers for zeroconf
+- **DO** let the async runtime manage the event loop
+
+For thread-to-async bridging (e.g., zeroconf callbacks), use libraries that support native async handlers rather than manually bridging with `run_coroutine_threadsafe`.

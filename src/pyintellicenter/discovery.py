@@ -60,25 +60,20 @@ class ICUnit:
 
 
 class ICDiscoveryListener:
-    """Listener for IntelliCenter mDNS service discovery."""
+    """Listener for IntelliCenter mDNS service discovery.
 
-    def __init__(self, aiozc: AsyncZeroconf) -> None:
+    Uses a queue to communicate between zeroconf's sync callbacks
+    and async processing, avoiding deprecated event loop patterns.
+    """
+
+    def __init__(self, queue: asyncio.Queue[tuple[str, str, str]]) -> None:
+        self._queue = queue
         self._units: dict[str, ICUnit] = {}
-        self._event = asyncio.Event()
-        self._aiozc = aiozc
-        # Store task references to prevent "Task was destroyed" warnings
-        self._pending_tasks: set[asyncio.Task[None]] = set()
 
     @property
     def units(self) -> list[ICUnit]:
         """Return list of discovered units."""
         return list(self._units.values())
-
-    def _create_resolve_task(self, service_type: str, name: str) -> None:
-        """Create a task to resolve a service, with proper reference tracking."""
-        task = asyncio.create_task(self._resolve_service(service_type, name))
-        self._pending_tasks.add(task)
-        task.add_done_callback(self._pending_tasks.discard)
 
     def add_service(
         self,
@@ -86,8 +81,12 @@ class ICDiscoveryListener:
         service_type: str,
         name: str,
     ) -> None:
-        """Called when a service is discovered."""
-        self._create_resolve_task(service_type, name)
+        """Called when a service is discovered (sync, from zeroconf thread)."""
+        # Queue for async processing - thread-safe
+        try:
+            self._queue.put_nowait(("add", service_type, name))
+        except asyncio.QueueFull:
+            _LOGGER.warning("Discovery queue full, dropping service: %s", name)
 
     def remove_service(
         self,
@@ -95,7 +94,7 @@ class ICDiscoveryListener:
         service_type: str,  # noqa: ARG002
         name: str,
     ) -> None:
-        """Called when a service is removed."""
+        """Called when a service is removed (sync, from zeroconf thread)."""
         if name in self._units:
             del self._units[name]
 
@@ -105,62 +104,100 @@ class ICDiscoveryListener:
         service_type: str,
         name: str,
     ) -> None:
-        """Called when a service is updated."""
-        self._create_resolve_task(service_type, name)
-
-    async def _resolve_service(self, service_type: str, name: str) -> None:
-        """Resolve service info and add to units if it's an IntelliCenter."""
+        """Called when a service is updated (sync, from zeroconf thread)."""
         try:
-            info: ServiceInfo | None = await self._aiozc.async_get_service_info(service_type, name)
-            if info is None:
-                return
+            self._queue.put_nowait(("update", service_type, name))
+        except asyncio.QueueFull:
+            _LOGGER.warning("Discovery queue full, dropping update: %s", name)
 
-            # Check if this is a Pentair/IntelliCenter device
-            service_name = info.name or name
-            if not self._is_intellicenter(service_name, info):
-                return
+    def add_unit(self, name: str, unit: ICUnit) -> None:
+        """Add a discovered unit."""
+        self._units[name] = unit
 
-            # Extract address
-            addresses = info.parsed_addresses()
-            if not addresses:
-                return
 
-            host = addresses[0]
-            port = info.port or 6681
+def _is_intellicenter(name: str, info: ServiceInfo) -> bool:
+    """Check if the service is an IntelliCenter unit."""
+    # Check name prefix
+    if name.lower().startswith("pentair") or "intellicenter" in name.lower():
+        return True
 
-            # Extract model from properties if available
-            model = None
-            if info.properties:
-                model_bytes = info.properties.get(b"model")
-                if model_bytes is not None:
-                    model = model_bytes.decode("utf-8", errors="ignore")
-
-            unit = ICUnit(name=service_name, host=host, port=port, model=model or None)
-            self._units[name] = unit
-            self._event.set()
-            _LOGGER.debug("Discovered IntelliCenter: %s at %s:%d", service_name, host, port)
-
-        except Exception:
-            _LOGGER.exception("Error resolving service %s", name)
-
-    def _is_intellicenter(self, name: str, info: ServiceInfo) -> bool:
-        """Check if the service is an IntelliCenter unit."""
-        # Check name prefix
-        if name.lower().startswith("pentair") or "intellicenter" in name.lower():
-            return True
-
-        # Check properties
-        if info.properties:
-            for key, value in info.properties.items():
-                key_str = key.decode("utf-8", errors="ignore").lower()
-                if value is not None:
-                    value_str = value.decode("utf-8", errors="ignore").lower()
-                    if "pentair" in value_str or "intellicenter" in value_str:
-                        return True
-                if "pentair" in key_str or "intellicenter" in key_str:
+    # Check properties
+    if info.properties:
+        for key, value in info.properties.items():
+            key_str = key.decode("utf-8", errors="ignore").lower()
+            if value is not None:
+                value_str = value.decode("utf-8", errors="ignore").lower()
+                if "pentair" in value_str or "intellicenter" in value_str:
                     return True
+            if "pentair" in key_str or "intellicenter" in key_str:
+                return True
 
-        return False
+    return False
+
+
+async def _process_discovery_queue(
+    queue: asyncio.Queue[tuple[str, str, str]],
+    listener: ICDiscoveryListener,
+    aiozc: AsyncZeroconf,
+    discovery_timeout: float,
+) -> None:
+    """Process discovery events from the queue."""
+    end_time = asyncio.get_running_loop().time() + discovery_timeout
+
+    while True:
+        remaining = end_time - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            break
+
+        try:
+            action, service_type, name = await asyncio.wait_for(
+                queue.get(), timeout=min(remaining, 1.0)
+            )
+        except TimeoutError:
+            continue
+
+        if action in ("add", "update"):
+            await _resolve_service(listener, aiozc, service_type, name)
+
+
+async def _resolve_service(
+    listener: ICDiscoveryListener,
+    aiozc: AsyncZeroconf,
+    service_type: str,
+    name: str,
+) -> None:
+    """Resolve service info and add to listener if it's an IntelliCenter."""
+    try:
+        info = await aiozc.async_get_service_info(service_type, name, timeout=3000)
+        if info is None:
+            return
+
+        # Check if this is a Pentair/IntelliCenter device
+        service_name = info.name or name
+        if not _is_intellicenter(service_name, info):
+            return
+
+        # Extract address
+        addresses = info.parsed_addresses()
+        if not addresses:
+            return
+
+        host = addresses[0]
+        port = info.port or 6681
+
+        # Extract model from properties if available
+        model = None
+        if info.properties:
+            model_bytes = info.properties.get(b"model")
+            if model_bytes is not None:
+                model = model_bytes.decode("utf-8", errors="ignore")
+
+        unit = ICUnit(name=service_name, host=host, port=port, model=model or None)
+        listener.add_unit(name, unit)
+        _LOGGER.debug("Discovered IntelliCenter: %s at %s:%d", service_name, host, port)
+
+    except Exception:
+        _LOGGER.exception("Error resolving service %s", name)
 
 
 async def discover_intellicenter_units(
@@ -192,24 +229,40 @@ async def discover_intellicenter_units(
             "mDNS discovery requires the 'zeroconf' package. Install it with: pip install zeroconf"
         ) from err
 
+    # Queue for thread-safe communication between zeroconf callbacks and async code
+    queue: asyncio.Queue[tuple[str, str, str]] = asyncio.Queue(maxsize=100)
+
     aiozc = AsyncZeroconf()
-    listener = ICDiscoveryListener(aiozc)
+    listener = ICDiscoveryListener(queue)
+    browsers: list[ServiceBrowser] = []
 
     try:
         # Browse for HTTP services (IntelliCenter uses HTTP on port 6681)
-        ServiceBrowser(aiozc.zeroconf, INTELLICENTER_SERVICE_TYPE, listener)  # type: ignore[arg-type]
+        browser = ServiceBrowser(
+            aiozc.zeroconf,
+            INTELLICENTER_SERVICE_TYPE,
+            listener,  # type: ignore[arg-type]
+        )
+        browsers.append(browser)
 
         # Also try to browse for any specific IntelliCenter service types
-        # that Pentair may register
         with contextlib.suppress(Exception):
-            ServiceBrowser(aiozc.zeroconf, "_pentair._tcp.local.", listener)  # type: ignore[arg-type]
+            browser2 = ServiceBrowser(
+                aiozc.zeroconf,
+                "_pentair._tcp.local.",
+                listener,  # type: ignore[arg-type]
+            )
+            browsers.append(browser2)
 
-        # Wait for discovery
-        await asyncio.sleep(discovery_timeout)
+        # Process discovery events from the queue
+        await _process_discovery_queue(queue, listener, aiozc, discovery_timeout)
 
         return listener.units
 
     finally:
+        # Cancel browsers before closing zeroconf
+        for browser in browsers:
+            browser.cancel()
         await aiozc.async_close()
 
 

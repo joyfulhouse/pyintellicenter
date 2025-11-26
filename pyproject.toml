@@ -121,3 +121,8 @@ exclude_lines = [
     "if TYPE_CHECKING:",
     "raise NotImplementedError",
 ]
+
+[dependency-groups]
+dev = [
+    "python-dotenv>=1.2.1",
+]
