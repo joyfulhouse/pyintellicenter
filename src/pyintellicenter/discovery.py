@@ -46,17 +46,19 @@ class ICUnit:
     Attributes:
         name: The unit name from mDNS
         host: IP address or hostname
-        port: TCP port (typically 6681)
+        port: Raw TCP port for protocol communication (typically 6681)
+        ws_port: WebSocket port from mDNS (typically 6680)
         model: Model information if available
     """
 
     name: str
     host: str
     port: int
+    ws_port: int
     model: str | None = None
 
     def __repr__(self) -> str:
-        return f"ICUnit(name={self.name!r}, host={self.host!r}, port={self.port})"
+        return f"ICUnit(name={self.name!r}, host={self.host!r}, port={self.port}, ws_port={self.ws_port})"
 
 
 class ICDiscoveryListener:
@@ -160,6 +162,20 @@ async def _process_discovery_queue(
             await _resolve_service(listener, aiozc, service_type, name)
 
 
+async def _check_tcp_port(host: str, port: int) -> bool:
+    """Check if a TCP port is connectable."""
+    try:
+        _, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port),
+            timeout=2.0,
+        )
+        writer.close()
+        await writer.wait_closed()
+        return True
+    except (OSError, TimeoutError):
+        return False
+
+
 async def _resolve_service(
     listener: ICDiscoveryListener,
     aiozc: AsyncZeroconf,
@@ -183,7 +199,20 @@ async def _resolve_service(
             return
 
         host = addresses[0]
-        port = info.port or 6681
+        # mDNS advertises WebSocket port (typically 6680)
+        ws_port = info.port or 6680
+        # Raw TCP port is WebSocket port + 1 (typically 6681)
+        tcp_port = ws_port + 1
+
+        # Verify TCP port is accessible
+        if not await _check_tcp_port(host, tcp_port):
+            _LOGGER.warning(
+                "IntelliCenter %s found at %s but TCP port %d not accessible",
+                service_name,
+                host,
+                tcp_port,
+            )
+            return
 
         # Extract model from properties if available
         model = None
@@ -192,9 +221,17 @@ async def _resolve_service(
             if model_bytes is not None:
                 model = model_bytes.decode("utf-8", errors="ignore")
 
-        unit = ICUnit(name=service_name, host=host, port=port, model=model or None)
+        unit = ICUnit(
+            name=service_name, host=host, port=tcp_port, ws_port=ws_port, model=model or None
+        )
         listener.add_unit(name, unit)
-        _LOGGER.debug("Discovered IntelliCenter: %s at %s:%d", service_name, host, port)
+        _LOGGER.debug(
+            "Discovered IntelliCenter: %s at %s (TCP:%d, WS:%d)",
+            service_name,
+            host,
+            tcp_port,
+            ws_port,
+        )
 
     except Exception:
         _LOGGER.exception("Error resolving service %s", name)

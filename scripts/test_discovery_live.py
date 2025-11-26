@@ -75,7 +75,9 @@ async def test_discovery() -> bool:
     for unit in units:
         marker = "→" if unit.host == host else " "
         print(f"  {marker} {unit.name}")
-        print(f"      Host: {unit.host}:{unit.port}")
+        print(f"      Host: {unit.host}")
+        print(f"      TCP Port: {unit.port} (raw protocol)")
+        print(f"      WS Port: {unit.ws_port} (websocket)")
         if unit.model:
             print(f"      Model: {unit.model}")
         print()

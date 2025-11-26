@@ -21,32 +21,36 @@ class TestICUnit:
 
     def test_init(self):
         """Test ICUnit creation."""
-        unit = ICUnit(name="Pentair Pool", host="192.168.1.100", port=6681)
+        unit = ICUnit(name="Pentair Pool", host="192.168.1.100", port=6681, ws_port=6680)
 
         assert unit.name == "Pentair Pool"
         assert unit.host == "192.168.1.100"
         assert unit.port == 6681
+        assert unit.ws_port == 6680
         assert unit.model is None
 
     def test_init_with_model(self):
         """Test ICUnit creation with model."""
-        unit = ICUnit(name="Pentair Pool", host="192.168.1.100", port=6681, model="IntelliCenter")
+        unit = ICUnit(
+            name="Pentair Pool", host="192.168.1.100", port=6681, ws_port=6680, model="IntelliCenter"
+        )
 
         assert unit.model == "IntelliCenter"
 
     def test_repr(self):
         """Test ICUnit repr."""
-        unit = ICUnit(name="Pentair Pool", host="192.168.1.100", port=6681)
+        unit = ICUnit(name="Pentair Pool", host="192.168.1.100", port=6681, ws_port=6680)
         repr_str = repr(unit)
 
         assert "ICUnit" in repr_str
         assert "Pentair Pool" in repr_str
         assert "192.168.1.100" in repr_str
         assert "6681" in repr_str
+        assert "6680" in repr_str
 
     def test_frozen(self):
         """Test ICUnit is immutable."""
-        unit = ICUnit(name="Pentair Pool", host="192.168.1.100", port=6681)
+        unit = ICUnit(name="Pentair Pool", host="192.168.1.100", port=6681, ws_port=6680)
 
         with pytest.raises(AttributeError):
             unit.name = "New Name"  # type: ignore[misc]
@@ -89,7 +93,7 @@ class TestICDiscoveryListener:
     def test_remove_service(self, listener):
         """Test remove_service removes unit."""
         # Manually add a unit
-        unit = ICUnit(name="Pentair", host="192.168.1.100", port=6681)
+        unit = ICUnit(name="Pentair", host="192.168.1.100", port=6681, ws_port=6680)
         listener._units["Pentair._http._tcp.local."] = unit
 
         mock_zc = MagicMock()
@@ -116,7 +120,7 @@ class TestICDiscoveryListener:
 
     def test_add_unit(self, listener):
         """Test add_unit adds a unit."""
-        unit = ICUnit(name="Pentair Pool", host="192.168.1.100", port=6681)
+        unit = ICUnit(name="Pentair Pool", host="192.168.1.100", port=6681, ws_port=6680)
         listener.add_unit("test_key", unit)
 
         assert len(listener.units) == 1
@@ -233,8 +237,8 @@ class TestFindUnitByName:
     async def test_find_by_name_found(self):
         """Test finding unit by name."""
         mock_units = [
-            ICUnit(name="Pentair Pool", host="192.168.1.100", port=6681),
-            ICUnit(name="Other Device", host="192.168.1.101", port=80),
+            ICUnit(name="Pentair Pool", host="192.168.1.100", port=6681, ws_port=6680),
+            ICUnit(name="Other Device", host="192.168.1.101", port=80, ws_port=79),
         ]
 
         with patch(
@@ -251,7 +255,7 @@ class TestFindUnitByName:
     async def test_find_by_name_not_found(self):
         """Test finding unit by name when not found."""
         mock_units = [
-            ICUnit(name="Other Device", host="192.168.1.101", port=80),
+            ICUnit(name="Other Device", host="192.168.1.101", port=80, ws_port=79),
         ]
 
         with patch(
@@ -267,7 +271,7 @@ class TestFindUnitByName:
     async def test_find_by_name_case_insensitive(self):
         """Test find_unit_by_name is case insensitive."""
         mock_units = [
-            ICUnit(name="PENTAIR Pool", host="192.168.1.100", port=6681),
+            ICUnit(name="PENTAIR Pool", host="192.168.1.100", port=6681, ws_port=6680),
         ]
 
         with patch(
@@ -288,8 +292,8 @@ class TestFindUnitByHost:
     async def test_find_by_host_found(self):
         """Test finding unit by host."""
         mock_units = [
-            ICUnit(name="Pentair Pool", host="192.168.1.100", port=6681),
-            ICUnit(name="Other Device", host="192.168.1.101", port=80),
+            ICUnit(name="Pentair Pool", host="192.168.1.100", port=6681, ws_port=6680),
+            ICUnit(name="Other Device", host="192.168.1.101", port=80, ws_port=79),
         ]
 
         with patch(
@@ -306,7 +310,7 @@ class TestFindUnitByHost:
     async def test_find_by_host_not_found(self):
         """Test finding unit by host when not found."""
         mock_units = [
-            ICUnit(name="Other Device", host="192.168.1.101", port=80),
+            ICUnit(name="Other Device", host="192.168.1.101", port=80, ws_port=79),
         ]
 
         with patch(
