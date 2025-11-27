@@ -92,8 +92,12 @@ class ICConnection:
         self._notification_callback: NotificationCallback | None = None
         self._disconnect_callback: DisconnectCallback | None = None
 
-        # Keepalive task
+        # Background tasks
         self._keepalive_task: asyncio.Task[None] | None = None
+        self._reader_task: asyncio.Task[None] | None = None
+
+        # Response queue for send_request to receive responses
+        self._response_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 
     def __repr__(self) -> str:
         """Return a detailed string representation for debugging."""
@@ -146,7 +150,13 @@ class ICConnection:
                 self._reader, self._writer = await asyncio.open_connection(self._host, self._port)
             self._connected = True
             self._message_id = 0
+            # Clear response queue
+            while not self._response_queue.empty():
+                self._response_queue.get_nowait()
             _LOGGER.debug("Connected to IC at %s:%s", self._host, self._port)
+
+            # Start background reader task (processes notifications and queues responses)
+            self._reader_task = asyncio.create_task(self._reader_loop())
 
             # Start keepalive task
             self._keepalive_task = asyncio.create_task(self._keepalive_loop())
@@ -161,6 +171,13 @@ class ICConnection:
     async def disconnect(self) -> None:
         """Close the connection gracefully."""
         self._connected = False
+
+        # Cancel reader task
+        if self._reader_task and not self._reader_task.done():
+            self._reader_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._reader_task
+            self._reader_task = None
 
         # Cancel keepalive task
         if self._keepalive_task and not self._keepalive_task.done():
@@ -254,8 +271,8 @@ class ICConnection:
     ) -> dict[str, Any]:
         """Send a request and wait for the response.
 
-        This method handles flow control (one request at a time) and
-        processes any notifications received while waiting for the response.
+        This method handles flow control (one request at a time).
+        Responses are received via the background reader task.
 
         Args:
             command: The command name (e.g., "GetParamList", "SetParamList")
@@ -289,28 +306,59 @@ class ICConnection:
             await self._write_message(request)
             _LOGGER.debug("Sent request: %s (ID: %s)", command, request["messageID"])
 
-            # Read until we get a response (not a notification)
+            # Wait for response from reader task via queue
             try:
                 async with asyncio.timeout(effective_timeout):
-                    while True:
-                        msg = await self._read_message()
+                    msg = await self._response_queue.get()
 
-                        # Check if this is a response (has "response" field)
-                        if "response" in msg:
-                            response_code: str = msg.get("response", "unknown")
-                            if response_code != "200":
-                                raise ICResponseError(response_code)
-                            _LOGGER.debug("Received response for %s", msg.get("command"))
-                            return dict(msg)
-
-                        # It's a notification (NotifyList) - process and continue
-                        if msg.get("command") == "NotifyList":
-                            _LOGGER.debug("Received NotifyList notification")
-                            await self._invoke_notification_callback(msg)
+                    response_code: str = msg.get("response", "unknown")
+                    if response_code != "200":
+                        raise ICResponseError(response_code)
+                    _LOGGER.debug("Received response for %s", msg.get("command"))
+                    return dict(msg)
 
             except TimeoutError:
                 _LOGGER.error("Request %s timed out after %ss", command, effective_timeout)
                 raise
+
+    async def _reader_loop(self) -> None:
+        """Background task that continuously reads messages from IntelliCenter.
+
+        This task runs continuously while connected, reading all incoming messages.
+        - NotifyList notifications are dispatched to the notification callback
+        - Response messages are queued for send_request() to consume
+        """
+        _LOGGER.debug("Reader loop started")
+        try:
+            while self._connected and self._reader:
+                try:
+                    msg = await self._read_message()
+
+                    # Check if this is a response (has "response" field)
+                    if "response" in msg:
+                        # Queue response for send_request to consume
+                        await self._response_queue.put(msg)
+
+                    # Check if it's a notification (NotifyList)
+                    elif msg.get("command") == "NotifyList":
+                        _LOGGER.debug("Received NotifyList notification")
+                        await self._invoke_notification_callback(msg)
+
+                    else:
+                        _LOGGER.debug("Received unknown message type: %s", msg.get("command"))
+
+                except ICConnectionError as err:
+                    if self._connected:  # Only log if we didn't intentionally disconnect
+                        _LOGGER.warning("Connection error in reader loop: %s", err)
+                        await self._handle_connection_lost(err)
+                    break
+
+        except asyncio.CancelledError:
+            _LOGGER.debug("Reader loop cancelled")
+        except Exception as err:
+            _LOGGER.exception("Unexpected error in reader loop: %s", err)
+            if self._connected:
+                await self._handle_connection_lost(err)
 
     async def _keepalive_loop(self) -> None:
         """Send periodic keepalive requests to maintain connection health."""
