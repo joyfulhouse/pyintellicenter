@@ -1,7 +1,7 @@
 """Tests for pyintellicenter connection module (Protocol-based)."""
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -168,17 +168,37 @@ class TestICProtocol:
         mock_transport = MagicMock()
         protocol.connection_made(mock_transport)
 
-        # Create a pending future
+        # Create a pending future with matching message ID
         loop = asyncio.get_running_loop()
         protocol._response_future = loop.create_future()
+        protocol._pending_message_id = "1"
 
-        # Receive response
+        # Receive response with matching messageID
         data = b'{"command":"SendParamList","messageID":"1","response":"200"}\r\n'
         protocol.data_received(data)
 
         assert protocol._response_future.done()
         result = protocol._response_future.result()
         assert result["response"] == "200"
+
+    @pytest.mark.asyncio
+    async def test_data_received_response_ignores_wrong_message_id(self):
+        """Test data_received ignores responses with non-matching messageID."""
+        protocol = ICProtocol()
+        mock_transport = MagicMock()
+        protocol.connection_made(mock_transport)
+
+        # Create a pending future expecting messageID "1"
+        loop = asyncio.get_running_loop()
+        protocol._response_future = loop.create_future()
+        protocol._pending_message_id = "1"
+
+        # Receive response with different messageID (from another client)
+        data = b'{"command":"WriteParamList","messageID":"uuid-from-another-client","response":"200"}\r\n'
+        protocol.data_received(data)
+
+        # Future should NOT be resolved - it doesn't match our messageID
+        assert not protocol._response_future.done()
 
     @pytest.mark.asyncio
     async def test_data_received_invalid_json(self):
@@ -301,23 +321,27 @@ class TestICConnection:
             await asyncio.sleep(CONNECTION_TIMEOUT + 1)
             return (MagicMock(), ICProtocol())
 
-        with patch("asyncio.AbstractEventLoop.create_connection", side_effect=slow_create_connection):
-            with pytest.raises(ICConnectionError):
-                await conn.connect()
+        with (
+            patch("asyncio.AbstractEventLoop.create_connection", side_effect=slow_create_connection),
+            pytest.raises(ICConnectionError),
+        ):
+            await conn.connect()
 
     @pytest.mark.asyncio
     async def test_connect_refused(self):
         """Test connection refused."""
         conn = ICConnection("192.168.1.100")
 
-        with pytest.raises(ICConnectionError):
-            # This will fail because there's no server listening
-            # Just verify error handling
-            with patch(
+        # This will fail because there's no server listening
+        # Just verify error handling
+        with (
+            patch(
                 "asyncio.AbstractEventLoop.create_connection",
                 side_effect=OSError("Connection refused"),
-            ):
-                await conn.connect()
+            ),
+            pytest.raises(ICConnectionError),
+        ):
+            await conn.connect()
 
     @pytest.mark.asyncio
     async def test_send_request_not_connected(self):

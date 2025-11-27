@@ -81,6 +81,9 @@ class ICProtocol(asyncio.Protocol):
         # Request/response correlation via Future
         self._response_future: asyncio.Future[dict[str, Any]] | None = None
 
+        # Message ID for pending request (used to validate responses)
+        self._pending_message_id: str | None = None
+
         # Message ID counter
         self._message_id = 0
 
@@ -175,13 +178,24 @@ class ICProtocol(asyncio.Protocol):
     def _handle_response(self, msg: dict[str, Any]) -> None:
         """Handle a response message by resolving the pending Future.
 
+        IntelliCenter broadcasts responses to all connected clients. We validate
+        the messageID to ensure we only resolve our pending request with responses
+        that were meant for us, ignoring responses from other clients.
+
         Args:
             msg: The parsed response message
         """
-        if self._response_future and not self._response_future.done():
-            self._response_future.set_result(msg)
-        else:
-            _LOGGER.warning("Received response with no pending request: %s", msg)
+        msg_id = msg.get("messageID")
+
+        # Validate that this response is for our pending request
+        if self._pending_message_id and msg_id == self._pending_message_id:
+            if self._response_future and not self._response_future.done():
+                self._response_future.set_result(msg)
+            return
+
+        # This is normal when multiple clients are connected - IntelliCenter
+        # broadcasts responses to all clients, not just the requester
+        _LOGGER.debug("Ignoring response for another client: %s", msg_id)
 
     def _handle_notification(self, msg: dict[str, Any]) -> None:
         """Handle a NotifyList notification.
@@ -236,20 +250,22 @@ class ICProtocol(asyncio.Protocol):
             self._loop = asyncio.get_running_loop()
 
         # Build request with message ID
+        msg_id = self._next_message_id()
         request: dict[str, Any] = {
-            "messageID": self._next_message_id(),
+            "messageID": msg_id,
             "command": command,
             **kwargs,
         }
 
-        # Create Future for response
+        # Create Future for response and track the message ID
         self._response_future = self._loop.create_future()
+        self._pending_message_id = msg_id
 
         try:
             # Send request
             packet = orjson.dumps(request) + b"\r\n"
             self._transport.write(packet)
-            _LOGGER.debug("Sent request: %s (ID: %s)", command, request["messageID"])
+            _LOGGER.debug("Sent request: %s (ID: %s)", command, msg_id)
 
             # Await response via Future (resolved by data_received)
             async with asyncio.timeout(request_timeout):
@@ -269,6 +285,7 @@ class ICProtocol(asyncio.Protocol):
 
         finally:
             self._response_future = None
+            self._pending_message_id = None
 
     def close(self) -> None:
         """Close the connection."""
