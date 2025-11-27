@@ -12,6 +12,10 @@ from .constants import (
     HNAME_ATTR,
     HTMODE_ATTR,
     LISTORD_ATTR,
+    MAX_ATTR,
+    MAXF_ATTR,
+    MIN_ATTR,
+    MINF_ATTR,
     MODE_ATTR,
     ORPHI_ATTR,
     ORPLO_ATTR,
@@ -109,10 +113,10 @@ PUMP_ATTRIBUTES = {
     HNAME_ATTR,  # same as objnam
     GPM_ATTR,  # (int) when applicable, real time Gallon Per Minute
     LISTORD_ATTR,  # (int) used to order in UI
-    "MAX",  # (int) maximum RPM
-    "MAXF",  # (int) maximum GPM (if applicable, 0 otherwise)
-    "MIN",  # (int) minimum RPM
-    "MINF",  # (int) minimum GPM (if applicable, 0 otherwise)
+    MAX_ATTR,  # (int) maximum RPM
+    MAXF_ATTR,  # (int) maximum GPM (if applicable, 0 otherwise)
+    MIN_ATTR,  # (int) minimum RPM
+    MINF_ATTR,  # (int) minimum GPM (if applicable, 0 otherwise)
     "NAME",  # seems to equal OBJNAM
     "OBJLIST",  # ([ objnam] ) a list of PMPCIRC settings
     "PRIMFLO",  # (int) Priming Speed

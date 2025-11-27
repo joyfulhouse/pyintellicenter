@@ -4,6 +4,7 @@ from .constants import (
     BOOST_ATTR,
     CIRCUIT_ATTR,
     HEATER_ATTR,
+    HITMP_ATTR,
     HNAME_ATTR,
     HTMODE_ATTR,
     LISTORD_ATTR,
@@ -35,7 +36,7 @@ BODY_ATTRIBUTES = {
     CIRCUIT_ATTR,  # (objnam) Associated circuit
     "FILTER",  # (objnam) Circuit object that filters this body
     HEATER_ATTR,  # (objnam) Associated heater
-    "HITMP",  # (int) Maximum temperature setting
+    HITMP_ATTR,  # (int) Maximum temperature setting
     HNAME_ATTR,  # equals to OBJNAM
     HTMODE_ATTR,  # (int) >0 if currently heating, 0 if not
     "HTSRC",  # (objnam) the heating source (or '00000')

@@ -6,6 +6,7 @@ from .constants import (
     CIRCUIT_ATTR,
     DLY_ATTR,
     FEATR_ATTR,
+    FREEZE_ATTR,
     HNAME_ATTR,
     LISTORD_ATTR,
     PARENT_ATTR,
@@ -28,7 +29,7 @@ CIRCUIT_ATTRIBUTES = {
     "COVER",
     "DNTSTP",  # (ON/OFF) "Don't Stop", disable egg timer
     FEATR_ATTR,  # (ON/OFF) Featured
-    "FREEZE",  # (ON/OFF) Freeze Protection
+    FREEZE_ATTR,  # (ON/OFF) Freeze Protection
     HNAME_ATTR,  # equals to OBJNAM
     "LIMIT",
     LISTORD_ATTR,  # (int) used to order in UI
