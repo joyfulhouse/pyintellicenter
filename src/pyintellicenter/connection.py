@@ -5,6 +5,7 @@ pool control systems. Supports both TCP and WebSocket transports.
 
 Architecture:
 - ICTransportProtocol: Interface defining transport contract
+- ICNotificationMixin: Shared notification handling logic
 - ICProtocol: TCP transport using asyncio.Protocol (port 6681)
 - ICWebSocketTransport: WebSocket transport using websockets library (port 6680)
 - ICConnection: High-level wrapper with transport selection
@@ -82,7 +83,111 @@ class ICTransportProtocol(Protocol):
         ...
 
 
-class ICProtocol(asyncio.Protocol):
+class ICNotificationMixin:
+    """Mixin providing shared notification handling logic.
+
+    This mixin is used by both ICProtocol and ICWebSocketTransport to avoid
+    code duplication for notification queue management and callback handling.
+    """
+
+    # These are defined in subclasses
+    _notification_callback: NotificationCallback | None
+    _is_async_callback: bool
+    _notification_queue_size: int
+    _notification_queue: asyncio.Queue[dict[str, Any]] | None
+    _consumer_task: asyncio.Task[None] | None
+
+    def _init_notification_mixin(
+        self,
+        notification_callback: NotificationCallback | None,
+        notification_queue_size: int,
+    ) -> None:
+        """Initialize notification handling state."""
+        self._notification_callback = notification_callback
+        self._is_async_callback = (
+            inspect.iscoroutinefunction(notification_callback) if notification_callback else False
+        )
+        self._notification_queue_size = notification_queue_size
+        self._notification_queue = None
+        self._consumer_task = None
+
+    def _start_notification_consumer(self) -> None:
+        """Start the notification consumer task if not already running."""
+        if self._notification_queue is not None:
+            return
+
+        self._notification_queue = asyncio.Queue(maxsize=self._notification_queue_size)
+        self._consumer_task = asyncio.create_task(
+            self._notification_consumer(),
+            name="ic-notification-consumer",
+        )
+
+    def _stop_notification_consumer(self) -> None:
+        """Stop the notification consumer task."""
+        if self._consumer_task and not self._consumer_task.done():
+            self._consumer_task.cancel()
+            self._consumer_task = None
+        self._notification_queue = None
+
+    def _dispatch_message(self, msg: dict[str, Any]) -> None:
+        """Dispatch a parsed message to the appropriate handler."""
+        if "response" in msg:
+            self._handle_response(msg)
+        elif msg.get("command") == "NotifyList":
+            _LOGGER.debug("Received NotifyList notification")
+            self._handle_notification(msg)
+        else:
+            _LOGGER.debug("Received unknown message type: %s", msg.get("command"))
+
+    def _handle_response(self, msg: dict[str, Any]) -> None:
+        """Handle a response message - implemented by subclasses."""
+        raise NotImplementedError
+
+    def _handle_notification(self, msg: dict[str, Any]) -> None:
+        """Handle a NotifyList notification by queuing for processing."""
+        if not self._notification_callback or self._notification_queue is None:
+            return
+
+        try:
+            self._notification_queue.put_nowait(msg)
+        except asyncio.QueueFull:
+            _LOGGER.warning(
+                "Notification queue full (%d items), dropping oldest message",
+                self._notification_queue_size,
+            )
+            try:
+                self._notification_queue.get_nowait()
+                self._notification_queue.put_nowait(msg)
+            except asyncio.QueueEmpty:
+                _LOGGER.debug("Notification queue race - message dropped")
+
+    async def _notification_consumer(self) -> None:
+        """Process notifications from queue."""
+        if self._notification_queue is None:
+            raise RuntimeError("Notification queue not initialized")
+
+        while True:
+            try:
+                msg = await self._notification_queue.get()
+            except asyncio.CancelledError:
+                _LOGGER.debug("Notification consumer cancelled")
+                break
+
+            try:
+                if self._notification_callback:
+                    if self._is_async_callback:
+                        result = self._notification_callback(msg)
+                        if result is not None:
+                            await result
+                    else:
+                        self._notification_callback(msg)
+            except Exception:
+                _LOGGER.exception("Error in notification callback")
+            finally:
+                self._notification_queue.task_done()
+
+
+class ICProtocol(ICNotificationMixin, asyncio.Protocol):
     """TCP transport using asyncio.Protocol for IntelliCenter communication.
 
     This class handles low-level TCP communication using the event-driven
@@ -108,13 +213,8 @@ class ICProtocol(asyncio.Protocol):
             disconnect_callback: Called when connection is lost
             notification_queue_size: Max queued notifications (default: 100)
         """
-        self._notification_callback = notification_callback
+        self._init_notification_mixin(notification_callback, notification_queue_size)
         self._disconnect_callback = disconnect_callback
-
-        # Cache callback type to avoid repeated inspection
-        self._is_async_callback = (
-            inspect.iscoroutinefunction(notification_callback) if notification_callback else False
-        )
 
         # Transport (set by connection_made)
         self._transport: asyncio.Transport | None = None
@@ -134,14 +234,6 @@ class ICProtocol(asyncio.Protocol):
         # Connection state
         self._connected = False
 
-        # Event loop reference (for creating Futures)
-        self._loop: asyncio.AbstractEventLoop | None = None
-
-        # Queue-based notification processing
-        self._notification_queue_size = notification_queue_size
-        self._notification_queue: asyncio.Queue[dict[str, Any]] | None = None
-        self._consumer_task: asyncio.Task[None] | None = None
-
     @property
     def connected(self) -> bool:
         """Return True if connected."""
@@ -151,7 +243,6 @@ class ICProtocol(asyncio.Protocol):
         """Called when connection is established."""
         self._transport = transport  # type: ignore[assignment]
         self._connected = True
-        self._loop = asyncio.get_running_loop()
         self._buffer = bytearray()
         self._message_id = 0
         peername = transport.get_extra_info("peername")
@@ -160,29 +251,12 @@ class ICProtocol(asyncio.Protocol):
         if self._notification_callback:
             self._start_notification_consumer()
 
-    def _start_notification_consumer(self) -> None:
-        """Start the notification consumer task if not already running."""
-        if self._notification_queue is not None:
-            return
-
-        if not self._loop:
-            self._loop = asyncio.get_running_loop()
-
-        self._notification_queue = asyncio.Queue(maxsize=self._notification_queue_size)
-        self._consumer_task = self._loop.create_task(
-            self._notification_consumer(),
-            name="ic-notification-consumer",
-        )
-
     def connection_lost(self, exc: Exception | None) -> None:
         """Called when connection is lost."""
         self._connected = False
         self._transport = None
 
-        if self._consumer_task and not self._consumer_task.done():
-            self._consumer_task.cancel()
-            self._consumer_task = None
-        self._notification_queue = None
+        self._stop_notification_consumer()
 
         if self._response_future and not self._response_future.done():
             if exc:
@@ -218,16 +292,6 @@ class ICProtocol(asyncio.Protocol):
 
             self._dispatch_message(msg)
 
-    def _dispatch_message(self, msg: dict[str, Any]) -> None:
-        """Dispatch a parsed message to the appropriate handler."""
-        if "response" in msg:
-            self._handle_response(msg)
-        elif msg.get("command") == "NotifyList":
-            _LOGGER.debug("Received NotifyList notification")
-            self._handle_notification(msg)
-        else:
-            _LOGGER.debug("Received unknown message type: %s", msg.get("command"))
-
     def _handle_response(self, msg: dict[str, Any]) -> None:
         """Handle a response message by resolving the pending Future."""
         msg_id = msg.get("messageID")
@@ -238,48 +302,6 @@ class ICProtocol(asyncio.Protocol):
             return
 
         _LOGGER.debug("Ignoring response for another client: %s", msg_id)
-
-    def _handle_notification(self, msg: dict[str, Any]) -> None:
-        """Handle a NotifyList notification by queuing for processing."""
-        if not self._notification_callback or self._notification_queue is None:
-            return
-
-        try:
-            self._notification_queue.put_nowait(msg)
-        except asyncio.QueueFull:
-            _LOGGER.warning(
-                "Notification queue full (%d items), dropping oldest message",
-                self._notification_queue_size,
-            )
-            try:
-                self._notification_queue.get_nowait()
-                self._notification_queue.put_nowait(msg)
-            except asyncio.QueueEmpty:
-                _LOGGER.debug("Notification queue race - message dropped")
-
-    async def _notification_consumer(self) -> None:
-        """Process notifications from queue."""
-        assert self._notification_queue is not None
-
-        while True:
-            try:
-                msg = await self._notification_queue.get()
-            except asyncio.CancelledError:
-                _LOGGER.debug("Notification consumer cancelled")
-                break
-
-            try:
-                if self._notification_callback:
-                    if self._is_async_callback:
-                        result = self._notification_callback(msg)
-                        if result is not None:
-                            await result
-                    else:
-                        self._notification_callback(msg)
-            except Exception:
-                _LOGGER.exception("Error in notification callback")
-            finally:
-                self._notification_queue.task_done()
 
     def _next_message_id(self) -> str:
         """Generate the next message ID."""
@@ -296,9 +318,6 @@ class ICProtocol(asyncio.Protocol):
         if not self.connected or not self._transport:
             raise ICConnectionError("Not connected")
 
-        if not self._loop:
-            self._loop = asyncio.get_running_loop()
-
         msg_id = self._next_message_id()
         request: dict[str, Any] = {
             "messageID": msg_id,
@@ -306,7 +325,8 @@ class ICProtocol(asyncio.Protocol):
             **kwargs,
         }
 
-        self._response_future = self._loop.create_future()
+        # Create Future for this request (uses running event loop automatically)
+        self._response_future = asyncio.Future()
         self._pending_message_id = msg_id
 
         try:
@@ -322,7 +342,7 @@ class ICProtocol(asyncio.Protocol):
                 raise ICResponseError(response_code)
 
             _LOGGER.debug("Received response for %s", msg.get("command"))
-            return dict(msg)
+            return msg
 
         except TimeoutError:
             _LOGGER.error("Request %s timed out after %ss", command, request_timeout)
@@ -339,11 +359,10 @@ class ICProtocol(asyncio.Protocol):
             self._transport.close()
 
 
-class ICWebSocketTransport:
+class ICWebSocketTransport(ICNotificationMixin):
     """WebSocket transport for IntelliCenter communication.
 
     Uses the websockets library for WebSocket connections to IntelliCenter.
-    WebSocket provides built-in message framing, so no manual \\r\\n handling needed.
     """
 
     def __init__(
@@ -360,26 +379,16 @@ class ICWebSocketTransport:
             disconnect_callback: Called when connection is lost
             notification_queue_size: Max queued notifications (default: 100)
         """
-        self._notification_callback = notification_callback
+        self._init_notification_mixin(notification_callback, notification_queue_size)
         self._disconnect_callback = disconnect_callback
-
-        self._is_async_callback = (
-            inspect.iscoroutinefunction(notification_callback) if notification_callback else False
-        )
 
         self._ws: Any = None  # websockets.WebSocketClientProtocol
         self._connected = False
         self._message_id = 0
-        self._loop: asyncio.AbstractEventLoop | None = None
 
         # Request/response correlation
         self._response_future: asyncio.Future[dict[str, Any]] | None = None
         self._pending_message_id: str | None = None
-
-        # Queue-based notification processing
-        self._notification_queue_size = notification_queue_size
-        self._notification_queue: asyncio.Queue[dict[str, Any]] | None = None
-        self._consumer_task: asyncio.Task[None] | None = None
 
         # Reader task for incoming messages
         self._reader_task: asyncio.Task[None] | None = None
@@ -405,7 +414,6 @@ class ICWebSocketTransport:
                 timeout=CONNECTION_TIMEOUT,
             )
             self._connected = True
-            self._loop = asyncio.get_running_loop()
             self._message_id = 0
             _LOGGER.debug("WebSocket connected to IntelliCenter at %s:%s", host, port)
 
@@ -413,7 +421,7 @@ class ICWebSocketTransport:
                 self._start_notification_consumer()
 
             # Start reader task
-            self._reader_task = self._loop.create_task(
+            self._reader_task = asyncio.create_task(
                 self._reader_loop(),
                 name="ic-websocket-reader",
             )
@@ -422,20 +430,6 @@ class ICWebSocketTransport:
             raise ICConnectionError(f"WebSocket connection to {host}:{port} timed out") from err
         except Exception as err:
             raise ICConnectionError(f"WebSocket connection failed: {err}") from err
-
-    def _start_notification_consumer(self) -> None:
-        """Start the notification consumer task if not already running."""
-        if self._notification_queue is not None:
-            return
-
-        if not self._loop:
-            self._loop = asyncio.get_running_loop()
-
-        self._notification_queue = asyncio.Queue(maxsize=self._notification_queue_size)
-        self._consumer_task = self._loop.create_task(
-            self._notification_consumer(),
-            name="ic-notification-consumer",
-        )
 
     async def _reader_loop(self) -> None:
         """Read messages from WebSocket and dispatch them."""
@@ -457,16 +451,6 @@ class ICWebSocketTransport:
             _LOGGER.debug("WebSocket reader error: %s", err)
             self._handle_disconnect(err)
 
-    def _dispatch_message(self, msg: dict[str, Any]) -> None:
-        """Dispatch a parsed message to the appropriate handler."""
-        if "response" in msg:
-            self._handle_response(msg)
-        elif msg.get("command") == "NotifyList":
-            _LOGGER.debug("Received NotifyList notification")
-            self._handle_notification(msg)
-        else:
-            _LOGGER.debug("Received unknown message type: %s", msg.get("command"))
-
     def _handle_response(self, msg: dict[str, Any]) -> None:
         """Handle a response message by resolving the pending Future."""
         msg_id = msg.get("messageID")
@@ -478,57 +462,12 @@ class ICWebSocketTransport:
 
         _LOGGER.debug("Ignoring response for another client: %s", msg_id)
 
-    def _handle_notification(self, msg: dict[str, Any]) -> None:
-        """Handle a NotifyList notification by queuing for processing."""
-        if not self._notification_callback or self._notification_queue is None:
-            return
-
-        try:
-            self._notification_queue.put_nowait(msg)
-        except asyncio.QueueFull:
-            _LOGGER.warning(
-                "Notification queue full (%d items), dropping oldest message",
-                self._notification_queue_size,
-            )
-            try:
-                self._notification_queue.get_nowait()
-                self._notification_queue.put_nowait(msg)
-            except asyncio.QueueEmpty:
-                _LOGGER.debug("Notification queue race - message dropped")
-
-    async def _notification_consumer(self) -> None:
-        """Process notifications from queue."""
-        assert self._notification_queue is not None
-
-        while True:
-            try:
-                msg = await self._notification_queue.get()
-            except asyncio.CancelledError:
-                _LOGGER.debug("Notification consumer cancelled")
-                break
-
-            try:
-                if self._notification_callback:
-                    if self._is_async_callback:
-                        result = self._notification_callback(msg)
-                        if result is not None:
-                            await result
-                    else:
-                        self._notification_callback(msg)
-            except Exception:
-                _LOGGER.exception("Error in notification callback")
-            finally:
-                self._notification_queue.task_done()
-
     def _handle_disconnect(self, exc: Exception | None) -> None:
         """Handle disconnection."""
         self._connected = False
         self._ws = None
 
-        if self._consumer_task and not self._consumer_task.done():
-            self._consumer_task.cancel()
-            self._consumer_task = None
-        self._notification_queue = None
+        self._stop_notification_consumer()
 
         if self._response_future and not self._response_future.done():
             if exc:
@@ -556,9 +495,6 @@ class ICWebSocketTransport:
         if not self.connected or not self._ws:
             raise ICConnectionError("Not connected")
 
-        if not self._loop:
-            self._loop = asyncio.get_running_loop()
-
         msg_id = self._next_message_id()
         request: dict[str, Any] = {
             "messageID": msg_id,
@@ -566,7 +502,8 @@ class ICWebSocketTransport:
             **kwargs,
         }
 
-        self._response_future = self._loop.create_future()
+        # Create Future for this request (uses running event loop automatically)
+        self._response_future = asyncio.Future()
         self._pending_message_id = msg_id
 
         try:
@@ -583,7 +520,7 @@ class ICWebSocketTransport:
                 raise ICResponseError(response_code)
 
             _LOGGER.debug("Received response for %s", msg.get("command"))
-            return dict(msg)
+            return msg
 
         except TimeoutError:
             _LOGGER.error("Request %s timed out after %ss", command, request_timeout)
@@ -601,9 +538,7 @@ class ICWebSocketTransport:
             self._reader_task.cancel()
             self._reader_task = None
 
-        if self._consumer_task and not self._consumer_task.done():
-            self._consumer_task.cancel()
-            self._consumer_task = None
+        self._stop_notification_consumer()
 
         if self._ws:
             # Schedule close in background (can't await in sync method)

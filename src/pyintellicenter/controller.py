@@ -589,68 +589,36 @@ class ICModelController(ICBaseController):
         )
 
     def get_bodies(self) -> list[Any]:
-        """Get all body objects (pools and spas).
-
-        Returns:
-            List of PoolObject for bodies
-        """
-        return [obj for obj in self._model if obj.objtype == BODY_TYPE]
+        """Get all body objects (pools and spas)."""
+        return self._model.get_by_type(BODY_TYPE)
 
     def get_circuits(self) -> list[Any]:
-        """Get all circuit objects.
-
-        Returns:
-            List of PoolObject for circuits
-        """
-        return [obj for obj in self._model if obj.objtype == CIRCUIT_TYPE]
+        """Get all circuit objects."""
+        return self._model.get_by_type(CIRCUIT_TYPE)
 
     def get_heaters(self) -> list[Any]:
-        """Get all heater objects.
-
-        Returns:
-            List of PoolObject for heaters
-        """
-        return [obj for obj in self._model if obj.objtype == HEATER_TYPE]
+        """Get all heater objects."""
+        return self._model.get_by_type(HEATER_TYPE)
 
     def get_schedules(self) -> list[Any]:
-        """Get all schedule objects.
-
-        Returns:
-            List of PoolObject for schedules
-        """
-        return [obj for obj in self._model if obj.objtype == SCHED_TYPE]
+        """Get all schedule objects."""
+        return self._model.get_by_type(SCHED_TYPE)
 
     def get_sensors(self) -> list[Any]:
-        """Get all sensor objects.
-
-        Returns:
-            List of PoolObject for sensors
-        """
-        return [obj for obj in self._model if obj.objtype == SENSE_TYPE]
+        """Get all sensor objects."""
+        return self._model.get_by_type(SENSE_TYPE)
 
     def get_pumps(self) -> list[Any]:
-        """Get all pump objects.
-
-        Returns:
-            List of PoolObject for pumps
-        """
-        return [obj for obj in self._model if obj.objtype == PUMP_TYPE]
+        """Get all pump objects."""
+        return self._model.get_by_type(PUMP_TYPE)
 
     def get_chem_controllers(self) -> list[Any]:
-        """Get all chemistry controller objects (IntelliChem, IntelliChlor).
-
-        Returns:
-            List of PoolObject for chemistry controllers
-        """
-        return [obj for obj in self._model if obj.objtype == CHEM_TYPE]
+        """Get all chemistry controller objects (IntelliChem, IntelliChlor)."""
+        return self._model.get_by_type(CHEM_TYPE)
 
     def get_valves(self) -> list[Any]:
-        """Get all valve objects.
-
-        Returns:
-            List of PoolObject for valves
-        """
-        return [obj for obj in self._model if obj.objtype == VALVE_TYPE]
+        """Get all valve objects."""
+        return self._model.get_by_type(VALVE_TYPE)
 
     # =========================================================================
     # Light Helpers (for Home Assistant light entities)
@@ -915,7 +883,7 @@ class ICModelController(ICBaseController):
         Returns:
             List of PoolObject matching the subtype
         """
-        return [obj for obj in self._model if obj.objtype == SENSE_TYPE and obj.subtype == subtype]
+        return self._model.get_by_type(SENSE_TYPE, subtype)
 
     def get_solar_sensors(self) -> list[Any]:
         """Get all solar temperature sensors.

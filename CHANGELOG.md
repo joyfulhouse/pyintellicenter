@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2025-11-27
+
+### Changed
+
+- **Removed deprecated `self._loop` patterns**: Transports now use `asyncio.create_task()` and `asyncio.Future()` directly instead of storing event loop references
+- **Consolidated duplicate transport code**: Created `ICNotificationMixin` to share notification handling logic between `ICProtocol` and `ICWebSocketTransport` (~100 lines of code reuse)
+- **Simplified controller getter methods**: All getters now delegate to `PoolModel.get_by_type()` instead of duplicating list comprehensions
+
+### Fixed
+
+- **Replaced bare asserts with RuntimeError**: Better error handling when notification queue is not initialized
+
 ## [0.1.0] - 2025-11-27
 
 First stable release of pyintellicenter.
@@ -215,7 +227,8 @@ First stable release of pyintellicenter.
 - `orjson` for fast JSON serialization
 - Python 3.11+ required
 
-[Unreleased]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a13...v0.1.0
 [0.0.5a13]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a12...v0.0.5a13
 [0.0.5a12]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a11...v0.0.5a12
