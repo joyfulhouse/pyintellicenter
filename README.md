@@ -7,8 +7,6 @@
 
 Python library for communicating with Pentair IntelliCenter pool control systems over local network.
 
-> **Alpha Release**: This library is in early development. API may change between versions.
-
 ## Features
 
 - **Dual Transport Support**: TCP (port 6681) and WebSocket (port 6680) connections

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pyintellicenter"
-version = "0.0.5a13"
+version = "0.1.0"
 description = "Python library for Pentair IntelliCenter pool control systems"
 readme = "README.md"
 license = "MIT"
@@ -21,7 +21,7 @@ keywords = [
     "asyncio",
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",

@@ -7,49 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.0.5a13] - 2025-11-27
+## [0.1.0] - 2025-11-27
 
-### Fixed
-
-- **Controller default port for WebSocket**: `ICBaseController` and `ICModelController` now correctly default to port 6680 when `transport="websocket"` is specified
-
-## [0.0.5a12] - 2025-11-27
-
-### Fixed
-
-- **WebSocket message framing**: WebSocket messages now include `\r\n` terminator
-  - IntelliCenter requires the same message framing for both TCP and WebSocket
-  - Without the terminator, WebSocket connections would timeout waiting for response
-  - Verified working against live IntelliCenter hardware
-
-## [0.0.5a11] - 2025-11-27
+First stable release of pyintellicenter.
 
 ### Added
 
-- **Transport parameter for controllers**: `ICBaseController` and `ICModelController` now accept `transport` parameter
-
-## [0.0.5a10] - 2025-11-27
-
-### Added
-
-- **Dual transport support**: Both TCP and WebSocket transports are now supported
+- **Dual transport support**: Both TCP and WebSocket transports
   - `ICConnection` accepts `transport` parameter: `"tcp"` (default) or `"websocket"`
   - Default ports: TCP=6681, WebSocket=6680
-  - Custom port overrides default when specified
   - `ICWebSocketTransport` class for WebSocket connections
   - `ICTransportProtocol` interface for transport abstraction
   - `TransportType` literal type for type-safe transport selection
-  - New constants: `DEFAULT_TCP_PORT`, `DEFAULT_WEBSOCKET_PORT`
+- **Queue-based notification processing**: Push notifications processed through async queue
+  - Prevents slow callbacks from blocking the event loop
+  - Bounded queue with backpressure handling (default: 100 items)
+- **Home Assistant convenience helpers** on `ICModelController`:
+  - Light helpers: `get_lights()`, `get_color_lights()`, `set_light_effect()`, `get_light_effect()`, `get_light_effect_name()`, `get_available_light_effects()`
+  - Temperature helpers: `get_temperature_unit()`, `get_body_temperature()`, `get_body_setpoint()`, `get_body_heat_mode()`, `is_body_heating()`
+  - Chemistry helpers: `get_chem_reading()`, `get_chem_alerts()`, `has_chem_alert()`
+  - Sensor helpers: `get_sensors_by_type()`, `get_solar_sensors()`, `get_air_sensors()`, `get_pool_temp_sensors()`, `get_sensor_reading()`
+  - Pump helpers: `is_pump_running()`, `get_pump_rpm()`, `get_pump_gpm()`, `get_pump_watts()`, `get_pump_metrics()`
+  - Discovery helpers: `get_valves()`, `get_all_entities()`, `get_featured_entities()`
+- **mDNS Discovery**: `discover_intellicenter_units()` with shared Zeroconf support
+- **HeaterType Enum**: All 14 heater modes
+- **LIGHT_EFFECTS constant**: Protocol-level mapping of color effect codes
+- **Comprehensive attribute constants** for all equipment types
 
 ### Changed
 
-- **websockets is now a required dependency** (was optional)
-  - Enables runtime transport selection for Home Assistant integration
-  - No need for optional extras to use WebSocket transport
+- **websockets is now a required dependency** for runtime transport selection
+- **Minimum Python version**: 3.13+ (aligned with Home Assistant 2025.11)
 
 ### Fixed
 
-- Added diagnostic logging for notification queue race conditions
+- WebSocket message framing with `\r\n` terminator
+- Controller default port selection based on transport type
+- Notification queue race condition handling
 
 ## [0.0.5a9] - 2025-11-27
 
@@ -221,7 +215,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `orjson` for fast JSON serialization
 - Python 3.11+ required
 
-[Unreleased]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a13...HEAD
+[Unreleased]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a13...v0.1.0
 [0.0.5a13]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a12...v0.0.5a13
 [0.0.5a12]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a11...v0.0.5a12
 [0.0.5a11]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a10...v0.0.5a11
