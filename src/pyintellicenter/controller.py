@@ -19,25 +19,46 @@ from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
 from .attributes import (
+    ALK_ATTR,
     BODY_TYPE,
+    CALC_ATTR,
     CHEM_TYPE,
     CIRCUIT_TYPE,
+    CYACID_ATTR,
+    GPM_ATTR,
     HEATER_TYPE,
+    HTMODE_ATTR,
+    LIGHT_EFFECTS,
     LOTMP_ATTR,
     MODE_ATTR,
     OBJTYP_ATTR,
+    ORPHI_ATTR,
+    ORPLO_ATTR,
+    ORPVAL_ATTR,
     PARENT_ATTR,
+    PHHI_ATTR,
+    PHLO_ATTR,
+    PHVAL_ATTR,
     PROPNAME_ATTR,
+    PUMP_STATUS_ON,
     PUMP_TYPE,
+    PWR_ATTR,
+    QUALTY_ATTR,
+    RPM_ATTR,
+    SALT_ATTR,
     SCHED_TYPE,
     SENSE_TYPE,
     SNAME_ATTR,
+    SOURCE_ATTR,
     STATUS_ATTR,
     STATUS_OFF,
     STATUS_ON,
     SUBTYP_ATTR,
     SUPER_ATTR,
     SYSTEM_TYPE,
+    TEMP_ATTR,
+    USE_ATTR,
+    VALVE_TYPE,
     VER_ATTR,
     HeaterType,
 )
@@ -605,6 +626,443 @@ class ICModelController(ICBaseController):
             List of PoolObject for chemistry controllers
         """
         return [obj for obj in self._model if obj.objtype == CHEM_TYPE]
+
+    def get_valves(self) -> list[Any]:
+        """Get all valve objects.
+
+        Returns:
+            List of PoolObject for valves
+        """
+        return [obj for obj in self._model if obj.objtype == VALVE_TYPE]
+
+    # =========================================================================
+    # Light Helpers (for Home Assistant light entities)
+    # =========================================================================
+
+    def get_lights(self, include_shows: bool = True) -> list[Any]:
+        """Get all light circuits.
+
+        Args:
+            include_shows: If True, include light show circuits (LITSHO)
+
+        Returns:
+            List of PoolObject for light circuits
+        """
+        lights = [obj for obj in self._model if obj.is_a_light]
+        if include_shows:
+            lights.extend(obj for obj in self._model if obj.is_a_light_show)
+        return lights
+
+    def get_color_lights(self) -> list[Any]:
+        """Get lights that support color effects (IntelliBrite, MagicStream, etc.).
+
+        These lights can have their effect/color changed via set_light_effect().
+
+        Returns:
+            List of PoolObject for color-capable lights
+        """
+        return [obj for obj in self._model if obj.supports_color_effects]
+
+    async def set_light_effect(self, objnam: str, effect: str) -> dict[str, Any]:
+        """Set the color effect for a color-capable light.
+
+        Args:
+            objnam: Object name of the light
+            effect: Effect code (e.g., "PARTY", "CARIB", "ROYAL")
+                   Use LIGHT_EFFECTS.keys() for valid codes.
+
+        Returns:
+            Response dictionary
+
+        Raises:
+            ValueError: If effect code is invalid
+
+        Example:
+            await controller.set_light_effect("C0012", "PARTY")
+        """
+        if effect not in LIGHT_EFFECTS:
+            valid = ", ".join(LIGHT_EFFECTS.keys())
+            raise ValueError(f"Invalid effect '{effect}'. Valid effects: {valid}")
+        return await self.request_changes(objnam, {USE_ATTR: effect})
+
+    def get_light_effect(self, objnam: str) -> str | None:
+        """Get the current color effect for a light.
+
+        Args:
+            objnam: Object name of the light
+
+        Returns:
+            Effect code (e.g., "PARTY") or None if not set/not a color light
+        """
+        obj = self._model[objnam]
+        return obj[USE_ATTR] if obj else None
+
+    def get_light_effect_name(self, objnam: str) -> str | None:
+        """Get the human-readable name of the current light effect.
+
+        Args:
+            objnam: Object name of the light
+
+        Returns:
+            Effect name (e.g., "Party Mode") or None
+        """
+        effect = self.get_light_effect(objnam)
+        return LIGHT_EFFECTS.get(effect) if effect else None
+
+    @staticmethod
+    def get_available_light_effects() -> dict[str, str]:
+        """Get all available light effect codes and their names.
+
+        Returns:
+            Dict mapping effect codes to human-readable names
+        """
+        return dict(LIGHT_EFFECTS)
+
+    # =========================================================================
+    # Temperature/Body Helpers (for Home Assistant climate entities)
+    # =========================================================================
+
+    def get_temperature_unit(self) -> str:
+        """Get the temperature unit used by this system.
+
+        Returns:
+            "°C" for Celsius, "°F" for Fahrenheit
+        """
+        if self.system_info and self.system_info.uses_metric:
+            return "°C"
+        return "°F"
+
+    def get_body_temperature(self, body_objnam: str) -> int | None:
+        """Get the current water temperature for a body.
+
+        Args:
+            body_objnam: Object name of the body (pool or spa)
+
+        Returns:
+            Current temperature as integer, or None if unavailable
+        """
+        obj = self._model[body_objnam]
+        if obj and obj[TEMP_ATTR]:
+            try:
+                return int(obj[TEMP_ATTR])
+            except (ValueError, TypeError):
+                return None
+        return None
+
+    def get_body_setpoint(self, body_objnam: str) -> int | None:
+        """Get the temperature setpoint for a body.
+
+        Args:
+            body_objnam: Object name of the body (pool or spa)
+
+        Returns:
+            Setpoint temperature as integer, or None if unavailable
+        """
+        obj = self._model[body_objnam]
+        if obj and obj[LOTMP_ATTR]:
+            try:
+                return int(obj[LOTMP_ATTR])
+            except (ValueError, TypeError):
+                return None
+        return None
+
+    def get_body_heat_mode(self, body_objnam: str) -> HeaterType | None:
+        """Get the current heat mode for a body.
+
+        Args:
+            body_objnam: Object name of the body (pool or spa)
+
+        Returns:
+            HeaterType enum value, or None if unavailable
+        """
+        obj = self._model[body_objnam]
+        if obj and obj[MODE_ATTR]:
+            try:
+                return HeaterType(int(obj[MODE_ATTR]))
+            except (ValueError, TypeError):
+                return None
+        return None
+
+    def is_body_heating(self, body_objnam: str) -> bool:
+        """Check if a body is actively heating.
+
+        Args:
+            body_objnam: Object name of the body (pool or spa)
+
+        Returns:
+            True if heating is active
+        """
+        obj = self._model[body_objnam]
+        if obj:
+            htmode = obj[HTMODE_ATTR]
+            return htmode is not None and htmode != "0"
+        return False
+
+    # =========================================================================
+    # Chemistry Helpers (for Home Assistant sensor entities)
+    # =========================================================================
+
+    def get_chem_reading(self, chem_objnam: str, reading_type: str) -> float | int | None:
+        """Get a chemistry reading from a chemistry controller.
+
+        Args:
+            chem_objnam: Object name of the chemistry controller
+            reading_type: One of "pH", "ORP", "SALT", "ALK", "CYACID",
+                         "CALC", "QUALITY"
+
+        Returns:
+            Reading value, or None if unavailable
+
+        Example:
+            ph = controller.get_chem_reading("CHEM1", "pH")
+            salt = controller.get_chem_reading("CHEM1", "SALT")
+        """
+        obj = self._model[chem_objnam]
+        if not obj:
+            return None
+
+        attr_map = {
+            "pH": PHVAL_ATTR,
+            "ORP": ORPVAL_ATTR,
+            "SALT": SALT_ATTR,
+            "ALK": ALK_ATTR,
+            "CYACID": CYACID_ATTR,
+            "CALC": CALC_ATTR,
+            "QUALITY": QUALTY_ATTR,
+        }
+
+        attr = attr_map.get(reading_type.upper() if reading_type else "")
+        if not attr:
+            return None
+
+        value = obj[attr]
+        if value is None:
+            return None
+
+        try:
+            # pH values are typically decimal, others are integers
+            if reading_type.upper() == "PH":
+                return float(value)
+            return int(value)
+        except (ValueError, TypeError):
+            return None
+
+    def get_chem_alerts(self, chem_objnam: str) -> list[str]:
+        """Get active chemistry alerts for a controller.
+
+        Args:
+            chem_objnam: Object name of the chemistry controller
+
+        Returns:
+            List of active alert names (e.g., ["pH High", "ORP Low"])
+        """
+        obj = self._model[chem_objnam]
+        if not obj:
+            return []
+
+        alerts = []
+        alert_checks = [
+            (PHHI_ATTR, "pH High"),
+            (PHLO_ATTR, "pH Low"),
+            (ORPHI_ATTR, "ORP High"),
+            (ORPLO_ATTR, "ORP Low"),
+        ]
+
+        for attr, name in alert_checks:
+            if obj[attr] == STATUS_ON:
+                alerts.append(name)
+
+        return alerts
+
+    def has_chem_alert(self, chem_objnam: str) -> bool:
+        """Check if any chemistry alert is active.
+
+        Args:
+            chem_objnam: Object name of the chemistry controller
+
+        Returns:
+            True if any alert is active
+        """
+        return len(self.get_chem_alerts(chem_objnam)) > 0
+
+    # =========================================================================
+    # Sensor Helpers (for Home Assistant sensor entities)
+    # =========================================================================
+
+    def get_sensors_by_type(self, subtype: str) -> list[Any]:
+        """Get sensors of a specific type.
+
+        Args:
+            subtype: Sensor subtype ("SOLAR", "POOL", "AIR")
+
+        Returns:
+            List of PoolObject matching the subtype
+        """
+        return [obj for obj in self._model if obj.objtype == SENSE_TYPE and obj.subtype == subtype]
+
+    def get_solar_sensors(self) -> list[Any]:
+        """Get all solar temperature sensors.
+
+        Returns:
+            List of PoolObject for solar sensors
+        """
+        return self.get_sensors_by_type("SOLAR")
+
+    def get_air_sensors(self) -> list[Any]:
+        """Get all air temperature sensors.
+
+        Returns:
+            List of PoolObject for air sensors
+        """
+        return self.get_sensors_by_type("AIR")
+
+    def get_pool_temp_sensors(self) -> list[Any]:
+        """Get all pool water temperature sensors.
+
+        Returns:
+            List of PoolObject for pool temp sensors
+        """
+        return self.get_sensors_by_type("POOL")
+
+    def get_sensor_reading(self, sensor_objnam: str) -> int | None:
+        """Get the current calibrated reading from a sensor.
+
+        Args:
+            sensor_objnam: Object name of the sensor
+
+        Returns:
+            Calibrated reading as integer, or None if unavailable
+        """
+        obj = self._model[sensor_objnam]
+        if obj and obj[SOURCE_ATTR]:
+            try:
+                return int(obj[SOURCE_ATTR])
+            except (ValueError, TypeError):
+                return None
+        return None
+
+    # =========================================================================
+    # Pump Helpers (for Home Assistant sensor/switch entities)
+    # =========================================================================
+
+    def is_pump_running(self, pump_objnam: str) -> bool:
+        """Check if a pump is currently running.
+
+        Note: Pumps use different status values than circuits.
+        "10" = running, "4" = stopped.
+
+        Args:
+            pump_objnam: Object name of the pump
+
+        Returns:
+            True if pump is running
+        """
+        obj = self._model[pump_objnam]
+        if obj:
+            return bool(obj[STATUS_ATTR] == PUMP_STATUS_ON)
+        return False
+
+    def get_pump_rpm(self, pump_objnam: str) -> int | None:
+        """Get current pump RPM.
+
+        Args:
+            pump_objnam: Object name of the pump
+
+        Returns:
+            Current RPM, or None if unavailable
+        """
+        obj = self._model[pump_objnam]
+        if obj and obj[RPM_ATTR]:
+            try:
+                return int(obj[RPM_ATTR])
+            except (ValueError, TypeError):
+                return None
+        return None
+
+    def get_pump_gpm(self, pump_objnam: str) -> int | None:
+        """Get current pump flow rate in gallons per minute.
+
+        Args:
+            pump_objnam: Object name of the pump
+
+        Returns:
+            Current GPM, or None if unavailable
+        """
+        obj = self._model[pump_objnam]
+        if obj and obj[GPM_ATTR]:
+            try:
+                return int(obj[GPM_ATTR])
+            except (ValueError, TypeError):
+                return None
+        return None
+
+    def get_pump_watts(self, pump_objnam: str) -> int | None:
+        """Get current pump power consumption in watts.
+
+        Args:
+            pump_objnam: Object name of the pump
+
+        Returns:
+            Current power in watts, or None if unavailable
+        """
+        obj = self._model[pump_objnam]
+        if obj and obj[PWR_ATTR]:
+            try:
+                return int(obj[PWR_ATTR])
+            except (ValueError, TypeError):
+                return None
+        return None
+
+    def get_pump_metrics(self, pump_objnam: str) -> dict[str, int | None]:
+        """Get all pump metrics in a single call.
+
+        Args:
+            pump_objnam: Object name of the pump
+
+        Returns:
+            Dict with keys: rpm, gpm, watts (values may be None)
+        """
+        return {
+            "rpm": self.get_pump_rpm(pump_objnam),
+            "gpm": self.get_pump_gpm(pump_objnam),
+            "watts": self.get_pump_watts(pump_objnam),
+        }
+
+    # =========================================================================
+    # Entity Discovery Helpers (for Home Assistant integration setup)
+    # =========================================================================
+
+    def get_all_entities(self) -> dict[str, list[Any]]:
+        """Get all entities grouped by type for Home Assistant discovery.
+
+        Returns:
+            Dict with keys: bodies, circuits, lights, color_lights, pumps,
+            heaters, sensors, chem_controllers, schedules, valves
+        """
+        return {
+            "bodies": self.get_bodies(),
+            "circuits": [c for c in self.get_circuits() if not c.is_a_light],
+            "lights": self.get_lights(include_shows=False),
+            "light_shows": [obj for obj in self._model if obj.is_a_light_show],
+            "color_lights": self.get_color_lights(),
+            "pumps": self.get_pumps(),
+            "heaters": self.get_heaters(),
+            "sensors": self.get_sensors(),
+            "chem_controllers": self.get_chem_controllers(),
+            "schedules": self.get_schedules(),
+            "valves": self.get_valves(),
+        }
+
+    def get_featured_entities(self) -> list[Any]:
+        """Get entities marked as 'featured' in IntelliCenter.
+
+        These are typically the most important entities that should
+        be prominently displayed.
+
+        Returns:
+            List of featured PoolObject
+        """
+        return [obj for obj in self._model if obj.is_featured]
 
 
 # Reconnection constants

@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.5a9] - 2025-11-27
+
+### Added
+
+- **Queue-based notification processing**: Push notifications are now processed through an async queue
+  - Prevents slow callbacks from blocking the event loop
+  - Bounded queue with backpressure handling (default: 100 items)
+  - Graceful degradation when queue is full (drops oldest, logs warning)
+
+- **Home Assistant convenience helpers** on `ICModelController`:
+  - **Light helpers**: `get_lights()`, `get_color_lights()`, `set_light_effect()`, `get_light_effect()`, `get_light_effect_name()`, `get_available_light_effects()`
+  - **Temperature helpers**: `get_temperature_unit()`, `get_body_temperature()`, `get_body_setpoint()`, `get_body_heat_mode()`, `is_body_heating()`
+  - **Chemistry helpers**: `get_chem_reading()`, `get_chem_alerts()`, `has_chem_alert()`
+  - **Sensor helpers**: `get_sensors_by_type()`, `get_solar_sensors()`, `get_air_sensors()`, `get_pool_temp_sensors()`, `get_sensor_reading()`
+  - **Pump helpers**: `is_pump_running()`, `get_pump_rpm()`, `get_pump_gpm()`, `get_pump_watts()`, `get_pump_metrics()`
+  - **Discovery helpers**: `get_valves()`, `get_all_entities()`, `get_featured_entities()`
+
+### Changed
+
+- **Callback type caching**: `inspect.iscoroutinefunction()` result is now cached at callback setup time
+- **Efficient buffer handling**: Changed from `bytes` to `bytearray` for receive buffer (in-place operations)
+- Callbacks can now be set after connection is established (consumer task starts lazily)
+
+### Fixed
+
+- Notification callbacks no longer block `data_received()` in the event loop
+
 ## [0.0.5a5] - 2025-11-26
 
 ### Changed
@@ -150,7 +177,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `orjson` for fast JSON serialization
 - Python 3.11+ required
 
-[Unreleased]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a5...HEAD
+[Unreleased]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a9...HEAD
+[0.0.5a9]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a8...v0.0.5a9
 [0.0.5a5]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a4...v0.0.5a5
 [0.0.5a4]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a3...v0.0.5a4
 [0.0.5a3]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a2...v0.0.5a3

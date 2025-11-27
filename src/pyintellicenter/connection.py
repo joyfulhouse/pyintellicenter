@@ -13,6 +13,7 @@ Features:
 - asyncio.Future for request/response correlation
 - Automatic message framing (messages end with \\r\\n)
 - Automatic keepalive with configurable interval
+- Queue-based notification processing to prevent event loop blocking
 - Support for both sync and async notification callbacks
 """
 
@@ -43,6 +44,7 @@ RESPONSE_TIMEOUT = 30.0  # seconds to wait for a response
 KEEPALIVE_INTERVAL = 90.0  # seconds between keepalive requests
 CONNECTION_TIMEOUT = 10.0  # seconds to wait for initial connection
 MAX_BUFFER_SIZE = 1024 * 1024  # 1MB max buffer to prevent DoS
+DEFAULT_NOTIFICATION_QUEUE_SIZE = 100  # max queued notifications
 
 
 class ICProtocol(asyncio.Protocol):
@@ -54,29 +56,42 @@ class ICProtocol(asyncio.Protocol):
 
     Message handling:
     - Response messages (with "response" field) resolve the pending Future
-    - Notification messages (NotifyList) trigger the notification callback
+    - Notification messages (NotifyList) are queued for async processing
     - Messages are framed by \\r\\n terminator
+
+    Notification Processing:
+    - Uses an asyncio.Queue to decouple receipt from processing
+    - Prevents slow callbacks from blocking the event loop
+    - Provides backpressure handling with bounded queue
     """
 
     def __init__(
         self,
         notification_callback: NotificationCallback | None = None,
         disconnect_callback: DisconnectCallback | None = None,
+        *,
+        notification_queue_size: int = DEFAULT_NOTIFICATION_QUEUE_SIZE,
     ) -> None:
         """Initialize the protocol.
 
         Args:
             notification_callback: Called when NotifyList notifications arrive
             disconnect_callback: Called when connection is lost
+            notification_queue_size: Max queued notifications (default: 100)
         """
         self._notification_callback = notification_callback
         self._disconnect_callback = disconnect_callback
 
+        # Cache callback type to avoid repeated inspection
+        self._is_async_callback = (
+            inspect.iscoroutinefunction(notification_callback) if notification_callback else False
+        )
+
         # Transport (set by connection_made)
         self._transport: asyncio.Transport | None = None
 
-        # Buffer for incomplete messages
-        self._buffer = b""
+        # Buffer for incomplete messages (bytearray for efficient appending)
+        self._buffer = bytearray()
 
         # Request/response correlation via Future
         self._response_future: asyncio.Future[dict[str, Any]] | None = None
@@ -93,6 +108,11 @@ class ICProtocol(asyncio.Protocol):
         # Event loop reference (for creating Futures)
         self._loop: asyncio.AbstractEventLoop | None = None
 
+        # Queue-based notification processing
+        self._notification_queue_size = notification_queue_size
+        self._notification_queue: asyncio.Queue[dict[str, Any]] | None = None
+        self._consumer_task: asyncio.Task[None] | None = None
+
     @property
     def connected(self) -> bool:
         """Return True if connected."""
@@ -107,10 +127,28 @@ class ICProtocol(asyncio.Protocol):
         self._transport = transport  # type: ignore[assignment]
         self._connected = True
         self._loop = asyncio.get_running_loop()
-        self._buffer = b""
+        self._buffer = bytearray()
         self._message_id = 0
         peername = transport.get_extra_info("peername")
         _LOGGER.debug("Connected to IntelliCenter at %s", peername)
+
+        # Start notification consumer if callback is set
+        if self._notification_callback:
+            self._start_notification_consumer()
+
+    def _start_notification_consumer(self) -> None:
+        """Start the notification consumer task if not already running."""
+        if self._notification_queue is not None:
+            return  # Already running
+
+        if not self._loop:
+            self._loop = asyncio.get_running_loop()
+
+        self._notification_queue = asyncio.Queue(maxsize=self._notification_queue_size)
+        self._consumer_task = self._loop.create_task(
+            self._notification_consumer(),
+            name="ic-notification-consumer",
+        )
 
     def connection_lost(self, exc: Exception | None) -> None:
         """Called when connection is lost.
@@ -120,6 +158,12 @@ class ICProtocol(asyncio.Protocol):
         """
         self._connected = False
         self._transport = None
+
+        # Cancel notification consumer task
+        if self._consumer_task and not self._consumer_task.done():
+            self._consumer_task.cancel()
+            self._consumer_task = None
+        self._notification_queue = None
 
         # Cancel any pending request
         if self._response_future and not self._response_future.done():
@@ -143,7 +187,8 @@ class ICProtocol(asyncio.Protocol):
         Args:
             data: Raw bytes received from the connection
         """
-        self._buffer += data
+        # Use extend for efficient in-place append (bytearray)
+        self._buffer.extend(data)
 
         # Protect against buffer overflow (DoS prevention)
         if len(self._buffer) > MAX_BUFFER_SIZE:
@@ -154,7 +199,10 @@ class ICProtocol(asyncio.Protocol):
 
         # Process complete messages (terminated by \r\n)
         while b"\r\n" in self._buffer:
-            line, self._buffer = self._buffer.split(b"\r\n", 1)
+            # Find terminator and split
+            idx = self._buffer.index(b"\r\n")
+            line = bytes(self._buffer[:idx])
+            del self._buffer[: idx + 2]  # Efficient in-place deletion
 
             try:
                 msg: dict[str, Any] = orjson.loads(line)
@@ -198,21 +246,59 @@ class ICProtocol(asyncio.Protocol):
         _LOGGER.debug("Ignoring response for another client: %s", msg_id)
 
     def _handle_notification(self, msg: dict[str, Any]) -> None:
-        """Handle a NotifyList notification.
+        """Handle a NotifyList notification by queuing for processing.
+
+        Uses a bounded queue to decouple notification receipt from processing,
+        preventing slow callbacks from blocking the event loop.
 
         Args:
             msg: The parsed notification message
         """
-        if not self._notification_callback:
+        if not self._notification_callback or self._notification_queue is None:
             return
 
-        if inspect.iscoroutinefunction(self._notification_callback):
-            # Schedule async callback
-            if self._loop:
-                self._loop.create_task(self._notification_callback(msg))
-        else:
-            # Call sync callback directly
-            self._notification_callback(msg)
+        try:
+            self._notification_queue.put_nowait(msg)
+        except asyncio.QueueFull:
+            _LOGGER.warning(
+                "Notification queue full (%d items), dropping oldest message",
+                self._notification_queue_size,
+            )
+            # Drop oldest to make room for newest (prefer fresh state)
+            try:
+                self._notification_queue.get_nowait()
+                self._notification_queue.put_nowait(msg)
+            except asyncio.QueueEmpty:
+                pass
+
+    async def _notification_consumer(self) -> None:
+        """Process notifications from queue - runs as dedicated task.
+
+        This consumer runs in a dedicated task, processing notifications
+        one at a time while preserving order. Supports both sync and async
+        callbacks.
+        """
+        assert self._notification_queue is not None
+
+        while True:
+            try:
+                msg = await self._notification_queue.get()
+            except asyncio.CancelledError:
+                _LOGGER.debug("Notification consumer cancelled")
+                break
+
+            try:
+                if self._notification_callback:
+                    if self._is_async_callback:
+                        result = self._notification_callback(msg)
+                        if result is not None:
+                            await result
+                    else:
+                        self._notification_callback(msg)
+            except Exception:
+                _LOGGER.exception("Error in notification callback")
+            finally:
+                self._notification_queue.task_done()
 
     def _next_message_id(self) -> str:
         """Generate the next message ID."""
@@ -315,6 +401,7 @@ class ICConnection:
         port: int = DEFAULT_PORT,
         response_timeout: float = RESPONSE_TIMEOUT,
         keepalive_interval: float = KEEPALIVE_INTERVAL,
+        notification_queue_size: int = DEFAULT_NOTIFICATION_QUEUE_SIZE,
     ) -> None:
         """Initialize connection configuration.
 
@@ -323,16 +410,18 @@ class ICConnection:
             port: TCP port (default: 6681)
             response_timeout: Seconds to wait for response (default: 30)
             keepalive_interval: Seconds between keepalive requests (default: 90)
+            notification_queue_size: Max queued notifications before dropping (default: 100)
         """
         self._host = host
         self._port = port
         self._response_timeout = response_timeout
         self._keepalive_interval = keepalive_interval
+        self._notification_queue_size = notification_queue_size
 
         # Protocol instance (created on connect)
         self._protocol: ICProtocol | None = None
 
-        # Callbacks
+        # Callbacks (should be set before connect() for notification queue to work)
         self._notification_callback: NotificationCallback | None = None
         self._disconnect_callback: DisconnectCallback | None = None
 
@@ -364,7 +453,8 @@ class ICConnection:
     def set_notification_callback(self, callback: NotificationCallback | None) -> None:
         """Set callback for NotifyList push notifications.
 
-        The callback can be either sync or async. If async, it will be scheduled.
+        The callback can be either sync or async. Both are processed through
+        an async queue to prevent blocking the event loop.
 
         Args:
             callback: Function to call with notification data, or None to clear.
@@ -372,6 +462,13 @@ class ICConnection:
         self._notification_callback = callback
         if self._protocol:
             self._protocol._notification_callback = callback
+            # Update cached async flag
+            self._protocol._is_async_callback = (
+                inspect.iscoroutinefunction(callback) if callback else False
+            )
+            # Start notification consumer if not already running and connected
+            if callback and self._protocol.connected and self._protocol._notification_queue is None:
+                self._protocol._start_notification_consumer()
 
     def set_disconnect_callback(self, callback: DisconnectCallback | None) -> None:
         """Set callback for disconnection events.
@@ -412,6 +509,7 @@ class ICConnection:
                     lambda: ICProtocol(
                         notification_callback=self._notification_callback,
                         disconnect_callback=self._on_disconnect,
+                        notification_queue_size=self._notification_queue_size,
                     ),
                     self._host,
                     self._port,

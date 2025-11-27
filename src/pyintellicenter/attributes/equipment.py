@@ -1,18 +1,27 @@
 """Equipment attribute definitions (pumps, heaters, chemistry, sensors)."""
 
 from .constants import (
+    ALK_ATTR,
     BODY_ATTR,
+    CALC_ATTR,
     CIRCUIT_ATTR,
     COMUART_ATTR,
+    CYACID_ATTR,
     DLY_ATTR,
     GPM_ATTR,
     HNAME_ATTR,
     HTMODE_ATTR,
     LISTORD_ATTR,
     MODE_ATTR,
+    ORPHI_ATTR,
+    ORPLO_ATTR,
+    ORPSET_ATTR,
     ORPTNK_ATTR,
     ORPVAL_ATTR,
     PARENT_ATTR,
+    PHHI_ATTR,
+    PHLO_ATTR,
+    PHSET_ATTR,
     PHTNK_ATTR,
     PHVAL_ATTR,
     PRIM_ATTR,
@@ -36,23 +45,23 @@ from .constants import (
 
 # Chemistry controller attributes (IntelliChlor, IntelliChem)
 CHEM_ATTRIBUTES = {
-    "ALK",  # (int) IntelliChem: Alkalinity setting
+    ALK_ATTR,  # (int) IntelliChem: Alkalinity setting
     BODY_ATTR,  # (objnam) BODY being managed
-    "CALC",  # (int) IntelliChem: Calcium Harness setting
+    CALC_ATTR,  # (int) IntelliChem: Calcium Hardness setting
     "CHLOR",  # (ON/OFF) IntelliChem: ??
     COMUART_ATTR,  # (int) X25 related ?
-    "CYACID",  # (int) IntelliChem: Cyanuric Acid setting
+    CYACID_ATTR,  # (int) IntelliChem: Cyanuric Acid setting
     LISTORD_ATTR,  # (int) used to order in UI
-    "ORPHI",  # (ON/OFF) IntelliChem: ORP Level too high?
-    "ORPLO",  # (ON/OFF) IntelliChem: ORP Level too low?
-    "ORPSET",  # (int) IntelliChem ORP level setting
+    ORPHI_ATTR,  # (ON/OFF) IntelliChem: ORP Level too high?
+    ORPLO_ATTR,  # (ON/OFF) IntelliChem: ORP Level too low?
+    ORPSET_ATTR,  # (int) IntelliChem ORP level setpoint (400-800 mV)
     ORPTNK_ATTR,  # (int) IntelliChem: ORP Tank Level
     ORPVAL_ATTR,  # (int) IntelliChem: ORP Level
-    "PHHI",  # (ON/OFF) IntelliChem: Ph Level too low?
-    "PHLO",  # (ON/OFF) IntelliChem: Ph Level too low?
-    "PHSET",  # (float) IntelliChem Ph level setting
-    PHTNK_ATTR,  # (int) IntelliChem: Ph Tank Level
-    PHVAL_ATTR,  # (float) IntelliChem: Ph Level
+    PHHI_ATTR,  # (ON/OFF) IntelliChem: pH Level too high?
+    PHLO_ATTR,  # (ON/OFF) IntelliChem: pH Level too low?
+    PHSET_ATTR,  # (float) IntelliChem pH level setpoint (7.0-7.6)
+    PHTNK_ATTR,  # (int) IntelliChem: pH Tank Level
+    PHVAL_ATTR,  # (float) IntelliChem: pH Level
     PRIM_ATTR,  # (int) IntelliChlor: primary body output setting in %
     QUALTY_ATTR,  # (float) IntelliChem: Water Quality (Saturation Index)
     SALT_ATTR,  # (int) Salt level

@@ -86,7 +86,7 @@ class TestICConnectionIntegration:
     async def test_notification_callback(self, server):
         """Test notification callback is called during request processing.
 
-        Notifications are processed during send_request() calls, so we
+        Notifications are processed via queue during send_request() calls, so we
         configure the server to send a notification before responding.
         """
         received_notifications: list[dict] = []
@@ -94,9 +94,11 @@ class TestICConnectionIntegration:
         def on_notification(msg: dict) -> None:
             received_notifications.append(msg)
 
-        async with ICConnection(server.host, server.port) as conn:
-            conn.set_notification_callback(on_notification)
+        # Set callback BEFORE connecting so the notification queue is initialized
+        conn = ICConnection(server.host, server.port)
+        conn.set_notification_callback(on_notification)
 
+        async with conn:
             # Configure server to send notification before responding
             original_handler = server._handlers["GetParamList"]
 
@@ -119,6 +121,9 @@ class TestICConnectionIntegration:
 
             # Restore original handler
             server._handlers["GetParamList"] = original_handler
+
+            # Allow queue consumer to process the notification
+            await asyncio.sleep(0.02)
 
             # Verify notification was received
             assert len(received_notifications) == 1
@@ -391,6 +396,9 @@ class TestICModelControllerIntegration:
 
             # Restore handler
             server._handlers["GetParamList"] = original_handler
+
+            # Allow notification queue consumer to process
+            await asyncio.sleep(0.02)
 
             # Model should be updated
             assert pool["TEMP"] == "85"

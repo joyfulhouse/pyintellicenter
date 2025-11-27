@@ -26,11 +26,13 @@ Example usage:
 from .attributes import (
     # Attribute name constants
     ACT_ATTR,
+    ALK_ATTR,
     AVAIL_ATTR,
     BODY_ATTR,
     # Type constants
     BODY_TYPE,
     BOOST_ATTR,
+    CALC_ATTR,
     CHEM_TYPE,
     CIRCGRP_TYPE,
     CIRCUIT_ATTR,
@@ -39,6 +41,7 @@ from .attributes import (
     COLOR_EFFECT_SUBTYPES,
     COMUART_ATTR,
     COOLING_ATTR,
+    CYACID_ATTR,
     DLY_ATTR,
     ENABLE_ATTR,
     EXTINSTR_TYPE,
@@ -62,12 +65,18 @@ from .attributes import (
     # Special values
     NULL_OBJNAM,
     OBJTYP_ATTR,
+    ORPHI_ATTR,
+    ORPLO_ATTR,
+    ORPSET_ATTR,
     ORPTNK_ATTR,
     ORPVAL_ATTR,
     PANEL_TYPE,
     PARENT_ATTR,
     PERMIT_ATTR,
     PERMIT_TYPE,
+    PHHI_ATTR,
+    PHLO_ATTR,
+    PHSET_ATTR,
     PHTNK_ATTR,
     PHVAL_ATTR,
     PMPCIRC_TYPE,
@@ -155,7 +164,7 @@ try:
 except ImportError:
     _DISCOVERY_AVAILABLE = False
 
-__version__ = "0.0.5a8"
+__version__ = "0.0.5a9"
 
 __all__ = [
     # Version
@@ -220,12 +229,15 @@ __all__ = [
     "NULL_OBJNAM",
     # Attributes
     "ACT_ATTR",
+    "ALK_ATTR",
     "AVAIL_ATTR",
     "BODY_ATTR",
     "BOOST_ATTR",
+    "CALC_ATTR",
     "CIRCUIT_ATTR",
     "COMUART_ATTR",
     "COOLING_ATTR",
+    "CYACID_ATTR",
     "DLY_ATTR",
     "ENABLE_ATTR",
     "FEATR_ATTR",
@@ -241,10 +253,16 @@ __all__ = [
     "MODE_ATTR",
     "NORMAL_ATTR",
     "OBJTYP_ATTR",
+    "ORPHI_ATTR",
+    "ORPLO_ATTR",
+    "ORPSET_ATTR",
     "ORPTNK_ATTR",
     "ORPVAL_ATTR",
     "PARENT_ATTR",
     "PERMIT_ATTR",
+    "PHHI_ATTR",
+    "PHLO_ATTR",
+    "PHSET_ATTR",
     "PHTNK_ATTR",
     "PHVAL_ATTR",
     "PRIM_ATTR",

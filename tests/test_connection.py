@@ -115,6 +115,9 @@ class TestICProtocol:
         data = b'{"command":"NotifyList","objectList":[{"objnam":"PUMP1"}]}\r\n'
         protocol.data_received(data)
 
+        # Allow queue consumer task to process (notifications are now async)
+        await asyncio.sleep(0.01)
+
         assert len(notifications) == 1
         assert notifications[0]["command"] == "NotifyList"
 
@@ -133,12 +136,16 @@ class TestICProtocol:
         # Send partial message
         protocol.data_received(b'{"command":"NotifyList"')
         assert len(notifications) == 0
-        assert protocol._buffer == b'{"command":"NotifyList"'
+        assert protocol._buffer == bytearray(b'{"command":"NotifyList"')
 
         # Complete the message
         protocol.data_received(b',"objectList":[]}\r\n')
+
+        # Allow queue consumer task to process (notifications are now async)
+        await asyncio.sleep(0.01)
+
         assert len(notifications) == 1
-        assert protocol._buffer == b""
+        assert protocol._buffer == bytearray()
 
     @pytest.mark.asyncio
     async def test_data_received_multiple_messages(self):
@@ -158,6 +165,9 @@ class TestICProtocol:
             b'{"command":"NotifyList","objectList":[{"objnam":"PUMP2"}]}\r\n'
         )
         protocol.data_received(data)
+
+        # Allow queue consumer task to process (notifications are now async)
+        await asyncio.sleep(0.01)
 
         assert len(notifications) == 2
 
@@ -322,7 +332,9 @@ class TestICConnection:
             return (MagicMock(), ICProtocol())
 
         with (
-            patch("asyncio.AbstractEventLoop.create_connection", side_effect=slow_create_connection),
+            patch(
+                "asyncio.AbstractEventLoop.create_connection", side_effect=slow_create_connection
+            ),
             pytest.raises(ICConnectionError),
         ):
             await conn.connect()
@@ -482,7 +494,7 @@ class TestICProtocolIntegration:
 
     @pytest.mark.asyncio
     async def test_notification_callback_sync(self):
-        """Test sync notification callback."""
+        """Test sync notification callback (processed via queue)."""
         notifications = []
 
         def on_notification(msg):
@@ -494,6 +506,9 @@ class TestICProtocolIntegration:
 
         notification_data = b'{"command":"NotifyList","objectList":[{"objnam":"PUMP1"}]}\r\n'
         protocol.data_received(notification_data)
+
+        # Allow queue consumer task to process (sync callbacks are also queued)
+        await asyncio.sleep(0.01)
 
         assert len(notifications) == 1
         assert notifications[0]["command"] == "NotifyList"
