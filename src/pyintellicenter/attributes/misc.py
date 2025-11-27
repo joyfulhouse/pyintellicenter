@@ -46,6 +46,7 @@ FEATR_ATTRIBUTES = {
 # Press attributes (no idea what this object type represents)
 # Only seems to be one instance of it
 PRESS_ATTRIBUTES = {
+    READY_ATTR,  # (ON/OFF) Ready state
     SHOMNU_ATTR,  # (ON/OFF) ???
     SNAME_ATTR,  # seems equal to objnam
     STATIC_ATTR,  # (ON/OFF) only seen ON
@@ -56,6 +57,7 @@ REMBTN_ATTRIBUTES = {
     CIRCUIT_ATTR,  # (objnam) the circuit triggered by the button
     LISTORD_ATTR,  # (int) which button on the remote (1 to 4)
     PARENT_ATTR,  # (objnam) the remote this button is associated with
+    READY_ATTR,  # (ON/OFF) Ready state
     STATIC_ATTR,  # (ON/OFF) not sure, only seen 'ON'
 }
 
@@ -66,6 +68,7 @@ REMOTE_ATTRIBUTES = {
     ENABLE_ATTR,  # (ON/OFF) 'ON' if the remote is set to active
     HNAME_ATTR,  # same as objnam
     LISTORD_ATTR,  # number likely used to order things in UI
+    READY_ATTR,  # (ON/OFF) Ready state
     SNAME_ATTR,  # friendly name
     STATIC_ATTR,  # (ON/OFF) not sure, only seen 'OFF'
     SUBTYP_ATTR,  # type of the remote, I've only seen IS4
@@ -78,6 +81,7 @@ VALVE_ATTRIBUTES = {
     DLY_ATTR,  # (ON/OFF)
     HNAME_ATTR,  # same as objnam
     PARENT_ATTR,  # (objnam) parent (a module)
+    READY_ATTR,  # (ON/OFF) Ready state
     SNAME_ATTR,  # friendly name
     STATIC_ATTR,  # (ON/OFF) I've only seen 'OFF'
     SUBTYP_ATTR,  # I've only seen 'LEGACY'

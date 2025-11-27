@@ -4,6 +4,7 @@ from .constants import (
     ALK_ATTR,
     BODY_ATTR,
     CALC_ATTR,
+    CALIB_ATTR,
     CIRCUIT_ATTR,
     COMUART_ATTR,
     CYACID_ATTR,
@@ -29,6 +30,7 @@ from .constants import (
     PHTNK_ATTR,
     PHVAL_ATTR,
     PRIM_ATTR,
+    PROBE_ATTR,
     PWR_ATTR,
     QUALTY_ATTR,
     READY_ATTR,
@@ -43,6 +45,7 @@ from .constants import (
     STATUS_ATTR,
     SUBTYP_ATTR,
     SUPER_ATTR,
+    TEMP_ATTR,
     TIME_ATTR,
     TIMOUT_ATTR,
 )
@@ -52,10 +55,11 @@ CHEM_ATTRIBUTES = {
     ALK_ATTR,  # (int) IntelliChem: Alkalinity setting
     BODY_ATTR,  # (objnam) BODY being managed
     CALC_ATTR,  # (int) IntelliChem: Calcium Hardness setting
-    "CHLOR",  # (ON/OFF) IntelliChem: ??
-    COMUART_ATTR,  # (int) X25 related ?
+    "CHLOR",  # (ON/OFF) IntelliChem: Chlorinator status
+    COMUART_ATTR,  # (int) X25 related
     CYACID_ATTR,  # (int) IntelliChem: Cyanuric Acid setting
     LISTORD_ATTR,  # (int) used to order in UI
+    MODE_ATTR,  # (str) IntelliChem: Operating mode (OFF, etc.)
     ORPHI_ATTR,  # (ON/OFF) IntelliChem: ORP Level too high?
     ORPLO_ATTR,  # (ON/OFF) IntelliChem: ORP Level too low?
     ORPSET_ATTR,  # (int) IntelliChem ORP level setpoint (400-800 mV)
@@ -67,15 +71,19 @@ CHEM_ATTRIBUTES = {
     PHTNK_ATTR,  # (int) IntelliChem: pH Tank Level
     PHVAL_ATTR,  # (float) IntelliChem: pH Level
     PRIM_ATTR,  # (int) IntelliChlor: primary body output setting in %
+    PROBE_ATTR,  # (str) IntelliChem: Raw probe reading indicator
     QUALTY_ATTR,  # (float) IntelliChem: Water Quality (Saturation Index)
+    READY_ATTR,  # (ON/OFF) Chemistry controller ready state
     SALT_ATTR,  # (int) Salt level
     SEC_ATTR,  # (int) IntelliChlor: secondary body output setting in %
-    "SHARE",  # (objnam) ??
-    "SINDEX",  # (int) ??
+    "SHARE",  # (objnam) Body sharing
+    "SINDEX",  # (float) Saturation Index
     SNAME_ATTR,  # friendly name
+    STATIC_ATTR,  # (ON/OFF) Static mode
     SUBTYP_ATTR,  # 'ICHLOR' for IntelliChlor, 'ICHEM' for IntelliChem
     SUPER_ATTR,  # (ON/OFF) IntelliChlor: turn on Boost mode (aka Super Chlorinate)
-    TIMOUT_ATTR,  # (int) IntelliChlor: in seconds ??
+    TEMP_ATTR,  # (int) IntelliChem: Water temperature reading
+    TIMOUT_ATTR,  # (int) IntelliChlor: timeout in seconds
 }
 
 # Heater attributes
@@ -119,14 +127,17 @@ PUMP_ATTRIBUTES = {
     MINF_ATTR,  # (int) minimum GPM (if applicable, 0 otherwise)
     "NAME",  # seems to equal OBJNAM
     "OBJLIST",  # ([ objnam] ) a list of PMPCIRC settings
+    PRIM_ATTR,  # (str) Primary pump indicator (OFF, etc.)
     "PRIMFLO",  # (int) Priming Speed
     "PRIMTIM",  # (int) Priming Time in minutes
     "PRIOR",  # (int) ???
     PWR_ATTR,  # (int) when applicable, real time Power usage in Watts
+    READY_ATTR,  # (ON/OFF) Ready state
     RPM_ATTR,  # (int) when applicable, real time Rotation Per Minute
     "SETTMP",  # (int) Step size for RPM
     "SETTMPNC",  # (int) ???
     SNAME_ATTR,  # friendly name
+    STATIC_ATTR,  # (ON/OFF) Static mode
     STATUS_ATTR,  # only seen 10 for on, 4 for off
     SUBTYP_ATTR,  # type of pump: 'SPEED' (variable speed), 'FLOW' (variable flow), 'VSF' (both)
     "SYSTIM",  # (int) ???
@@ -139,19 +150,22 @@ PMPCIRC_ATTRIBUTES = {
     GPM_ATTR,  # (int): the flow setting for the pump if select is GPM
     LISTORD_ATTR,  # (int) used to order in UI
     PARENT_ATTR,  # (objnam) the pump the setting belongs to
+    READY_ATTR,  # (ON/OFF) Ready state
     "SPEED",  # (int): the speed setting for the pump if select is RPM
     SELECT_ATTR,  # 'RPM' or 'GPM'
+    STATIC_ATTR,  # (ON/OFF) Static mode
 }
 
 # Sensor attributes
 SENSE_ATTRIBUTES = {
-    "CALIB",  # (int) calibration value
+    CALIB_ATTR,  # (int) calibration offset value
     HNAME_ATTR,  # same as objnam
     LISTORD_ATTR,  # number likely used to order things in UI
     MODE_ATTR,  # I've only seen 'OFF' so far
     "NAME",  # I've only seen '00000'
     PARENT_ATTR,  # the parent's objnam
-    "PROBE",  # the uncalibrated reading of the sensor
+    PROBE_ATTR,  # the uncalibrated reading of the sensor
+    READY_ATTR,  # (ON/OFF) Ready state
     SNAME_ATTR,  # friendly name
     SOURCE_ATTR,  # the calibrated reading of the sensor
     STATIC_ATTR,  # (ON/OFF) not sure, only seen 'ON'

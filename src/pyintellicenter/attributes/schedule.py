@@ -11,6 +11,7 @@ from .constants import (
     LISTORD_ATTR,
     LOTMP_ATTR,
     MODE_ATTR,
+    READY_ATTR,
     SMTSRT_ATTR,
     SNAME_ATTR,
     STATIC_ATTR,
@@ -39,6 +40,7 @@ SCHED_ATTRIBUTES = {
     LISTORD_ATTR,  # (int) Used to order in UI
     LOTMP_ATTR,  # (int) When heater is set, this is the desired temperature
     MODE_ATTR,  # (str) Schedule mode
+    READY_ATTR,  # (ON/OFF) Ready state
     "SINGLE",  # (ON/OFF) ON if the schedule should not repeat
     SMTSRT_ATTR,  # Smart start setting
     SNAME_ATTR,  # Friendly name of the schedule

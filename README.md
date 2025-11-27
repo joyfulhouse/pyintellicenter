@@ -227,7 +227,18 @@ valves = controller.get_valves()
 
 # All entities grouped by type (for Home Assistant discovery)
 entities = controller.get_all_entities()
-# Returns: {"bodies": [...], "circuits": [...], "lights": [...], ...}
+# Returns: {"bodies": [...], "circuits": [...], "lights": [...],
+#           "circuit_groups": [...], "color_light_groups": [...], ...}
+
+# Circuit group helpers
+groups = controller.get_circuit_groups()
+circuits_in_group = controller.get_circuits_in_group("CG001")
+has_color = controller.circuit_group_has_color_lights("CG001")
+color_groups = controller.get_color_light_groups()  # Groups with IntelliBrite lights
+
+# Hardware discovery queries
+config = await controller.get_configuration()  # Bodies and circuits
+hardware = await controller.get_hardware_definition()  # Full equipment hierarchy
 
 # Temperature helpers
 unit = controller.get_temperature_unit()  # "F" or "C"
@@ -241,6 +252,25 @@ ph = controller.get_chem_reading("C0001", "PH")
 orp = controller.get_chem_reading("C0001", "ORP")
 salt = controller.get_chem_reading("C0001", "SALT")
 alerts = controller.get_chem_alerts("C0001")
+
+# Chemistry setpoint control (IntelliChem)
+await controller.set_ph_setpoint("CHEM1", 7.4)
+await controller.set_orp_setpoint("CHEM1", 700)
+ph_target = controller.get_ph_setpoint("CHEM1")
+orp_target = controller.get_orp_setpoint("CHEM1")
+
+# Chlorinator output control (IntelliChlor)
+await controller.set_chlorinator_output("CHEM1", 50)  # 50% primary
+await controller.set_chlorinator_output("CHEM1", 50, 100)  # 50% pool, 100% spa
+output = controller.get_chlorinator_output("CHEM1")  # {"primary": 50, "secondary": 100}
+
+# Valve control
+await controller.set_valve_state("VAL01", True)
+is_open = controller.is_valve_on("VAL01")
+
+# Vacation mode
+await controller.set_vacation_mode(True)
+is_vacation = controller.is_vacation_mode()
 
 # Pump helpers
 is_running = controller.is_pump_running("P0001")
@@ -403,11 +433,12 @@ unit.model     # Model info (if available)
 | Body | `BODY_TYPE` | Body of water | `POOL`, `SPA` |
 | Pump | `PUMP_TYPE` | Variable speed pump | `SPEED`, `FLOW`, `VSF` |
 | Circuit | `CIRCUIT_TYPE` | Circuit/Feature | `GENERIC`, `LIGHT`, `INTELLI`, `GLOW`, `DIMMER` |
+| Circuit Group | `CIRCGRP_TYPE` | Group of circuits | - |
 | Heater | `HEATER_TYPE` | Heater | `GENERIC`, `SOLAR`, `ULTRA`, `HYBRID` |
 | Chem | `CHEM_TYPE` | Chemistry controller | `ICHLOR`, `ICHEM` |
 | Sensor | `SENSE_TYPE` | Temperature sensor | `POOL`, `AIR`, `SOLAR` |
 | Schedule | `SCHED_TYPE` | Schedule | - |
-| Valve | `VALVE_TYPE` | Valve | - |
+| Valve | `VALVE_TYPE` | Valve | `LEGACY` |
 
 ## Heater Modes
 

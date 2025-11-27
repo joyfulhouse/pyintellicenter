@@ -16,6 +16,7 @@ from .constants import (
     READY_ATTR,
     SEC_ATTR,
     SELECT_ATTR,
+    SETTMP_ATTR,
     SNAME_ATTR,
     SPEED_ATTR,
     STATIC_ATTR,
@@ -52,6 +53,7 @@ BODY_ATTRIBUTES = {
     SEC_ATTR,  # (int) Secondary setting
     SELECT_ATTR,  # (str) Selection mode
     "SETPT",  # (int) Set point (same as LOTMP)
+    SETTMP_ATTR,  # (int) Temperature setpoint (similar to LOTMP, used by some systems)
     "SHARE",  # (objnam) Sharing with other body
     SNAME_ATTR,  # (str) Friendly name
     SPEED_ATTR,  # (int) Speed setting

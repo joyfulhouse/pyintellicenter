@@ -23,6 +23,8 @@ from .attributes import (
     BODY_TYPE,
     CALC_ATTR,
     CHEM_TYPE,
+    CIRCGRP_TYPE,
+    CIRCUIT_ATTR,
     CIRCUIT_TYPE,
     CYACID_ATTR,
     GPM_ATTR,
@@ -34,11 +36,14 @@ from .attributes import (
     OBJTYP_ATTR,
     ORPHI_ATTR,
     ORPLO_ATTR,
+    ORPSET_ATTR,
     ORPVAL_ATTR,
     PARENT_ATTR,
     PHHI_ATTR,
     PHLO_ATTR,
+    PHSET_ATTR,
     PHVAL_ATTR,
+    PRIM_ATTR,
     PROPNAME_ATTR,
     PUMP_STATUS_ON,
     PUMP_TYPE,
@@ -47,6 +52,7 @@ from .attributes import (
     RPM_ATTR,
     SALT_ATTR,
     SCHED_TYPE,
+    SEC_ATTR,
     SENSE_TYPE,
     SNAME_ATTR,
     SOURCE_ATTR,
@@ -58,6 +64,7 @@ from .attributes import (
     SYSTEM_TYPE,
     TEMP_ATTR,
     USE_ATTR,
+    VACFLO_ATTR,
     VALVE_TYPE,
     VER_ATTR,
     HeaterType,
@@ -407,6 +414,22 @@ class ICBaseController:
         """
         return await self.get_query("GetConfiguration")
 
+    async def get_hardware_definition(self) -> list[dict[str, Any]]:
+        """Get complete hardware definition with full object hierarchy.
+
+        Returns the entire panel configuration including all objects in a
+        hierarchical structure. Each object includes type, subtype, and
+        relationships to other objects.
+
+        This is more comprehensive than get_configuration() and includes
+        all equipment types: bodies, circuits, pumps, heaters, chemistry
+        controllers, valves, sensors, schedules, remotes, and modules.
+
+        Returns:
+            List of hardware definition objects with full hierarchy
+        """
+        return await self.get_query("GetHardwareDefinition")
+
 
 class ICModelController(ICBaseController):
     """Controller that maintains a PoolModel of equipment state."""
@@ -588,6 +611,224 @@ class ICModelController(ICBaseController):
             chem_objnam, {SUPER_ATTR: STATUS_ON if enabled else STATUS_OFF}
         )
 
+    async def set_ph_setpoint(self, chem_objnam: str, value: float) -> dict[str, Any]:
+        """Set the pH setpoint for an IntelliChem controller.
+
+        Args:
+            chem_objnam: Object name of the chemistry controller
+            value: Target pH value (6.0-8.5, in 0.1 increments)
+
+        Returns:
+            Response dictionary
+
+        Raises:
+            ValueError: If value is outside valid range or not a 0.1 increment
+
+        Example:
+            await controller.set_ph_setpoint("CHEM1", 7.4)
+        """
+        if not 6.0 <= value <= 8.5:
+            raise ValueError(f"pH setpoint {value} outside valid range (6.0-8.5)")
+
+        # IntelliChem only accepts pH values in 0.1 increments
+        # Check if value is a valid 0.1 step (e.g., 7.0, 7.1, 7.2, not 7.05 or 7.15)
+        rounded = round(value, 1)
+        if abs(value - rounded) > 0.001:
+            raise ValueError(f"pH setpoint {value} must be in 0.1 increments (e.g., 7.0, 7.1, 7.2)")
+
+        return await self.request_changes(chem_objnam, {PHSET_ATTR: str(rounded)})
+
+    async def set_orp_setpoint(self, chem_objnam: str, value: int) -> dict[str, Any]:
+        """Set the ORP setpoint for an IntelliChem controller.
+
+        ORP (Oxidation Reduction Potential) measures sanitizer effectiveness.
+
+        Args:
+            chem_objnam: Object name of the chemistry controller
+            value: Target ORP in millivolts (typically 400-800 mV)
+
+        Returns:
+            Response dictionary
+
+        Raises:
+            ValueError: If value is outside valid range
+
+        Example:
+            await controller.set_orp_setpoint("CHEM1", 700)
+        """
+        if not 200 <= value <= 900:
+            raise ValueError(f"ORP setpoint {value} outside valid range (200-900 mV)")
+        return await self.request_changes(chem_objnam, {ORPSET_ATTR: str(value)})
+
+    async def set_chlorinator_output(
+        self, chem_objnam: str, primary_percent: int, secondary_percent: int | None = None
+    ) -> dict[str, Any]:
+        """Set the chlorinator output percentage for an IntelliChlor.
+
+        Args:
+            chem_objnam: Object name of the chemistry controller (IntelliChlor)
+            primary_percent: Output percentage for primary body (0-100)
+            secondary_percent: Output percentage for secondary body (0-100),
+                             or None to leave unchanged
+
+        Returns:
+            Response dictionary
+
+        Raises:
+            ValueError: If percentage is outside valid range
+
+        Example:
+            # Set pool to 50%, spa to 100%
+            await controller.set_chlorinator_output("CHEM1", 50, 100)
+            # Set pool only
+            await controller.set_chlorinator_output("CHEM1", 75)
+        """
+        if not 0 <= primary_percent <= 100:
+            raise ValueError(f"Primary percentage {primary_percent} outside valid range (0-100)")
+
+        changes: dict[str, str] = {PRIM_ATTR: str(primary_percent)}
+
+        if secondary_percent is not None:
+            if not 0 <= secondary_percent <= 100:
+                raise ValueError(
+                    f"Secondary percentage {secondary_percent} outside valid range (0-100)"
+                )
+            changes[SEC_ATTR] = str(secondary_percent)
+
+        return await self.request_changes(chem_objnam, changes)
+
+    def get_ph_setpoint(self, chem_objnam: str) -> float | None:
+        """Get the current pH setpoint for a chemistry controller.
+
+        Args:
+            chem_objnam: Object name of the chemistry controller
+
+        Returns:
+            pH setpoint value, or None if unavailable
+        """
+        obj = self._model[chem_objnam]
+        if obj and obj[PHSET_ATTR]:
+            try:
+                return float(obj[PHSET_ATTR])
+            except (ValueError, TypeError):
+                return None
+        return None
+
+    def get_orp_setpoint(self, chem_objnam: str) -> int | None:
+        """Get the current ORP setpoint for a chemistry controller.
+
+        Args:
+            chem_objnam: Object name of the chemistry controller
+
+        Returns:
+            ORP setpoint in mV, or None if unavailable
+        """
+        obj = self._model[chem_objnam]
+        if obj and obj[ORPSET_ATTR]:
+            try:
+                return int(obj[ORPSET_ATTR])
+            except (ValueError, TypeError):
+                return None
+        return None
+
+    def get_chlorinator_output(self, chem_objnam: str) -> dict[str, int | None]:
+        """Get the current chlorinator output percentages.
+
+        Args:
+            chem_objnam: Object name of the chemistry controller (IntelliChlor)
+
+        Returns:
+            Dict with 'primary' and 'secondary' output percentages
+        """
+        obj = self._model[chem_objnam]
+        result: dict[str, int | None] = {"primary": None, "secondary": None}
+
+        if obj:
+            if obj[PRIM_ATTR]:
+                with contextlib.suppress(ValueError, TypeError):
+                    result["primary"] = int(obj[PRIM_ATTR])
+            if obj[SEC_ATTR]:
+                with contextlib.suppress(ValueError, TypeError):
+                    result["secondary"] = int(obj[SEC_ATTR])
+
+        return result
+
+    # =========================================================================
+    # Valve Control (for water features, spillovers, etc.)
+    # =========================================================================
+
+    async def set_valve_state(self, valve_objnam: str, state: bool) -> dict[str, Any]:
+        """Set a valve actuator on or off.
+
+        Controls valve actuators for water features, spillovers, and
+        other plumbing configurations.
+
+        Args:
+            valve_objnam: Object name of the valve (e.g., "VAL01")
+            state: True for ON, False for OFF
+
+        Returns:
+            Response dictionary
+
+        Example:
+            await controller.set_valve_state("VAL01", True)
+        """
+        return await self.request_changes(
+            valve_objnam, {STATUS_ATTR: STATUS_ON if state else STATUS_OFF}
+        )
+
+    def is_valve_on(self, valve_objnam: str) -> bool:
+        """Check if a valve is currently on.
+
+        Args:
+            valve_objnam: Object name of the valve
+
+        Returns:
+            True if valve is on
+        """
+        obj = self._model[valve_objnam]
+        if obj:
+            return bool(obj[STATUS_ATTR] == STATUS_ON)
+        return False
+
+    # =========================================================================
+    # Vacation Mode Control
+    # =========================================================================
+
+    async def set_vacation_mode(self, enabled: bool) -> dict[str, Any]:
+        """Enable or disable vacation mode.
+
+        Vacation mode typically reduces pump runtime and adjusts
+        schedules to minimize energy usage while maintaining water quality.
+
+        Args:
+            enabled: True to enable vacation mode, False to disable
+
+        Returns:
+            Response dictionary
+
+        Example:
+            await controller.set_vacation_mode(True)
+        """
+        if not self._system_info:
+            raise ICCommandError("System info not available")
+
+        return await self.request_changes(
+            self._system_info.objnam, {VACFLO_ATTR: STATUS_ON if enabled else STATUS_OFF}
+        )
+
+    def is_vacation_mode(self) -> bool:
+        """Check if vacation mode is currently enabled.
+
+        Returns:
+            True if vacation mode is enabled
+        """
+        if self._system_info:
+            obj = self._model[self._system_info.objnam]
+            if obj:
+                return bool(obj[VACFLO_ATTR] == STATUS_ON)
+        return False
+
     def get_bodies(self) -> list[Any]:
         """Get all body objects (pools and spas)."""
         return self._model.get_by_type(BODY_TYPE)
@@ -619,6 +860,77 @@ class ICModelController(ICBaseController):
     def get_valves(self) -> list[Any]:
         """Get all valve objects."""
         return self._model.get_by_type(VALVE_TYPE)
+
+    # =========================================================================
+    # Circuit Group Helpers
+    # =========================================================================
+
+    def get_circuit_groups(self) -> list[Any]:
+        """Get all circuit group objects.
+
+        Circuit groups allow multiple circuits to be controlled together.
+        Groups containing color lights can have light effects applied.
+
+        Returns:
+            List of PoolObject for circuit groups
+        """
+        return self._model.get_by_type(CIRCGRP_TYPE)
+
+    def get_circuits_in_group(self, circgrp_objnam: str) -> list[Any]:
+        """Get all circuit objects that belong to a circuit group.
+
+        Args:
+            circgrp_objnam: Object name of the circuit group
+
+        Returns:
+            List of PoolObject for circuits in the group
+        """
+        obj = self._model[circgrp_objnam]
+        if not obj or obj.objtype != CIRCGRP_TYPE:
+            return []
+
+        circuit_ref = obj[CIRCUIT_ATTR]
+        if not circuit_ref:
+            return []
+
+        # CIRCUIT attribute can be a single objnam or space-separated list
+        circuit_objnams = circuit_ref.split() if isinstance(circuit_ref, str) else [circuit_ref]
+
+        circuits = []
+        for objnam in circuit_objnams:
+            circuit = self._model[objnam]
+            if circuit:
+                circuits.append(circuit)
+        return circuits
+
+    def circuit_group_has_color_lights(self, circgrp_objnam: str) -> bool:
+        """Check if a circuit group contains any color-capable lights.
+
+        Circuit groups that contain IntelliBrite, MagicStream, or other
+        color lights can have light effects applied to the entire group.
+
+        Args:
+            circgrp_objnam: Object name of the circuit group
+
+        Returns:
+            True if the group contains at least one color light
+        """
+        circuits = self.get_circuits_in_group(circgrp_objnam)
+        return any(circuit.supports_color_effects for circuit in circuits)
+
+    def get_color_light_groups(self) -> list[Any]:
+        """Get circuit groups that contain color-capable lights.
+
+        These groups can have light effects applied via set_light_effect().
+
+        Returns:
+            List of PoolObject for circuit groups with color lights
+        """
+        return [
+            group
+            for group in self.get_circuit_groups()
+            if self.circuit_group_has_color_lights(group.objnam)
+        ]
 
     # =========================================================================
     # Light Helpers (for Home Assistant light entities)
@@ -1021,15 +1333,17 @@ class ICModelController(ICBaseController):
         """Get all entities grouped by type for Home Assistant discovery.
 
         Returns:
-            Dict with keys: bodies, circuits, lights, color_lights, pumps,
-            heaters, sensors, chem_controllers, schedules, valves
+            Dict with keys: bodies, circuits, circuit_groups, lights, color_lights,
+            color_light_groups, pumps, heaters, sensors, chem_controllers, schedules, valves
         """
         return {
             "bodies": self.get_bodies(),
             "circuits": [c for c in self.get_circuits() if not c.is_a_light],
+            "circuit_groups": self.get_circuit_groups(),
             "lights": self.get_lights(include_shows=False),
             "light_shows": [obj for obj in self._model if obj.is_a_light_show],
             "color_lights": self.get_color_lights(),
+            "color_light_groups": self.get_color_light_groups(),
             "pumps": self.get_pumps(),
             "heaters": self.get_heaters(),
             "sensors": self.get_sensors(),

@@ -695,6 +695,340 @@ class TestICModelController:
         assert call_args[1]["queryName"] == "GetConfiguration"
         assert len(result) == 1
 
+    @pytest.mark.asyncio
+    async def test_get_hardware_definition(self, controller):
+        """Test get_hardware_definition convenience method."""
+        controller._connection = MagicMock()
+        controller._connection.connected = True
+        controller._connection.send_request = AsyncMock(
+            return_value={
+                "response": "200",
+                "answer": [{"type": "panel", "children": [{"type": "body"}]}],
+            }
+        )
+
+        result = await controller.get_hardware_definition()
+
+        controller._connection.send_request.assert_called_once()
+        call_args = controller._connection.send_request.call_args
+        assert call_args[0][0] == "GetQuery"
+        assert call_args[1]["queryName"] == "GetHardwareDefinition"
+        assert len(result) == 1
+
+    @pytest.mark.asyncio
+    async def test_set_ph_setpoint(self, controller):
+        """Test set_ph_setpoint convenience method."""
+        controller._connection = MagicMock()
+        controller._connection.connected = True
+        controller._connection.send_request = AsyncMock(
+            return_value={"response": "200", "objectList": []}
+        )
+
+        await controller.set_ph_setpoint("CHEM01", 7.4)
+
+        call_args = controller._connection.send_request.call_args
+        assert call_args[1]["objectList"][0]["objnam"] == "CHEM01"
+        assert call_args[1]["objectList"][0]["params"]["PHSET"] == "7.4"
+
+    @pytest.mark.asyncio
+    async def test_set_ph_setpoint_invalid_range(self, controller):
+        """Test set_ph_setpoint rejects invalid values."""
+        controller._connection = MagicMock()
+        controller._connection.connected = True
+
+        with pytest.raises(ValueError, match="outside valid range"):
+            await controller.set_ph_setpoint("CHEM01", 5.0)
+
+        with pytest.raises(ValueError, match="outside valid range"):
+            await controller.set_ph_setpoint("CHEM01", 9.0)
+
+    @pytest.mark.asyncio
+    async def test_set_ph_setpoint_invalid_step(self, controller):
+        """Test set_ph_setpoint rejects non-0.1 increments."""
+        controller._connection = MagicMock()
+        controller._connection.connected = True
+
+        # IntelliChem only accepts pH values in 0.1 increments
+        with pytest.raises(ValueError, match="0.1 increments"):
+            await controller.set_ph_setpoint("CHEM01", 7.45)
+
+        with pytest.raises(ValueError, match="0.1 increments"):
+            await controller.set_ph_setpoint("CHEM01", 7.05)
+
+        with pytest.raises(ValueError, match="0.1 increments"):
+            await controller.set_ph_setpoint("CHEM01", 7.123)
+
+    @pytest.mark.asyncio
+    async def test_set_ph_setpoint_rounds_to_one_decimal(self, controller):
+        """Test set_ph_setpoint sends value rounded to one decimal place."""
+        controller._connection = MagicMock()
+        controller._connection.connected = True
+        controller._connection.send_request = AsyncMock(
+            return_value={"response": "200", "objectList": []}
+        )
+
+        # Value that's effectively 7.4 should work (floating point tolerance)
+        await controller.set_ph_setpoint("CHEM01", 7.4000001)
+
+        call_args = controller._connection.send_request.call_args
+        assert call_args[1]["objectList"][0]["params"]["PHSET"] == "7.4"
+
+    @pytest.mark.asyncio
+    async def test_set_orp_setpoint(self, controller):
+        """Test set_orp_setpoint convenience method."""
+        controller._connection = MagicMock()
+        controller._connection.connected = True
+        controller._connection.send_request = AsyncMock(
+            return_value={"response": "200", "objectList": []}
+        )
+
+        await controller.set_orp_setpoint("CHEM01", 700)
+
+        call_args = controller._connection.send_request.call_args
+        assert call_args[1]["objectList"][0]["objnam"] == "CHEM01"
+        assert call_args[1]["objectList"][0]["params"]["ORPSET"] == "700"
+
+    @pytest.mark.asyncio
+    async def test_set_orp_setpoint_invalid_range(self, controller):
+        """Test set_orp_setpoint rejects invalid values."""
+        controller._connection = MagicMock()
+        controller._connection.connected = True
+
+        with pytest.raises(ValueError, match="outside valid range"):
+            await controller.set_orp_setpoint("CHEM01", 100)
+
+        with pytest.raises(ValueError, match="outside valid range"):
+            await controller.set_orp_setpoint("CHEM01", 1000)
+
+    @pytest.mark.asyncio
+    async def test_set_chlorinator_output(self, controller):
+        """Test set_chlorinator_output convenience method."""
+        controller._connection = MagicMock()
+        controller._connection.connected = True
+        controller._connection.send_request = AsyncMock(
+            return_value={"response": "200", "objectList": []}
+        )
+
+        await controller.set_chlorinator_output("CHEM01", 50, 100)
+
+        call_args = controller._connection.send_request.call_args
+        assert call_args[1]["objectList"][0]["objnam"] == "CHEM01"
+        assert call_args[1]["objectList"][0]["params"]["PRIM"] == "50"
+        assert call_args[1]["objectList"][0]["params"]["SEC"] == "100"
+
+    @pytest.mark.asyncio
+    async def test_set_chlorinator_output_primary_only(self, controller):
+        """Test set_chlorinator_output with only primary percentage."""
+        controller._connection = MagicMock()
+        controller._connection.connected = True
+        controller._connection.send_request = AsyncMock(
+            return_value={"response": "200", "objectList": []}
+        )
+
+        await controller.set_chlorinator_output("CHEM01", 75)
+
+        call_args = controller._connection.send_request.call_args
+        params = call_args[1]["objectList"][0]["params"]
+        assert params["PRIM"] == "75"
+        assert "SEC" not in params
+
+    @pytest.mark.asyncio
+    async def test_set_chlorinator_output_invalid_range(self, controller):
+        """Test set_chlorinator_output rejects invalid values."""
+        controller._connection = MagicMock()
+        controller._connection.connected = True
+
+        with pytest.raises(ValueError, match="Primary percentage"):
+            await controller.set_chlorinator_output("CHEM01", 150)
+
+        with pytest.raises(ValueError, match="Secondary percentage"):
+            await controller.set_chlorinator_output("CHEM01", 50, 150)
+
+    def test_get_ph_setpoint(self, controller, model):
+        """Test get_ph_setpoint getter method."""
+        model.add_object(
+            "CHEM01", {"OBJTYP": "CHEM", "SUBTYP": "ICHEM", "SNAME": "IntelliChem", "PHSET": "7.4"}
+        )
+
+        result = controller.get_ph_setpoint("CHEM01")
+        assert result == 7.4
+
+    def test_get_ph_setpoint_missing(self, controller, model):
+        """Test get_ph_setpoint returns None when not set."""
+        model.add_object("CHEM01", {"OBJTYP": "CHEM", "SUBTYP": "ICHEM", "SNAME": "IntelliChem"})
+
+        result = controller.get_ph_setpoint("CHEM01")
+        assert result is None
+
+    def test_get_orp_setpoint(self, controller, model):
+        """Test get_orp_setpoint getter method."""
+        model.add_object(
+            "CHEM01", {"OBJTYP": "CHEM", "SUBTYP": "ICHEM", "SNAME": "IntelliChem", "ORPSET": "700"}
+        )
+
+        result = controller.get_orp_setpoint("CHEM01")
+        assert result == 700
+
+    def test_get_chlorinator_output(self, controller, model):
+        """Test get_chlorinator_output getter method."""
+        model.add_object(
+            "CHEM01",
+            {
+                "OBJTYP": "CHEM",
+                "SUBTYP": "ICHLOR",
+                "SNAME": "Salt Cell",
+                "PRIM": "50",
+                "SEC": "100",
+            },
+        )
+
+        result = controller.get_chlorinator_output("CHEM01")
+        assert result["primary"] == 50
+        assert result["secondary"] == 100
+
+    @pytest.mark.asyncio
+    async def test_set_valve_state(self, controller):
+        """Test set_valve_state convenience method."""
+        controller._connection = MagicMock()
+        controller._connection.connected = True
+        controller._connection.send_request = AsyncMock(
+            return_value={"response": "200", "objectList": []}
+        )
+
+        await controller.set_valve_state("VAL01", True)
+
+        call_args = controller._connection.send_request.call_args
+        assert call_args[1]["objectList"][0]["objnam"] == "VAL01"
+        assert call_args[1]["objectList"][0]["params"]["STATUS"] == "ON"
+
+    @pytest.mark.asyncio
+    async def test_set_valve_state_off(self, controller):
+        """Test set_valve_state with state=False."""
+        controller._connection = MagicMock()
+        controller._connection.connected = True
+        controller._connection.send_request = AsyncMock(
+            return_value={"response": "200", "objectList": []}
+        )
+
+        await controller.set_valve_state("VAL01", False)
+
+        call_args = controller._connection.send_request.call_args
+        assert call_args[1]["objectList"][0]["params"]["STATUS"] == "OFF"
+
+    def test_is_valve_on(self, controller, model):
+        """Test is_valve_on getter method."""
+        model.add_object(
+            "VAL01", {"OBJTYP": "VALVE", "SUBTYP": "LEGACY", "SNAME": "Valve 1", "STATUS": "ON"}
+        )
+
+        assert controller.is_valve_on("VAL01") is True
+
+    def test_is_valve_on_false(self, controller, model):
+        """Test is_valve_on returns False when valve is off."""
+        model.add_object(
+            "VAL01", {"OBJTYP": "VALVE", "SUBTYP": "LEGACY", "SNAME": "Valve 1", "STATUS": "OFF"}
+        )
+
+        assert controller.is_valve_on("VAL01") is False
+
+    def test_get_valves(self, controller, model):
+        """Test get_valves convenience method."""
+        model.add_object("VAL01", {"OBJTYP": "VALVE", "SUBTYP": "LEGACY", "SNAME": "Valve 1"})
+        model.add_object("VAL02", {"OBJTYP": "VALVE", "SUBTYP": "LEGACY", "SNAME": "Valve 2"})
+        model.add_object("C001", {"OBJTYP": "CIRCUIT", "SUBTYP": "LIGHT", "SNAME": "Light"})
+
+        valves = controller.get_valves()
+
+        assert len(valves) == 2
+        assert all(obj.objtype == "VALVE" for obj in valves)
+
+    @pytest.mark.asyncio
+    async def test_set_vacation_mode(self, controller, model):
+        """Test set_vacation_mode convenience method."""
+        controller._connection = MagicMock()
+        controller._connection.connected = True
+        controller._connection.send_request = AsyncMock(
+            return_value={"response": "200", "objectList": []}
+        )
+
+        # Setup system info
+        params = {
+            "PROPNAME": "Test Pool",
+            "VER": "1.0.0",
+            "MODE": "ENGLISH",
+            "SNAME": "TestSystem",
+        }
+        controller._system_info = ICSystemInfo("SYS01", params)
+
+        await controller.set_vacation_mode(True)
+
+        call_args = controller._connection.send_request.call_args
+        assert call_args[1]["objectList"][0]["objnam"] == "SYS01"
+        assert call_args[1]["objectList"][0]["params"]["VACFLO"] == "ON"
+
+    @pytest.mark.asyncio
+    async def test_set_vacation_mode_off(self, controller, model):
+        """Test set_vacation_mode with enabled=False."""
+        controller._connection = MagicMock()
+        controller._connection.connected = True
+        controller._connection.send_request = AsyncMock(
+            return_value={"response": "200", "objectList": []}
+        )
+
+        params = {
+            "PROPNAME": "Test Pool",
+            "VER": "1.0.0",
+            "MODE": "ENGLISH",
+            "SNAME": "TestSystem",
+        }
+        controller._system_info = ICSystemInfo("SYS01", params)
+
+        await controller.set_vacation_mode(False)
+
+        call_args = controller._connection.send_request.call_args
+        assert call_args[1]["objectList"][0]["params"]["VACFLO"] == "OFF"
+
+    @pytest.mark.asyncio
+    async def test_set_vacation_mode_no_system_info(self, controller):
+        """Test set_vacation_mode raises error when system info not available."""
+        controller._connection = MagicMock()
+        controller._connection.connected = True
+        controller._system_info = None
+
+        with pytest.raises(ICCommandError, match="System info not available"):
+            await controller.set_vacation_mode(True)
+
+    def test_is_vacation_mode(self, controller, model):
+        """Test is_vacation_mode getter method."""
+        params = {
+            "PROPNAME": "Test Pool",
+            "VER": "1.0.0",
+            "MODE": "ENGLISH",
+            "SNAME": "TestSystem",
+        }
+        controller._system_info = ICSystemInfo("SYS01", params)
+        model.add_object("SYS01", {"OBJTYP": "SYSTEM", "SNAME": "System", "VACFLO": "ON"})
+
+        assert controller.is_vacation_mode() is True
+
+    def test_is_vacation_mode_false(self, controller, model):
+        """Test is_vacation_mode returns False when disabled."""
+        params = {
+            "PROPNAME": "Test Pool",
+            "VER": "1.0.0",
+            "MODE": "ENGLISH",
+            "SNAME": "TestSystem",
+        }
+        controller._system_info = ICSystemInfo("SYS01", params)
+        model.add_object("SYS01", {"OBJTYP": "SYSTEM", "SNAME": "System", "VACFLO": "OFF"})
+
+        assert controller.is_vacation_mode() is False
+
+    def test_is_vacation_mode_no_system_info(self, controller):
+        """Test is_vacation_mode returns False when system info not available."""
+        controller._system_info = None
+        assert controller.is_vacation_mode() is False
+
     def test_on_notification_ignores_non_notify_commands(self, controller, model):
         """Test _on_notification ignores non-NotifyList commands."""
         model.add_object(
@@ -755,6 +1089,126 @@ class TestICModelController:
 
         # System info should be updated
         assert controller._system_info.prop_name == "New Pool"
+
+    def test_get_circuit_groups(self, controller, model):
+        """Test get_circuit_groups returns all circuit group objects."""
+        model.add_object("CG001", {"OBJTYP": "CIRCGRP", "SNAME": "Light Group 1"})
+        model.add_object("CG002", {"OBJTYP": "CIRCGRP", "SNAME": "Light Group 2"})
+        model.add_object("C001", {"OBJTYP": "CIRCUIT", "SUBTYP": "INTELLI", "SNAME": "Light"})
+
+        groups = controller.get_circuit_groups()
+
+        assert len(groups) == 2
+        assert all(obj.objtype == "CIRCGRP" for obj in groups)
+
+    def test_get_circuits_in_group(self, controller, model):
+        """Test get_circuits_in_group returns circuits belonging to a group."""
+        # Create circuits
+        model.add_object("C001", {"OBJTYP": "CIRCUIT", "SUBTYP": "INTELLI", "SNAME": "Pool Light"})
+        model.add_object("C002", {"OBJTYP": "CIRCUIT", "SUBTYP": "INTELLI", "SNAME": "Spa Light"})
+        model.add_object("C003", {"OBJTYP": "CIRCUIT", "SUBTYP": "LIGHT", "SNAME": "Deck Light"})
+        # Create circuit group with space-separated circuit refs
+        model.add_object(
+            "CG001",
+            {"OBJTYP": "CIRCGRP", "SNAME": "All Lights", "CIRCUIT": "C001 C002 C003"},
+        )
+
+        circuits = controller.get_circuits_in_group("CG001")
+
+        assert len(circuits) == 3
+        objnams = {c.objnam for c in circuits}
+        assert objnams == {"C001", "C002", "C003"}
+
+    def test_get_circuits_in_group_empty(self, controller, model):
+        """Test get_circuits_in_group returns empty list for empty group."""
+        model.add_object("CG001", {"OBJTYP": "CIRCGRP", "SNAME": "Empty Group"})
+
+        circuits = controller.get_circuits_in_group("CG001")
+
+        assert circuits == []
+
+    def test_get_circuits_in_group_invalid_objnam(self, controller, model):
+        """Test get_circuits_in_group returns empty list for invalid objnam."""
+        circuits = controller.get_circuits_in_group("NONEXISTENT")
+        assert circuits == []
+
+    def test_get_circuits_in_group_wrong_type(self, controller, model):
+        """Test get_circuits_in_group returns empty for non-CIRCGRP objects."""
+        model.add_object("C001", {"OBJTYP": "CIRCUIT", "SUBTYP": "INTELLI", "SNAME": "Light"})
+
+        circuits = controller.get_circuits_in_group("C001")
+
+        assert circuits == []
+
+    def test_circuit_group_has_color_lights_true(self, controller, model):
+        """Test circuit_group_has_color_lights returns True when group has color lights."""
+        # Create circuits - INTELLI and MAGIC2 support color effects
+        model.add_object("C001", {"OBJTYP": "CIRCUIT", "SUBTYP": "INTELLI", "SNAME": "Pool Light"})
+        model.add_object("C002", {"OBJTYP": "CIRCUIT", "SUBTYP": "LIGHT", "SNAME": "Deck Light"})
+        # Create circuit group
+        model.add_object(
+            "CG001",
+            {"OBJTYP": "CIRCGRP", "SNAME": "All Lights", "CIRCUIT": "C001 C002"},
+        )
+
+        assert controller.circuit_group_has_color_lights("CG001") is True
+
+    def test_circuit_group_has_color_lights_false(self, controller, model):
+        """Test circuit_group_has_color_lights returns False when no color lights."""
+        # Create circuits - LIGHT subtype does not support color effects
+        model.add_object("C001", {"OBJTYP": "CIRCUIT", "SUBTYP": "LIGHT", "SNAME": "Deck Light"})
+        model.add_object("C002", {"OBJTYP": "CIRCUIT", "SUBTYP": "DIMMER", "SNAME": "Path Light"})
+        # Create circuit group
+        model.add_object(
+            "CG001",
+            {"OBJTYP": "CIRCGRP", "SNAME": "Non-Color Lights", "CIRCUIT": "C001 C002"},
+        )
+
+        assert controller.circuit_group_has_color_lights("CG001") is False
+
+    def test_circuit_group_has_color_lights_empty_group(self, controller, model):
+        """Test circuit_group_has_color_lights returns False for empty group."""
+        model.add_object("CG001", {"OBJTYP": "CIRCGRP", "SNAME": "Empty Group"})
+
+        assert controller.circuit_group_has_color_lights("CG001") is False
+
+    def test_get_color_light_groups(self, controller, model):
+        """Test get_color_light_groups returns only groups with color lights."""
+        # Create circuits
+        model.add_object("C001", {"OBJTYP": "CIRCUIT", "SUBTYP": "INTELLI", "SNAME": "Pool Light"})
+        model.add_object("C002", {"OBJTYP": "CIRCUIT", "SUBTYP": "LIGHT", "SNAME": "Deck Light"})
+        # Create circuit groups
+        model.add_object(
+            "CG001",
+            {"OBJTYP": "CIRCGRP", "SNAME": "Color Group", "CIRCUIT": "C001"},
+        )
+        model.add_object(
+            "CG002",
+            {"OBJTYP": "CIRCGRP", "SNAME": "Non-Color Group", "CIRCUIT": "C002"},
+        )
+        model.add_object("CG003", {"OBJTYP": "CIRCGRP", "SNAME": "Empty Group"})
+
+        color_groups = controller.get_color_light_groups()
+
+        assert len(color_groups) == 1
+        assert color_groups[0].objnam == "CG001"
+
+    def test_get_all_entities_includes_circuit_groups(self, controller, model):
+        """Test get_all_entities includes circuit_groups and color_light_groups."""
+        # Create color light
+        model.add_object("C001", {"OBJTYP": "CIRCUIT", "SUBTYP": "INTELLI", "SNAME": "Pool Light"})
+        # Create circuit group with color light
+        model.add_object(
+            "CG001",
+            {"OBJTYP": "CIRCGRP", "SNAME": "Color Group", "CIRCUIT": "C001"},
+        )
+
+        entities = controller.get_all_entities()
+
+        assert "circuit_groups" in entities
+        assert "color_light_groups" in entities
+        assert len(entities["circuit_groups"]) == 1
+        assert len(entities["color_light_groups"]) == 1
 
 
 class TestICConnectionHandler:

@@ -58,5 +58,8 @@ CIRCGRP_ATTRIBUTES = {
     LISTORD_ATTR,
     PARENT_ATTR,
     READY_ATTR,
+    SNAME_ATTR,
     STATIC_ATTR,
+    STATUS_ATTR,
+    USE_ATTR,  # (str) Light effect for circuit groups (e.g., "Lavender", "Blue", "White")
 }

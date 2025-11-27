@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2025-11-27
+
+### Added
+
+- **Chemistry setpoint control methods** on `ICModelController`:
+  - `set_ph_setpoint(chem_objnam, value)` - Set pH target (6.0-8.5 range, 0.1 increments only)
+  - `set_orp_setpoint(chem_objnam, value)` - Set ORP target in mV (200-900 range)
+  - `set_chlorinator_output(chem_objnam, primary_percent, secondary_percent)` - Set IntelliChlor output percentage
+  - `get_ph_setpoint(chem_objnam)` - Get current pH setpoint
+  - `get_orp_setpoint(chem_objnam)` - Get current ORP setpoint
+  - `get_chlorinator_output(chem_objnam)` - Get chlorinator output percentages
+
+- **Valve control methods** on `ICModelController`:
+  - `set_valve_state(valve_objnam, state)` - Control valve actuators ON/OFF
+  - `is_valve_on(valve_objnam)` - Check if valve is currently on
+
+- **Vacation mode control** on `ICModelController`:
+  - `set_vacation_mode(enabled)` - Enable/disable vacation mode
+  - `is_vacation_mode()` - Check if vacation mode is active
+
+- **Hardware discovery query** on `ICBaseController`:
+  - `get_hardware_definition()` - Get complete panel configuration with full object hierarchy (more comprehensive than `get_configuration()`)
+
+- **Circuit group helpers** on `ICModelController`:
+  - `get_circuit_groups()` - Get all circuit group objects
+  - `get_circuits_in_group(circgrp_objnam)` - Get all circuits belonging to a group
+  - `circuit_group_has_color_lights(circgrp_objnam)` - Check if group contains color-capable lights
+  - `get_color_light_groups()` - Get circuit groups containing color lights
+  - `get_all_entities()` now includes `circuit_groups` and `color_light_groups` keys
+
+- **Expanded attribute constants** to capture full protocol data:
+  - Added `CALIB_ATTR`, `PORT_ATTR`, `PROBE_ATTR`, `SETTMP_ATTR` constants
+  - BODY: Added `SETTMP` (current temp setting when body is active)
+  - CHEM: Added `MODE`, `PROBE`, `READY`, `STATIC`, `TEMP` attributes
+  - CIRCGRP: Added `SNAME`, `STATUS`, `USE` (light effect for groups)
+  - PUMP: Added `PRIM`, `READY`, `STATIC` attributes
+  - PMPCIRC: Added `READY`, `STATIC` attributes
+  - SENSE: Added `CALIB` attribute
+  - SCHED: Added `READY`, `UPDATE` (last modified date)
+  - SYSTEM: Added `ACT3`, `ACT4`, `ENABLE`, `PERMIT`, `PORT`, `READY`, `STATIC`, `UPDATE` (firmware update flag)
+  - SYSTIM: Added `CALIB`, `READY` attributes
+  - PANEL, MODULE, PERMIT: Added `READY` attribute
+  - PRESS, REMBTN, REMOTE, VALVE (misc): Added `READY` attribute
+
+### Changed
+
+- **pH setpoint validation**: `set_ph_setpoint()` now validates that values are in 0.1 increments (e.g., 7.0, 7.1, 7.2) as required by IntelliChem hardware. Invalid values like 7.05 or 7.15 are rejected with a helpful error message.
+
 ## [0.1.1] - 2025-11-27
 
 ### Changed
@@ -227,7 +275,8 @@ First stable release of pyintellicenter.
 - `orjson` for fast JSON serialization
 - Python 3.11+ required
 
-[Unreleased]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a13...v0.1.0
 [0.0.5a13]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a12...v0.0.5a13
