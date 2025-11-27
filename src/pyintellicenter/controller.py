@@ -62,7 +62,7 @@ from .attributes import (
     VER_ATTR,
     HeaterType,
 )
-from .connection import ICConnection
+from .connection import DEFAULT_TCP_PORT, ICConnection, TransportType
 from .exceptions import ICCommandError, ICConnectionError, ICResponseError
 
 if TYPE_CHECKING:
@@ -203,18 +203,21 @@ class ICBaseController:
     def __init__(
         self,
         host: str,
-        port: int = 6681,
+        port: int | None = None,
         keepalive_interval: float | None = None,
+        transport: TransportType = "tcp",
     ) -> None:
         """Initialize the controller.
 
         Args:
             host: IP address or hostname of IntelliCenter
-            port: TCP port (default: 6681)
+            port: Port number (default: 6681 for TCP, 6680 for WebSocket)
             keepalive_interval: Seconds between keepalive requests
+            transport: Transport type - "tcp" or "websocket" (default: "tcp")
         """
         self._host = host
-        self._port = port
+        self._transport = transport
+        self._port = port if port is not None else DEFAULT_TCP_PORT
         self._keepalive_interval = keepalive_interval or 90.0
 
         # Connection
@@ -231,13 +234,19 @@ class ICBaseController:
 
     def __repr__(self) -> str:
         return (
-            f"ICBaseController(host={self._host!r}, port={self._port}, connected={self.connected})"
+            f"ICBaseController(host={self._host!r}, port={self._port}, "
+            f"transport={self._transport!r}, connected={self.connected})"
         )
 
     @property
     def host(self) -> str:
         """Return the host address."""
         return self._host
+
+    @property
+    def transport(self) -> TransportType:
+        """Return the transport type."""
+        return self._transport
 
     @property
     def metrics(self) -> ICConnectionMetrics:
@@ -272,6 +281,7 @@ class ICBaseController:
             self._host,
             self._port,
             keepalive_interval=self._keepalive_interval,
+            transport=self._transport,
         )
 
         # Set disconnect callback
@@ -401,18 +411,20 @@ class ICModelController(ICBaseController):
         self,
         host: str,
         model: PoolModel,
-        port: int = 6681,
+        port: int | None = None,
         keepalive_interval: float | None = None,
+        transport: TransportType = "tcp",
     ) -> None:
         """Initialize the controller.
 
         Args:
             host: IP address or hostname of IntelliCenter
             model: PoolModel to populate and update
-            port: TCP port (default: 6681)
+            port: Port number (default: 6681 for TCP, 6680 for WebSocket)
             keepalive_interval: Seconds between keepalive requests
+            transport: Transport type - "tcp" or "websocket" (default: "tcp")
         """
-        super().__init__(host, port, keepalive_interval)
+        super().__init__(host, port, keepalive_interval, transport)
         self._model = model
         self._updated_callback: (
             Callable[[ICModelController, dict[str, dict[str, Any]]], None] | None
@@ -421,7 +433,8 @@ class ICModelController(ICBaseController):
     def __repr__(self) -> str:
         return (
             f"ICModelController(host={self._host!r}, port={self._port}, "
-            f"connected={self.connected}, objects={self._model.num_objects})"
+            f"transport={self._transport!r}, connected={self.connected}, "
+            f"objects={self._model.num_objects})"
         )
 
     @property
