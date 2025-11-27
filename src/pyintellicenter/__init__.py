@@ -115,7 +115,7 @@ from .attributes import (
     # Enums
     HeaterType,
 )
-from .connection import ICConnection
+from .connection import ICConnection, ICProtocol
 from .controller import (
     ICBaseController,
     ICConnectionHandler,
@@ -155,7 +155,7 @@ try:
 except ImportError:
     _DISCOVERY_AVAILABLE = False
 
-__version__ = "0.0.5a5"
+__version__ = "0.0.5a7"
 
 __all__ = [
     # Version
@@ -168,6 +168,7 @@ __all__ = [
     "ICTimeoutError",
     # Connection
     "ICConnection",
+    "ICProtocol",
     # Controller classes
     "ICBaseController",
     "ICModelController",

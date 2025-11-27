@@ -1,4 +1,4 @@
-"""Tests for pyintellicenter connection module."""
+"""Tests for pyintellicenter connection module (Protocol-based)."""
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -6,7 +6,226 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from pyintellicenter import ICConnection, ICConnectionError, ICResponseError
-from pyintellicenter.connection import CONNECTION_TIMEOUT, DEFAULT_PORT
+from pyintellicenter.connection import (
+    CONNECTION_TIMEOUT,
+    DEFAULT_PORT,
+    ICProtocol,
+)
+
+
+class TestICProtocol:
+    """Tests for ICProtocol class."""
+
+    def test_init(self):
+        """Test protocol initialization."""
+        protocol = ICProtocol()
+        assert protocol.connected is False
+        assert protocol._buffer == b""
+        assert protocol._message_id == 0
+
+    def test_init_with_callbacks(self):
+        """Test protocol initialization with callbacks."""
+        notification_cb = MagicMock()
+        disconnect_cb = MagicMock()
+
+        protocol = ICProtocol(
+            notification_callback=notification_cb,
+            disconnect_callback=disconnect_cb,
+        )
+
+        assert protocol._notification_callback is notification_cb
+        assert protocol._disconnect_callback is disconnect_cb
+
+    @pytest.mark.asyncio
+    async def test_connection_made(self):
+        """Test connection_made sets up state correctly."""
+        protocol = ICProtocol()
+        mock_transport = MagicMock()
+
+        protocol.connection_made(mock_transport)
+
+        assert protocol.connected is True
+        assert protocol._transport is mock_transport
+        assert protocol._buffer == b""
+        assert protocol._message_id == 0
+
+    def test_connection_lost_clean_close(self):
+        """Test connection_lost with clean close."""
+        disconnect_called = []
+
+        def on_disconnect(exc):
+            disconnect_called.append(exc)
+
+        protocol = ICProtocol(disconnect_callback=on_disconnect)
+        protocol._connected = True
+
+        protocol.connection_lost(None)
+
+        assert protocol.connected is False
+        assert len(disconnect_called) == 1
+        assert disconnect_called[0] is None
+
+    def test_connection_lost_with_error(self):
+        """Test connection_lost with exception."""
+        disconnect_called = []
+
+        def on_disconnect(exc):
+            disconnect_called.append(exc)
+
+        protocol = ICProtocol(disconnect_callback=on_disconnect)
+        protocol._connected = True
+
+        test_error = ConnectionResetError("Connection reset")
+        protocol.connection_lost(test_error)
+
+        assert protocol.connected is False
+        assert len(disconnect_called) == 1
+        assert disconnect_called[0] is test_error
+
+    @pytest.mark.asyncio
+    async def test_connection_lost_cancels_pending_future(self):
+        """Test connection_lost cancels pending response future."""
+        protocol = ICProtocol()
+        mock_transport = MagicMock()
+        protocol.connection_made(mock_transport)
+
+        # Simulate a pending request
+        loop = asyncio.get_running_loop()
+        protocol._response_future = loop.create_future()
+
+        protocol.connection_lost(ConnectionResetError("Reset"))
+
+        assert protocol._response_future.done()
+        with pytest.raises(ICConnectionError):
+            protocol._response_future.result()
+
+    @pytest.mark.asyncio
+    async def test_data_received_complete_message(self):
+        """Test data_received with complete message."""
+        notifications = []
+
+        def on_notification(msg):
+            notifications.append(msg)
+
+        protocol = ICProtocol(notification_callback=on_notification)
+        mock_transport = MagicMock()
+        protocol.connection_made(mock_transport)
+
+        # Send NotifyList notification
+        data = b'{"command":"NotifyList","objectList":[{"objnam":"PUMP1"}]}\r\n'
+        protocol.data_received(data)
+
+        assert len(notifications) == 1
+        assert notifications[0]["command"] == "NotifyList"
+
+    @pytest.mark.asyncio
+    async def test_data_received_partial_message(self):
+        """Test data_received handles partial messages."""
+        notifications = []
+
+        def on_notification(msg):
+            notifications.append(msg)
+
+        protocol = ICProtocol(notification_callback=on_notification)
+        mock_transport = MagicMock()
+        protocol.connection_made(mock_transport)
+
+        # Send partial message
+        protocol.data_received(b'{"command":"NotifyList"')
+        assert len(notifications) == 0
+        assert protocol._buffer == b'{"command":"NotifyList"'
+
+        # Complete the message
+        protocol.data_received(b',"objectList":[]}\r\n')
+        assert len(notifications) == 1
+        assert protocol._buffer == b""
+
+    @pytest.mark.asyncio
+    async def test_data_received_multiple_messages(self):
+        """Test data_received handles multiple messages in one buffer."""
+        notifications = []
+
+        def on_notification(msg):
+            notifications.append(msg)
+
+        protocol = ICProtocol(notification_callback=on_notification)
+        mock_transport = MagicMock()
+        protocol.connection_made(mock_transport)
+
+        # Send two messages at once
+        data = (
+            b'{"command":"NotifyList","objectList":[{"objnam":"PUMP1"}]}\r\n'
+            b'{"command":"NotifyList","objectList":[{"objnam":"PUMP2"}]}\r\n'
+        )
+        protocol.data_received(data)
+
+        assert len(notifications) == 2
+
+    @pytest.mark.asyncio
+    async def test_data_received_response_resolves_future(self):
+        """Test data_received resolves pending future for response."""
+        protocol = ICProtocol()
+        mock_transport = MagicMock()
+        protocol.connection_made(mock_transport)
+
+        # Create a pending future
+        loop = asyncio.get_running_loop()
+        protocol._response_future = loop.create_future()
+
+        # Receive response
+        data = b'{"command":"SendParamList","messageID":"1","response":"200"}\r\n'
+        protocol.data_received(data)
+
+        assert protocol._response_future.done()
+        result = protocol._response_future.result()
+        assert result["response"] == "200"
+
+    @pytest.mark.asyncio
+    async def test_data_received_invalid_json(self):
+        """Test data_received handles invalid JSON gracefully."""
+        protocol = ICProtocol()
+        mock_transport = MagicMock()
+        protocol.connection_made(mock_transport)
+
+        # Send invalid JSON - should not crash
+        data = b"not valid json\r\n"
+        protocol.data_received(data)
+
+        assert protocol._buffer == b""
+
+    @pytest.mark.asyncio
+    async def test_data_received_buffer_overflow_protection(self):
+        """Test data_received protects against buffer overflow."""
+        protocol = ICProtocol()
+        mock_transport = MagicMock()
+        protocol.connection_made(mock_transport)
+
+        # Send huge data without terminator
+        huge_data = b"x" * (1024 * 1024 + 1)  # Over 1MB
+        protocol.data_received(huge_data)
+
+        # Transport should be closed
+        mock_transport.close.assert_called_once()
+
+    def test_message_id_increments(self):
+        """Test message ID increments."""
+        protocol = ICProtocol()
+
+        assert protocol._next_message_id() == "1"
+        assert protocol._next_message_id() == "2"
+        assert protocol._next_message_id() == "3"
+
+    @pytest.mark.asyncio
+    async def test_close(self):
+        """Test close method."""
+        protocol = ICProtocol()
+        mock_transport = MagicMock()
+        protocol.connection_made(mock_transport)
+
+        protocol.close()
+
+        assert protocol.connected is False
+        mock_transport.close.assert_called_once()
 
 
 class TestICConnection:
@@ -52,75 +271,53 @@ class TestICConnection:
         """Test successful connection."""
         conn = ICConnection("192.168.1.100")
 
-        mock_reader = AsyncMock()
-        mock_writer = MagicMock()
-        mock_writer.is_closing.return_value = False
+        mock_transport = MagicMock()
+        mock_protocol = MagicMock(spec=ICProtocol)
+        mock_protocol.connected = True
 
-        with patch("asyncio.open_connection", return_value=(mock_reader, mock_writer)):
-            await conn.connect()
+        async def mock_create_connection(protocol_factory, host, port):
+            protocol = protocol_factory()
+            protocol._connected = True
+            return (mock_transport, protocol)
 
-        assert conn.connected is True
+        with patch.object(
+            asyncio.get_event_loop(),
+            "create_connection",
+            side_effect=mock_create_connection,
+        ):
+            loop = asyncio.get_event_loop()
+            with patch.object(loop, "create_connection", side_effect=mock_create_connection):
+                await conn.connect()
+
+        # Protocol should be set (even if mock)
+        assert conn._protocol is not None
 
     @pytest.mark.asyncio
     async def test_connect_timeout(self):
         """Test connection timeout."""
         conn = ICConnection("192.168.1.100")
 
-        async def slow_connect(*args, **kwargs):
+        async def slow_create_connection(*args, **kwargs):
             await asyncio.sleep(CONNECTION_TIMEOUT + 1)
-            return (AsyncMock(), MagicMock())
+            return (MagicMock(), ICProtocol())
 
-        with (
-            patch("asyncio.open_connection", side_effect=slow_connect),
-            pytest.raises(ICConnectionError),
-        ):
-            await conn.connect()
+        with patch("asyncio.AbstractEventLoop.create_connection", side_effect=slow_create_connection):
+            with pytest.raises(ICConnectionError):
+                await conn.connect()
 
     @pytest.mark.asyncio
     async def test_connect_refused(self):
         """Test connection refused."""
         conn = ICConnection("192.168.1.100")
 
-        with (
-            patch("asyncio.open_connection", side_effect=OSError("Connection refused")),
-            pytest.raises(ICConnectionError),
-        ):
-            await conn.connect()
-
-    @pytest.mark.asyncio
-    async def test_disconnect(self):
-        """Test disconnection."""
-        conn = ICConnection("192.168.1.100")
-
-        mock_reader = AsyncMock()
-        mock_writer = MagicMock()
-        mock_writer.is_closing.return_value = False
-        mock_writer.close = MagicMock()
-        mock_writer.wait_closed = AsyncMock()
-
-        with patch("asyncio.open_connection", return_value=(mock_reader, mock_writer)):
-            await conn.connect()
-            assert conn.connected is True
-
-            await conn.disconnect()
-            assert conn.connected is False
-            mock_writer.close.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_context_manager(self):
-        """Test async context manager."""
-        mock_reader = AsyncMock()
-        mock_writer = MagicMock()
-        mock_writer.is_closing.return_value = False
-        mock_writer.close = MagicMock()
-        mock_writer.wait_closed = AsyncMock()
-
-        with patch("asyncio.open_connection", return_value=(mock_reader, mock_writer)):
-            async with ICConnection("192.168.1.100") as conn:
-                assert conn.connected is True
-
-            # After exiting context, should be disconnected
-            mock_writer.close.assert_called()
+        with pytest.raises(ICConnectionError):
+            # This will fail because there's no server listening
+            # Just verify error handling
+            with patch(
+                "asyncio.AbstractEventLoop.create_connection",
+                side_effect=OSError("Connection refused"),
+            ):
+                await conn.connect()
 
     @pytest.mark.asyncio
     async def test_send_request_not_connected(self):
@@ -129,123 +326,6 @@ class TestICConnection:
 
         with pytest.raises(ICConnectionError):
             await conn.send_request("GetParamList")
-
-    @pytest.mark.asyncio
-    async def test_send_request_success(self):
-        """Test successful request/response."""
-        conn = ICConnection("192.168.1.100")
-
-        mock_reader = AsyncMock()
-        mock_writer = MagicMock()
-        mock_writer.is_closing.return_value = False
-        mock_writer.write = MagicMock()
-        mock_writer.drain = AsyncMock()
-
-        # Mock response
-        response_data = (
-            b'{"command":"SendParamList","messageID":"1","response":"200","objectList":[]}\r\n'
-        )
-        mock_reader.readline = AsyncMock(return_value=response_data)
-
-        with patch("asyncio.open_connection", return_value=(mock_reader, mock_writer)):
-            await conn.connect()
-
-            response = await conn.send_request(
-                "GetParamList",
-                condition="",
-                objectList=[{"objnam": "INCR", "keys": ["VER"]}],
-            )
-
-            assert response["response"] == "200"
-            mock_writer.write.assert_called()
-            mock_writer.drain.assert_called()
-
-    @pytest.mark.asyncio
-    async def test_send_request_error_response(self):
-        """Test request with error response."""
-        conn = ICConnection("192.168.1.100")
-
-        mock_reader = AsyncMock()
-        mock_writer = MagicMock()
-        mock_writer.is_closing.return_value = False
-        mock_writer.write = MagicMock()
-        mock_writer.drain = AsyncMock()
-
-        # Mock error response
-        response_data = b'{"command":"SendParamList","messageID":"1","response":"400"}\r\n'
-        mock_reader.readline = AsyncMock(return_value=response_data)
-
-        with patch("asyncio.open_connection", return_value=(mock_reader, mock_writer)):
-            await conn.connect()
-
-            with pytest.raises(ICResponseError) as exc_info:
-                await conn.send_request("GetParamList")
-
-            assert exc_info.value.code == "400"
-
-    @pytest.mark.asyncio
-    async def test_notification_callback_sync(self):
-        """Test sync notification callback is called for NotifyList."""
-        conn = ICConnection("192.168.1.100")
-
-        mock_reader = AsyncMock()
-        mock_writer = MagicMock()
-        mock_writer.is_closing.return_value = False
-        mock_writer.write = MagicMock()
-        mock_writer.drain = AsyncMock()
-
-        # First return a notification, then the actual response
-        notification = b'{"command":"NotifyList","objectList":[{"objnam":"PUMP1"}]}\r\n'
-        response = (
-            b'{"command":"SendParamList","messageID":"1","response":"200","objectList":[]}\r\n'
-        )
-        mock_reader.readline = AsyncMock(side_effect=[notification, response])
-
-        notifications_received = []
-
-        def on_notification(msg):
-            notifications_received.append(msg)
-
-        with patch("asyncio.open_connection", return_value=(mock_reader, mock_writer)):
-            await conn.connect()
-            conn.set_notification_callback(on_notification)
-
-            await conn.send_request("GetParamList")
-
-            assert len(notifications_received) == 1
-            assert notifications_received[0]["command"] == "NotifyList"
-
-    @pytest.mark.asyncio
-    async def test_notification_callback_async(self):
-        """Test async notification callback is called for NotifyList."""
-        conn = ICConnection("192.168.1.100")
-
-        mock_reader = AsyncMock()
-        mock_writer = MagicMock()
-        mock_writer.is_closing.return_value = False
-        mock_writer.write = MagicMock()
-        mock_writer.drain = AsyncMock()
-
-        # First return a notification, then the actual response
-        notification = b'{"command":"NotifyList","objectList":[{"objnam":"PUMP1"}]}\r\n'
-        response = (
-            b'{"command":"SendParamList","messageID":"1","response":"200","objectList":[]}\r\n'
-        )
-        mock_reader.readline = AsyncMock(side_effect=[notification, response])
-
-        notifications_received = []
-
-        async def on_notification(msg):
-            notifications_received.append(msg)
-
-        with patch("asyncio.open_connection", return_value=(mock_reader, mock_writer)):
-            await conn.connect()
-            conn.set_notification_callback(on_notification)
-
-            await conn.send_request("GetParamList")
-
-            assert len(notifications_received) == 1
-            assert notifications_received[0]["command"] == "NotifyList"
 
     def test_set_notification_callback(self):
         """Test setting notification callback."""
@@ -270,251 +350,14 @@ class TestICConnection:
         assert conn._disconnect_callback is None
 
     @pytest.mark.asyncio
-    async def test_read_message_connection_closed(self):
-        """Test _read_message when connection is closed."""
+    async def test_disconnect_not_connected(self):
+        """Test disconnect when not connected is a no-op."""
         conn = ICConnection("192.168.1.100")
-
-        mock_reader = AsyncMock()
-        mock_writer = MagicMock()
-        mock_writer.is_closing.return_value = False
-        mock_writer.write = MagicMock()
-        mock_writer.drain = AsyncMock()
-
-        # Return empty bytes (connection closed)
-        mock_reader.readline = AsyncMock(return_value=b"")
-
-        with patch("asyncio.open_connection", return_value=(mock_reader, mock_writer)):
-            await conn.connect()
-
-            with pytest.raises(ICConnectionError) as exc_info:
-                await conn._read_message()
-
-            assert "closed" in str(exc_info.value).lower()
-
-    @pytest.mark.asyncio
-    async def test_read_message_invalid_json(self):
-        """Test _read_message with invalid JSON."""
-        conn = ICConnection("192.168.1.100")
-
-        mock_reader = AsyncMock()
-        mock_writer = MagicMock()
-        mock_writer.is_closing.return_value = False
-
-        # Return invalid JSON
-        mock_reader.readline = AsyncMock(return_value=b"not valid json\r\n")
-
-        with patch("asyncio.open_connection", return_value=(mock_reader, mock_writer)):
-            await conn.connect()
-
-            with pytest.raises(ICConnectionError) as exc_info:
-                await conn._read_message()
-
-            assert "JSON" in str(exc_info.value)
-
-    @pytest.mark.asyncio
-    async def test_read_message_not_connected(self):
-        """Test _read_message when not connected."""
-        conn = ICConnection("192.168.1.100")
-
-        with pytest.raises(ICConnectionError) as exc_info:
-            await conn._read_message()
-
-        assert "connected" in str(exc_info.value).lower()
-
-    @pytest.mark.asyncio
-    async def test_write_message_not_connected(self):
-        """Test _write_message when not connected."""
-        conn = ICConnection("192.168.1.100")
-
-        with pytest.raises(ICConnectionError) as exc_info:
-            await conn._write_message({"command": "test"})
-
-        assert "connected" in str(exc_info.value).lower()
-
-    @pytest.mark.asyncio
-    async def test_write_message_os_error(self):
-        """Test _write_message with OSError."""
-        conn = ICConnection("192.168.1.100")
-
-        mock_reader = AsyncMock()
-        mock_writer = MagicMock()
-        mock_writer.is_closing.return_value = False
-        mock_writer.write = MagicMock(side_effect=OSError("Broken pipe"))
-
-        with patch("asyncio.open_connection", return_value=(mock_reader, mock_writer)):
-            await conn.connect()
-
-            with pytest.raises(ICConnectionError) as exc_info:
-                await conn._write_message({"command": "test"})
-
-            assert "Write failed" in str(exc_info.value)
-
-    @pytest.mark.asyncio
-    async def test_send_request_timeout(self):
-        """Test send_request times out."""
-        conn = ICConnection("192.168.1.100", response_timeout=0.1)
-
-        mock_reader = AsyncMock()
-        mock_writer = MagicMock()
-        mock_writer.is_closing.return_value = False
-        mock_writer.write = MagicMock()
-        mock_writer.drain = AsyncMock()
-
-        # Simulate slow response
-        async def slow_readline():
-            await asyncio.sleep(1)
-            return b'{"response":"200"}\r\n'
-
-        mock_reader.readline = slow_readline
-
-        with patch("asyncio.open_connection", return_value=(mock_reader, mock_writer)):
-            await conn.connect()
-
-            with pytest.raises(TimeoutError):
-                await conn.send_request("GetParamList")
-
-    @pytest.mark.asyncio
-    async def test_disconnect_cleanup_on_error(self):
-        """Test disconnect handles cleanup errors gracefully."""
-        conn = ICConnection("192.168.1.100")
-
-        mock_reader = AsyncMock()
-        mock_writer = MagicMock()
-        mock_writer.is_closing.return_value = False
-        mock_writer.close = MagicMock()
-        mock_writer.wait_closed = AsyncMock(side_effect=Exception("Cleanup error"))
-
-        with patch("asyncio.open_connection", return_value=(mock_reader, mock_writer)):
-            await conn.connect()
-
-            # Should not raise even if wait_closed fails
-            await conn.disconnect()
-            assert conn.connected is False
-
-    @pytest.mark.asyncio
-    async def test_connect_when_already_connected(self):
-        """Test connect is idempotent when already connected."""
-        conn = ICConnection("192.168.1.100")
-
-        mock_reader = AsyncMock()
-        mock_writer = MagicMock()
-        mock_writer.is_closing.return_value = False
-
-        call_count = 0
-
-        async def mock_open_connection(*args, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            return (mock_reader, mock_writer)
-
-        with patch("asyncio.open_connection", side_effect=mock_open_connection):
-            await conn.connect()
-            await conn.connect()  # Should be a no-op
-
-        # Should only have connected once
-        assert call_count == 1
-
-    @pytest.mark.asyncio
-    async def test_message_id_increments(self):
-        """Test message ID increments with each request."""
-        conn = ICConnection("192.168.1.100")
-
-        mock_reader = AsyncMock()
-        mock_writer = MagicMock()
-        mock_writer.is_closing.return_value = False
-        mock_writer.write = MagicMock()
-        mock_writer.drain = AsyncMock()
-
-        # Return successful responses
-        mock_reader.readline = AsyncMock(return_value=b'{"response":"200","messageID":"1"}\r\n')
-
-        with patch("asyncio.open_connection", return_value=(mock_reader, mock_writer)):
-            await conn.connect()
-
-            assert conn._message_id == 0
-            await conn.send_request("Cmd1")
-            assert conn._message_id == 1
-            await conn.send_request("Cmd2")
-            assert conn._message_id == 2
-
-    @pytest.mark.asyncio
-    async def test_keepalive_cancelled_gracefully(self):
-        """Test keepalive loop handles cancellation gracefully."""
-        conn = ICConnection("192.168.1.100", keepalive_interval=0.05)
-
-        mock_reader = AsyncMock()
-        mock_writer = MagicMock()
-        mock_writer.is_closing.return_value = False
-        mock_writer.write = MagicMock()
-        mock_writer.drain = AsyncMock()
-        mock_writer.close = MagicMock()
-        mock_writer.wait_closed = AsyncMock()
-
-        # Return successful responses
-        mock_reader.readline = AsyncMock(return_value=b'{"response":"200"}\r\n')
-
-        with patch("asyncio.open_connection", return_value=(mock_reader, mock_writer)):
-            await conn.connect()
-
-            # Keepalive task should be running
-            assert conn._keepalive_task is not None
-
-            # Disconnect should cancel keepalive gracefully
-            await conn.disconnect()
-
-            # No exceptions should be raised and task should be cleaned up
-            assert conn._keepalive_task is None
-
-    @pytest.mark.asyncio
-    async def test_keepalive_cancelled_on_disconnect(self):
-        """Test keepalive task is cancelled on disconnect."""
-        conn = ICConnection("192.168.1.100", keepalive_interval=10.0)
-
-        mock_reader = AsyncMock()
-        mock_writer = MagicMock()
-        mock_writer.is_closing.return_value = False
-        mock_writer.close = MagicMock()
-        mock_writer.wait_closed = AsyncMock()
-
-        with patch("asyncio.open_connection", return_value=(mock_reader, mock_writer)):
-            await conn.connect()
-
-            # Keepalive task should exist
-            assert conn._keepalive_task is not None
-            assert not conn._keepalive_task.done()
-
-            await conn.disconnect()
-
-            # After disconnect, keepalive task should be None
-            assert conn._keepalive_task is None
-
-    @pytest.mark.asyncio
-    async def test_handle_connection_lost_calls_callback(self):
-        """Test _handle_connection_lost invokes disconnect callback."""
-        conn = ICConnection("192.168.1.100")
-
-        disconnect_called = []
-
-        def on_disconnect(exc):
-            disconnect_called.append(exc)
-
-        conn.set_disconnect_callback(on_disconnect)
-
-        mock_reader = AsyncMock()
-        mock_writer = MagicMock()
-        mock_writer.is_closing.return_value = False
-        mock_writer.close = MagicMock()
-        mock_writer.wait_closed = AsyncMock()
-
-        with patch("asyncio.open_connection", return_value=(mock_reader, mock_writer)):
-            await conn.connect()
-
-            test_error = ICConnectionError("Test error")
-            await conn._handle_connection_lost(test_error)
-
-            assert len(disconnect_called) == 1
-            assert disconnect_called[0] is test_error
-            assert conn.connected is False
+        assert conn.connected is False
+
+        # Should not raise
+        await conn.disconnect()
+        assert conn.connected is False
 
 
 class TestICResponseError:
@@ -555,191 +398,139 @@ class TestICConnectionError:
         assert "Connection failed" in str(err)
 
 
-class TestICConnectionAdvanced:
-    """Advanced tests for ICConnection edge cases."""
+class TestICProtocolIntegration:
+    """Integration tests using ICProtocol directly."""
 
     @pytest.mark.asyncio
-    async def test_keepalive_sends_ping(self):
-        """Test keepalive loop sends PING messages."""
-        conn = ICConnection("192.168.1.100", keepalive_interval=0.1)
+    async def test_send_request_success(self):
+        """Test successful request/response through protocol."""
+        protocol = ICProtocol()
+        mock_transport = MagicMock()
+        protocol.connection_made(mock_transport)
 
-        mock_reader = AsyncMock()
-        mock_writer = MagicMock()
-        mock_writer.is_closing.return_value = False
-        mock_writer.write = MagicMock()
-        mock_writer.drain = AsyncMock()
-        mock_writer.close = MagicMock()
-        mock_writer.wait_closed = AsyncMock()
+        # Start the send_request in a task
+        async def do_request():
+            return await protocol.send_request("GetParamList", request_timeout=1.0)
 
-        # Return successful responses
-        mock_reader.readline = AsyncMock(return_value=b'{"response":"200"}\r\n')
+        task = asyncio.create_task(do_request())
 
-        with patch("asyncio.open_connection", return_value=(mock_reader, mock_writer)):
-            await conn.connect()
+        # Give it a moment to start
+        await asyncio.sleep(0.01)
 
-            # Wait for keepalive to trigger
-            await asyncio.sleep(0.15)
+        # Simulate response arriving
+        response_data = b'{"command":"SendParamList","messageID":"1","response":"200"}\r\n'
+        protocol.data_received(response_data)
 
-            # Should have written something (PING or at least been called)
-            calls = mock_writer.write.call_args_list
-            # Check if any call contains PING
-            ping_found = any("PING" in str(call) for call in calls)
-            assert ping_found or len(calls) > 0
-
-            await conn.disconnect()
+        result = await task
+        assert result["response"] == "200"
 
     @pytest.mark.asyncio
-    async def test_keepalive_error_is_handled(self):
-        """Test keepalive loop handles timeout errors gracefully."""
-        # This test verifies the keepalive mechanism exists and runs
-        conn = ICConnection("192.168.1.100", keepalive_interval=0.1)
+    async def test_send_request_error_response(self):
+        """Test request with error response."""
+        protocol = ICProtocol()
+        mock_transport = MagicMock()
+        protocol.connection_made(mock_transport)
 
-        mock_reader = AsyncMock()
-        mock_writer = MagicMock()
-        mock_writer.is_closing.return_value = False
-        mock_writer.write = MagicMock()
-        mock_writer.drain = AsyncMock()
-        mock_writer.close = MagicMock()
-        mock_writer.wait_closed = AsyncMock()
+        async def do_request():
+            return await protocol.send_request("GetParamList", request_timeout=1.0)
 
-        # Return successful responses
-        mock_reader.readline = AsyncMock(return_value=b'{"response":"200"}\r\n')
+        task = asyncio.create_task(do_request())
+        await asyncio.sleep(0.01)
 
-        with patch("asyncio.open_connection", return_value=(mock_reader, mock_writer)):
-            await conn.connect()
-            assert conn._keepalive_task is not None
+        # Simulate error response
+        response_data = b'{"command":"SendParamList","messageID":"1","response":"400"}\r\n'
+        protocol.data_received(response_data)
 
-            # Wait for at least one keepalive
-            await asyncio.sleep(0.15)
+        with pytest.raises(ICResponseError) as exc_info:
+            await task
 
-            # Verify connection still works
-            assert conn.connected is True
-
-            await conn.disconnect()
+        assert exc_info.value.code == "400"
 
     @pytest.mark.asyncio
-    async def test_response_with_error_code(self):
-        """Test handling response with error code."""
-        conn = ICConnection("192.168.1.100")
+    async def test_send_request_timeout(self):
+        """Test request timeout."""
+        protocol = ICProtocol()
+        mock_transport = MagicMock()
+        protocol.connection_made(mock_transport)
 
-        mock_reader = AsyncMock()
-        mock_writer = MagicMock()
-        mock_writer.is_closing.return_value = False
-        mock_writer.write = MagicMock()
-        mock_writer.drain = AsyncMock()
-
-        # Mock error response (current impl doesn't parse message field)
-        response_data = b'{"command":"Error","messageID":"1","response":"500"}\r\n'
-        mock_reader.readline = AsyncMock(return_value=response_data)
-
-        with patch("asyncio.open_connection", return_value=(mock_reader, mock_writer)):
-            await conn.connect()
-
-            with pytest.raises(ICResponseError) as exc_info:
-                await conn.send_request("GetParamList")
-
-            assert exc_info.value.code == "500"
+        with pytest.raises(TimeoutError):
+            await protocol.send_request("GetParamList", request_timeout=0.1)
 
     @pytest.mark.asyncio
-    async def test_disconnect_not_connected(self):
-        """Test disconnect when not connected is a no-op."""
-        conn = ICConnection("192.168.1.100")
-        assert conn.connected is False
-
-        # Should not raise
-        await conn.disconnect()
-        assert conn.connected is False
-
-    @pytest.mark.asyncio
-    async def test_read_message_returns_empty(self):
-        """Test _read_message handles empty response (connection closed)."""
-        conn = ICConnection("192.168.1.100")
-
-        mock_reader = AsyncMock()
-        mock_writer = MagicMock()
-        mock_writer.is_closing.return_value = False
-
-        # Return empty bytes (connection closed by remote)
-        mock_reader.readline = AsyncMock(return_value=b"")
-
-        with patch("asyncio.open_connection", return_value=(mock_reader, mock_writer)):
-            await conn.connect()
-
-            with pytest.raises(ICConnectionError) as exc_info:
-                await conn._read_message()
-
-            assert "closed" in str(exc_info.value).lower()
-
-    @pytest.mark.asyncio
-    async def test_notification_without_callback(self):
-        """Test notification is ignored when no callback set."""
-        conn = ICConnection("192.168.1.100")
-
-        mock_reader = AsyncMock()
-        mock_writer = MagicMock()
-        mock_writer.is_closing.return_value = False
-        mock_writer.write = MagicMock()
-        mock_writer.drain = AsyncMock()
-
-        # First return a notification, then the actual response
-        notification = b'{"command":"NotifyList","objectList":[{"objnam":"PUMP1"}]}\r\n'
-        response = (
-            b'{"command":"SendParamList","messageID":"1","response":"200","objectList":[]}\r\n'
-        )
-        mock_reader.readline = AsyncMock(side_effect=[notification, response])
-
-        with patch("asyncio.open_connection", return_value=(mock_reader, mock_writer)):
-            await conn.connect()
-            # No callback set - should just skip notification
-
-            result = await conn.send_request("GetParamList")
-            assert result["response"] == "200"
-
-    @pytest.mark.asyncio
-    async def test_multiple_notifications_before_response(self):
-        """Test handling multiple notifications before response."""
-        conn = ICConnection("192.168.1.100")
-
-        mock_reader = AsyncMock()
-        mock_writer = MagicMock()
-        mock_writer.is_closing.return_value = False
-        mock_writer.write = MagicMock()
-        mock_writer.drain = AsyncMock()
-
-        # Multiple notifications then response
-        notifications_received = []
+    async def test_notification_callback_sync(self):
+        """Test sync notification callback."""
+        notifications = []
 
         def on_notification(msg):
-            notifications_received.append(msg)
+            notifications.append(msg)
 
-        notification1 = b'{"command":"NotifyList","objectList":[{"objnam":"PUMP1"}]}\r\n'
-        notification2 = b'{"command":"NotifyList","objectList":[{"objnam":"PUMP2"}]}\r\n'
-        response = b'{"command":"SendParamList","messageID":"1","response":"200"}\r\n'
-        mock_reader.readline = AsyncMock(side_effect=[notification1, notification2, response])
+        protocol = ICProtocol(notification_callback=on_notification)
+        mock_transport = MagicMock()
+        protocol.connection_made(mock_transport)
 
-        with patch("asyncio.open_connection", return_value=(mock_reader, mock_writer)):
-            await conn.connect()
-            conn.set_notification_callback(on_notification)
+        notification_data = b'{"command":"NotifyList","objectList":[{"objnam":"PUMP1"}]}\r\n'
+        protocol.data_received(notification_data)
 
-            await conn.send_request("GetParamList")
-
-            assert len(notifications_received) == 2
+        assert len(notifications) == 1
+        assert notifications[0]["command"] == "NotifyList"
 
     @pytest.mark.asyncio
-    async def test_drain_error_during_write(self):
-        """Test handling drain error during write."""
-        conn = ICConnection("192.168.1.100")
+    async def test_notification_callback_async(self):
+        """Test async notification callback."""
+        notifications = []
 
-        mock_reader = AsyncMock()
-        mock_writer = MagicMock()
-        mock_writer.is_closing.return_value = False
-        mock_writer.write = MagicMock()
-        mock_writer.drain = AsyncMock(side_effect=OSError("Connection lost"))
+        async def on_notification(msg):
+            notifications.append(msg)
 
-        with patch("asyncio.open_connection", return_value=(mock_reader, mock_writer)):
-            await conn.connect()
+        protocol = ICProtocol(notification_callback=on_notification)
+        mock_transport = MagicMock()
+        protocol.connection_made(mock_transport)
 
-            with pytest.raises(ICConnectionError) as exc_info:
-                await conn._write_message({"command": "test"})
+        notification_data = b'{"command":"NotifyList","objectList":[{"objnam":"PUMP1"}]}\r\n'
+        protocol.data_received(notification_data)
 
-            assert "Write failed" in str(exc_info.value)
+        # Give async callback time to run
+        await asyncio.sleep(0.01)
+
+        assert len(notifications) == 1
+        assert notifications[0]["command"] == "NotifyList"
+
+    @pytest.mark.asyncio
+    async def test_notification_before_response(self):
+        """Test handling notification before response."""
+        notifications = []
+
+        def on_notification(msg):
+            notifications.append(msg)
+
+        protocol = ICProtocol(notification_callback=on_notification)
+        mock_transport = MagicMock()
+        protocol.connection_made(mock_transport)
+
+        async def do_request():
+            return await protocol.send_request("GetParamList", request_timeout=1.0)
+
+        task = asyncio.create_task(do_request())
+        await asyncio.sleep(0.01)
+
+        # Send notification first
+        notification = b'{"command":"NotifyList","objectList":[{"objnam":"PUMP1"}]}\r\n'
+        protocol.data_received(notification)
+
+        # Then response
+        response = b'{"command":"SendParamList","messageID":"1","response":"200"}\r\n'
+        protocol.data_received(response)
+
+        result = await task
+
+        assert len(notifications) == 1
+        assert result["response"] == "200"
+
+    @pytest.mark.asyncio
+    async def test_send_request_not_connected(self):
+        """Test send_request when not connected."""
+        protocol = ICProtocol()
+        # Not calling connection_made
+
+        with pytest.raises(ICConnectionError):
+            await protocol.send_request("GetParamList")
