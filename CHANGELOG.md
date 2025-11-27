@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.5a12] - 2025-11-27
+
+### Fixed
+
+- **WebSocket message framing**: WebSocket messages now include `\r\n` terminator
+  - IntelliCenter requires the same message framing for both TCP and WebSocket
+  - Without the terminator, WebSocket connections would timeout waiting for response
+  - Verified working against live IntelliCenter hardware
+
+## [0.0.5a11] - 2025-11-27
+
+### Added
+
+- **Transport parameter for controllers**: `ICBaseController` and `ICModelController` now accept `transport` parameter
+
 ## [0.0.5a10] - 2025-11-27
 
 ### Added
@@ -200,7 +215,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `orjson` for fast JSON serialization
 - Python 3.11+ required
 
-[Unreleased]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a10...HEAD
+[Unreleased]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a12...HEAD
+[0.0.5a12]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a11...v0.0.5a12
+[0.0.5a11]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a10...v0.0.5a11
 [0.0.5a10]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a9...v0.0.5a10
 [0.0.5a9]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a8...v0.0.5a9
 [0.0.5a5]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a4...v0.0.5a5

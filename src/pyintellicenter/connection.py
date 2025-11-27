@@ -570,7 +570,8 @@ class ICWebSocketTransport:
         self._pending_message_id = msg_id
 
         try:
-            packet = orjson.dumps(request)
+            # Send as text with \r\n terminator (same framing as TCP)
+            packet = orjson.dumps(request).decode() + "\r\n"
             await self._ws.send(packet)
             _LOGGER.debug("Sent WebSocket request: %s (ID: %s)", command, msg_id)
 
