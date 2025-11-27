@@ -62,7 +62,7 @@ from .attributes import (
     VER_ATTR,
     HeaterType,
 )
-from .connection import DEFAULT_TCP_PORT, ICConnection, TransportType
+from .connection import DEFAULT_TCP_PORT, DEFAULT_WEBSOCKET_PORT, ICConnection, TransportType
 from .exceptions import ICCommandError, ICConnectionError, ICResponseError
 
 if TYPE_CHECKING:
@@ -217,7 +217,11 @@ class ICBaseController:
         """
         self._host = host
         self._transport = transport
-        self._port = port if port is not None else DEFAULT_TCP_PORT
+        self._port = (
+            port
+            if port is not None
+            else (DEFAULT_WEBSOCKET_PORT if transport == "websocket" else DEFAULT_TCP_PORT)
+        )
         self._keepalive_interval = keepalive_interval or 90.0
 
         # Connection

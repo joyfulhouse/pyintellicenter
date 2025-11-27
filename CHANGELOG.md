@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.5a13] - 2025-11-27
+
+### Fixed
+
+- **Controller default port for WebSocket**: `ICBaseController` and `ICModelController` now correctly default to port 6680 when `transport="websocket"` is specified
+
 ## [0.0.5a12] - 2025-11-27
 
 ### Fixed
@@ -215,7 +221,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `orjson` for fast JSON serialization
 - Python 3.11+ required
 
-[Unreleased]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a12...HEAD
+[Unreleased]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a13...HEAD
+[0.0.5a13]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a12...v0.0.5a13
 [0.0.5a12]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a11...v0.0.5a12
 [0.0.5a11]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a10...v0.0.5a11
 [0.0.5a10]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a9...v0.0.5a10
