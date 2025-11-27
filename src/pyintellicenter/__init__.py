@@ -130,7 +130,16 @@ from .attributes import (
     # Enums
     HeaterType,
 )
-from .connection import ICConnection, ICProtocol
+from .connection import (
+    DEFAULT_PORT,
+    DEFAULT_TCP_PORT,
+    DEFAULT_WEBSOCKET_PORT,
+    ICConnection,
+    ICProtocol,
+    ICTransportProtocol,
+    ICWebSocketTransport,
+    TransportType,
+)
 from .controller import (
     ICBaseController,
     ICConnectionHandler,
@@ -170,7 +179,7 @@ try:
 except ImportError:
     _DISCOVERY_AVAILABLE = False
 
-__version__ = "0.0.5a9"
+__version__ = "0.0.5a10"
 
 __all__ = [
     # Version
@@ -184,6 +193,12 @@ __all__ = [
     # Connection
     "ICConnection",
     "ICProtocol",
+    "ICWebSocketTransport",
+    "ICTransportProtocol",
+    "TransportType",
+    "DEFAULT_PORT",
+    "DEFAULT_TCP_PORT",
+    "DEFAULT_WEBSOCKET_PORT",
     # Controller classes
     "ICBaseController",
     "ICModelController",

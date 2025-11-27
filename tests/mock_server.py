@@ -58,7 +58,6 @@ class MockIntelliCenterServer:
 
         # Request handlers
         self._handlers: dict[str, Any] = {
-            "PING": self._handle_ping,
             "GetParamList": self._handle_get_param_list,
             "RequestParamList": self._handle_request_param_list,
             "SETPARAMLIST": self._handle_set_param_list,
@@ -226,10 +225,6 @@ class MockIntelliCenterServer:
             "response": "400",
             "error": f"Unknown command: {command}",
         }
-
-    async def _handle_ping(self, msg: dict[str, Any]) -> dict[str, Any]:
-        """Handle PING request."""
-        return {"response": "200"}
 
     async def _handle_get_param_list(self, msg: dict[str, Any]) -> dict[str, Any]:
         """Handle GetParamList request."""

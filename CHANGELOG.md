@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.5a10] - 2025-11-27
+
+### Added
+
+- **Dual transport support**: Both TCP and WebSocket transports are now supported
+  - `ICConnection` accepts `transport` parameter: `"tcp"` (default) or `"websocket"`
+  - Default ports: TCP=6681, WebSocket=6680
+  - Custom port overrides default when specified
+  - `ICWebSocketTransport` class for WebSocket connections
+  - `ICTransportProtocol` interface for transport abstraction
+  - `TransportType` literal type for type-safe transport selection
+  - New constants: `DEFAULT_TCP_PORT`, `DEFAULT_WEBSOCKET_PORT`
+
+### Changed
+
+- **websockets is now a required dependency** (was optional)
+  - Enables runtime transport selection for Home Assistant integration
+  - No need for optional extras to use WebSocket transport
+
+### Fixed
+
+- Added diagnostic logging for notification queue race conditions
+
 ## [0.0.5a9] - 2025-11-27
 
 ### Added
@@ -177,7 +200,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `orjson` for fast JSON serialization
 - Python 3.11+ required
 
-[Unreleased]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a9...HEAD
+[Unreleased]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a10...HEAD
+[0.0.5a10]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a9...v0.0.5a10
 [0.0.5a9]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a8...v0.0.5a9
 [0.0.5a5]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a4...v0.0.5a5
 [0.0.5a4]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a3...v0.0.5a4

@@ -34,6 +34,7 @@ classifiers = [
 ]
 dependencies = [
     "orjson>=3.10.0",
+    "websockets>=15.0",
     "zeroconf>=0.136.2",
 ]
 

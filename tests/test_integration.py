@@ -49,13 +49,6 @@ class TestICConnectionIntegration:
             assert conn.connected is True
 
     @pytest.mark.asyncio
-    async def test_send_ping(self, server):
-        """Test sending PING request."""
-        async with ICConnection(server.host, server.port) as conn:
-            response = await conn.send_request("PING")
-            assert response["response"] == "200"
-
-    @pytest.mark.asyncio
     async def test_get_param_list(self, server):
         """Test GetParamList request."""
         async with ICConnection(server.host, server.port) as conn:

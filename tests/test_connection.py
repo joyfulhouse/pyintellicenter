@@ -9,7 +9,10 @@ from pyintellicenter import ICConnection, ICConnectionError, ICResponseError
 from pyintellicenter.connection import (
     CONNECTION_TIMEOUT,
     DEFAULT_PORT,
+    DEFAULT_TCP_PORT,
+    DEFAULT_WEBSOCKET_PORT,
     ICProtocol,
+    ICWebSocketTransport,
 )
 
 
@@ -573,3 +576,126 @@ class TestICProtocolIntegration:
 
         with pytest.raises(ICConnectionError):
             await protocol.send_request("GetParamList")
+
+
+class TestICWebSocketTransport:
+    """Tests for ICWebSocketTransport class."""
+
+    def test_init(self):
+        """Test WebSocket transport initialization."""
+        transport = ICWebSocketTransport()
+        assert transport.connected is False
+        assert transport._ws is None
+        assert transport._message_id == 0
+
+    def test_init_with_callbacks(self):
+        """Test WebSocket transport initialization with callbacks."""
+        notification_cb = MagicMock()
+        disconnect_cb = MagicMock()
+
+        transport = ICWebSocketTransport(
+            notification_callback=notification_cb,
+            disconnect_callback=disconnect_cb,
+        )
+
+        assert transport._notification_callback is notification_cb
+        assert transport._disconnect_callback is disconnect_cb
+
+    def test_message_id_increments(self):
+        """Test message ID generation."""
+        transport = ICWebSocketTransport()
+
+        assert transport._next_message_id() == "1"
+        assert transport._next_message_id() == "2"
+        assert transport._next_message_id() == "3"
+
+    @pytest.mark.asyncio
+    async def test_send_request_not_connected(self):
+        """Test send_request when not connected."""
+        transport = ICWebSocketTransport()
+
+        with pytest.raises(ICConnectionError):
+            await transport.send_request("GetParamList")
+
+
+class TestICConnectionTransport:
+    """Tests for ICConnection transport selection."""
+
+    def test_default_transport_is_tcp(self):
+        """Test default transport is TCP."""
+        conn = ICConnection("192.168.1.100")
+        assert conn.transport_type == "tcp"
+        assert conn.port == DEFAULT_TCP_PORT
+
+    def test_explicit_tcp_transport(self):
+        """Test explicit TCP transport selection."""
+        conn = ICConnection("192.168.1.100", transport="tcp")
+        assert conn.transport_type == "tcp"
+        assert conn.port == DEFAULT_TCP_PORT
+
+    def test_websocket_transport(self):
+        """Test WebSocket transport selection."""
+        conn = ICConnection("192.168.1.100", transport="websocket")
+        assert conn.transport_type == "websocket"
+        assert conn.port == DEFAULT_WEBSOCKET_PORT
+
+    def test_custom_port_overrides_default(self):
+        """Test custom port overrides transport default."""
+        conn = ICConnection("192.168.1.100", port=8080, transport="tcp")
+        assert conn.port == 8080
+
+        conn_ws = ICConnection("192.168.1.100", port=9090, transport="websocket")
+        assert conn_ws.port == 9090
+
+    def test_repr_includes_transport(self):
+        """Test repr includes transport type."""
+        conn = ICConnection("192.168.1.100", transport="websocket")
+        repr_str = repr(conn)
+        assert "websocket" in repr_str
+        assert "192.168.1.100" in repr_str
+
+    def test_default_port_constants(self):
+        """Test default port constants."""
+        assert DEFAULT_PORT == DEFAULT_TCP_PORT
+        assert DEFAULT_TCP_PORT == 6681
+        assert DEFAULT_WEBSOCKET_PORT == 6680
+
+    @pytest.mark.asyncio
+    async def test_websocket_connect_creates_transport(self):
+        """Test WebSocket connect creates ICWebSocketTransport."""
+        conn = ICConnection("192.168.1.100", transport="websocket")
+
+        mock_ws = MagicMock()
+        mock_ws.__aiter__ = lambda self: iter([])
+
+        async def mock_connect(uri):
+            return mock_ws
+
+        with patch("websockets.connect", side_effect=mock_connect):
+            await conn.connect()
+
+        assert isinstance(conn._protocol, ICWebSocketTransport)
+        assert conn.connected is True
+
+        await conn.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_tcp_connect_creates_protocol(self):
+        """Test TCP connect creates ICProtocol."""
+        conn = ICConnection("192.168.1.100", transport="tcp")
+
+        mock_transport = MagicMock()
+
+        async def mock_create_connection(protocol_factory, host, port):
+            protocol = protocol_factory()
+            protocol._connected = True
+            protocol._transport = mock_transport
+            return (mock_transport, protocol)
+
+        loop = asyncio.get_running_loop()
+        with patch.object(loop, "create_connection", side_effect=mock_create_connection):
+            await conn.connect()
+
+        assert isinstance(conn._protocol, ICProtocol)
+
+        await conn.disconnect()
