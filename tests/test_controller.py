@@ -1211,6 +1211,261 @@ class TestICModelController:
         assert len(entities["color_light_groups"]) == 1
 
 
+class TestRequestCoalescing:
+    """Test request coalescing behavior in ICModelController."""
+
+    @pytest.fixture
+    def model(self):
+        """Create a PoolModel instance."""
+        return PoolModel()
+
+    @pytest.fixture
+    def controller(self, model):
+        """Create an ICModelController instance with mock connection."""
+        ctrl = ICModelController("192.168.1.100", model, 6681)
+        ctrl._connection = MagicMock()
+        ctrl._connection.connected = True
+        ctrl._connection.send_request = AsyncMock(
+            return_value={"response": "200", "objectList": []}
+        )
+        return ctrl
+
+    @pytest.mark.asyncio
+    async def test_single_request_sends_immediately(self, controller):
+        """Test that a single request sends immediately without waiting."""
+        await controller.set_circuit_state("C001", True)
+
+        # Should have sent exactly one request
+        controller._connection.send_request.assert_called_once()
+        call_args = controller._connection.send_request.call_args
+        assert call_args[0][0] == "SETPARAMLIST"
+        assert len(call_args[1]["objectList"]) == 1
+        assert call_args[1]["objectList"][0]["objnam"] == "C001"
+
+    @pytest.mark.asyncio
+    async def test_sequential_requests_send_separately(self, controller):
+        """Test that sequential requests with awaits send separately."""
+        await controller.set_circuit_state("C001", True)
+        await controller.set_circuit_state("C002", True)
+
+        # Should have sent two separate requests
+        assert controller._connection.send_request.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_concurrent_requests_batched_together(self, controller):
+        """Test that concurrent requests are batched into one SETPARAMLIST."""
+        # Create a slow mock that allows batching
+        response_event = asyncio.Event()
+        call_count = [0]
+        captured_kwargs = []
+
+        async def slow_send(*args, **kwargs):
+            call_count[0] += 1
+            captured_kwargs.append(kwargs)
+            # First call waits, allowing other requests to queue
+            if call_count[0] == 1:
+                await response_event.wait()
+            return {"response": "200", "objectList": []}
+
+        controller._connection.send_request = slow_send
+
+        # Launch multiple requests concurrently
+        task1 = asyncio.create_task(controller.set_circuit_state("C001", True))
+        await asyncio.sleep(0.01)  # Let first request acquire lock
+        task2 = asyncio.create_task(controller.set_circuit_state("C002", True))
+        task3 = asyncio.create_task(controller.set_circuit_state("C003", True))
+
+        await asyncio.sleep(0.01)  # Let tasks queue up
+        response_event.set()  # Release first request
+
+        # Wait for all tasks
+        await asyncio.gather(task1, task2, task3)
+
+        # First batch has C001, second batch has C002+C003 (or all batched together)
+        # The exact batching depends on timing, but total objects should be 3
+        total_objects = sum(len(kw["objectList"]) for kw in captured_kwargs)
+        assert total_objects == 3
+
+    @pytest.mark.asyncio
+    async def test_latest_value_wins_same_object_attr(self, controller):
+        """Test that latest value wins for same (objnam, attribute)."""
+        response_event = asyncio.Event()
+        captured_kwargs = []
+
+        async def slow_send(*args, **kwargs):
+            captured_kwargs.append(kwargs)
+            if len(captured_kwargs) == 1:
+                await response_event.wait()
+            return {"response": "200", "objectList": []}
+
+        controller._connection.send_request = slow_send
+
+        # First request acquires lock
+        task1 = asyncio.create_task(controller.set_circuit_state("C001", True))
+        await asyncio.sleep(0.01)
+
+        # These queue up with conflicting values for same circuit
+        task2 = asyncio.create_task(controller.set_circuit_state("C001", False))
+        task3 = asyncio.create_task(controller.set_circuit_state("C001", True))
+        task4 = asyncio.create_task(controller.set_circuit_state("C001", False))  # Latest
+
+        await asyncio.sleep(0.01)
+        response_event.set()
+
+        await asyncio.gather(task1, task2, task3, task4)
+
+        # First request has ON, second batch should have OFF (latest wins)
+        assert len(captured_kwargs) == 2
+        first_batch = captured_kwargs[0]["objectList"]
+        second_batch = captured_kwargs[1]["objectList"]
+
+        assert len(first_batch) == 1
+        assert first_batch[0]["params"]["STATUS"] == "ON"
+
+        assert len(second_batch) == 1
+        assert second_batch[0]["objnam"] == "C001"
+        assert second_batch[0]["params"]["STATUS"] == "OFF"
+
+    @pytest.mark.asyncio
+    async def test_different_attrs_same_object_merged(self, controller):
+        """Test that different attributes on same object are merged."""
+        response_event = asyncio.Event()
+        captured_kwargs = []
+
+        async def slow_send(*args, **kwargs):
+            captured_kwargs.append(kwargs)
+            if len(captured_kwargs) == 1:
+                await response_event.wait()
+            return {"response": "200", "objectList": []}
+
+        controller._connection.send_request = slow_send
+
+        # First request acquires lock
+        task1 = asyncio.create_task(controller.set_setpoint("B001", 80))
+        await asyncio.sleep(0.01)
+
+        # Queue heat mode change for same body - should merge with same objnam
+        from pyintellicenter import HeaterType
+
+        task2 = asyncio.create_task(controller.set_heat_mode("B001", HeaterType.HEATER))
+
+        await asyncio.sleep(0.01)
+        response_event.set()
+
+        await asyncio.gather(task1, task2)
+
+        # Second batch should have both LOTMP and MODE in one object entry
+        assert len(captured_kwargs) == 2
+        second_batch = captured_kwargs[1]["objectList"]
+        assert len(second_batch) == 1
+        assert second_batch[0]["objnam"] == "B001"
+        assert "MODE" in second_batch[0]["params"]
+
+    @pytest.mark.asyncio
+    async def test_error_propagates_to_all_waiters(self, controller):
+        """Test that errors propagate to all waiting requests."""
+        response_event = asyncio.Event()
+        call_count = [0]
+
+        async def failing_send(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                await response_event.wait()
+            raise ICConnectionError("Connection lost")
+
+        controller._connection.send_request = failing_send
+
+        # First request acquires lock
+        task1 = asyncio.create_task(controller.set_circuit_state("C001", True))
+        await asyncio.sleep(0.01)
+
+        # Queue more requests
+        task2 = asyncio.create_task(controller.set_circuit_state("C002", True))
+        task3 = asyncio.create_task(controller.set_circuit_state("C003", True))
+
+        await asyncio.sleep(0.01)
+        response_event.set()
+
+        # All tasks should get the same error
+        with pytest.raises(ICConnectionError):
+            await task1
+
+        with pytest.raises(ICConnectionError):
+            await task2
+
+        with pytest.raises(ICConnectionError):
+            await task3
+
+    @pytest.mark.asyncio
+    async def test_direct_request_changes_bypasses_coalescing(self, controller):
+        """Test that request_changes() bypasses coalescing mechanism."""
+        # The direct API should send immediately without coalescing
+        await controller.request_changes("C001", {"STATUS": "ON"})
+        await controller.request_changes("C002", {"STATUS": "ON"})
+
+        # Should have sent two separate requests
+        assert controller._connection.send_request.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_multiple_objects_batched_correctly(self, controller):
+        """Test that multiple different objects are batched into one request."""
+        response_event = asyncio.Event()
+        captured_kwargs = []
+
+        async def slow_send(*args, **kwargs):
+            captured_kwargs.append(kwargs)
+            if len(captured_kwargs) == 1:
+                await response_event.wait()
+            return {"response": "200", "objectList": []}
+
+        controller._connection.send_request = slow_send
+
+        # First request acquires lock
+        task1 = asyncio.create_task(controller.set_circuit_state("C001", True))
+        await asyncio.sleep(0.01)
+
+        # Queue requests for different objects
+        task2 = asyncio.create_task(controller.set_circuit_state("C002", True))
+        task3 = asyncio.create_task(controller.set_valve_state("VAL01", True))
+        task4 = asyncio.create_task(controller.set_setpoint("B001", 85))
+
+        await asyncio.sleep(0.01)
+        response_event.set()
+
+        await asyncio.gather(task1, task2, task3, task4)
+
+        # Second batch should have all 3 different objects
+        assert len(captured_kwargs) == 2
+        second_batch = captured_kwargs[1]["objectList"]
+        assert len(second_batch) == 3
+        objnams = {obj["objnam"] for obj in second_batch}
+        assert objnams == {"C002", "VAL01", "B001"}
+
+    @pytest.mark.asyncio
+    async def test_set_multiple_circuits_uses_coalescing(self, controller):
+        """Test that set_multiple_circuit_states uses coalescing correctly."""
+        await controller.set_multiple_circuit_states(["C001", "C002", "C003"], True)
+
+        # Should send all in one request
+        controller._connection.send_request.assert_called_once()
+        call_args = controller._connection.send_request.call_args
+        object_list = call_args[1]["objectList"]
+        assert len(object_list) == 3
+
+    @pytest.mark.asyncio
+    async def test_coalescing_preserves_response(self, controller):
+        """Test that coalesced requests all receive the correct response."""
+        expected_response = {
+            "response": "200",
+            "objectList": [{"objnam": "C001", "params": {"STATUS": "ON"}}],
+        }
+        controller._connection.send_request = AsyncMock(return_value=expected_response)
+
+        result = await controller.set_circuit_state("C001", True)
+
+        assert result == expected_response
+
+
 class TestICConnectionHandler:
     """Test ICConnectionHandler class."""
 

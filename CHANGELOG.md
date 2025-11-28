@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4] - 2025-11-27
+
+### Added
+
+- **Request coalescing** for all convenience methods:
+  - Multiple rapid calls are automatically batched into a single `SETPARAMLIST` request
+  - "Latest value wins" semantics for conflicting updates to the same attribute
+  - Reduces network round-trips and device load during rapid state changes
+  - Direct API calls (`request_changes`, `send_cmd`) bypass coalescing for explicit control
+  - New internal `_queue_property_change()` and `_queue_batch_changes()` methods
+
+### Changed
+
+- **Refactored getter methods** to use shared helpers (`_get_attr_as_int`, `_get_attr_as_float`)
+  - Reduces code duplication across 12+ getter methods
+  - Centralizes type conversion and error handling
+
 ## [0.1.3] - 2025-11-27
 
 ### Added
@@ -288,7 +305,8 @@ First stable release of pyintellicenter.
 - `orjson` for fast JSON serialization
 - Python 3.11+ required
 
-[Unreleased]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.3...HEAD
+[Unreleased]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.4...HEAD
+[0.1.4]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.0...v0.1.1

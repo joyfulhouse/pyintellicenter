@@ -105,6 +105,18 @@ class ICConnectionMetrics:
         )
 
 
+@dataclass
+class _PendingRequest:
+    """A pending property change request waiting to be sent.
+
+    Used internally by ICModelController for request coalescing.
+    Multiple requests for the same (objnam, attribute) are merged,
+    with the latest value winning.
+    """
+
+    future: asyncio.Future[dict[str, Any]] = field(default_factory=asyncio.Future)
+
+
 class ICSystemInfo:
     """Represents system information from IntelliCenter.
 
@@ -457,6 +469,13 @@ class ICModelController(ICBaseController):
             Callable[[ICModelController, dict[str, dict[str, Any]]], None] | None
         ) = None
 
+        # Request coalescing state
+        # When multiple convenience method calls happen while a request is in-flight,
+        # they are merged into a single batch request. Latest value wins for same (objnam, attr).
+        self._pending_changes: dict[str, dict[str, str]] = {}  # objnam -> {attr: value}
+        self._pending_requests: list[_PendingRequest] = []
+        self._coalesce_lock = asyncio.Lock()
+
     def __repr__(self) -> str:
         return (
             f"ICModelController(host={self._host!r}, port={self._port}, "
@@ -539,6 +558,86 @@ class ICModelController(ICBaseController):
         return updates
 
     # --------------------------------------------------------------------------
+    # Request coalescing for convenience methods
+    # --------------------------------------------------------------------------
+
+    async def _queue_property_change(self, objnam: str, changes: dict[str, str]) -> dict[str, Any]:
+        """Queue a property change with automatic coalescing.
+
+        Used by convenience methods (set_*, etc.) to enable smart batching.
+        When multiple calls happen while a request is in-flight, they are
+        merged into a single batch request:
+
+        - Same (objnam, attr): latest value wins
+        - Different attrs on same objnam: merged into one params dict
+        - Different objnams: batched into one SETPARAMLIST
+
+        Direct API access via request_changes() bypasses coalescing for
+        users who need precise control over request timing.
+
+        Args:
+            objnam: Object name to modify
+            changes: Attribute changes to apply (already stringified)
+
+        Returns:
+            Response dictionary from the batched request
+        """
+        # Create a future for this request
+        request = _PendingRequest()
+
+        # Merge changes into pending (latest value wins for same objnam+attr)
+        if objnam not in self._pending_changes:
+            self._pending_changes[objnam] = {}
+        self._pending_changes[objnam].update(changes)
+
+        # Track this request so it gets notified when batch completes
+        self._pending_requests.append(request)
+
+        # Try to flush - if lock is held, we wait and our changes get batched
+        await self._flush_pending_changes()
+
+        return await request.future
+
+    async def _flush_pending_changes(self) -> None:
+        """Flush all pending changes in a single batch request.
+
+        Only one flush runs at a time. While one is in progress, new requests
+        queue up and will be sent in the next batch.
+        """
+        async with self._coalesce_lock:
+            if not self._pending_changes:
+                return
+
+            # Atomically capture and clear pending state
+            changes = self._pending_changes
+            requests = self._pending_requests
+            self._pending_changes = {}
+            self._pending_requests = []
+
+            # Build batched request
+            object_list = [
+                {"objnam": objnam, "params": params} for objnam, params in changes.items()
+            ]
+
+            _LOGGER.debug(
+                "Flushing %d coalesced changes for %d objects",
+                sum(len(p) for p in changes.values()),
+                len(changes),
+            )
+
+            try:
+                response = await self.send_cmd("SETPARAMLIST", {"objectList": object_list})
+                # Resolve all waiting futures with the same response
+                for req in requests:
+                    if not req.future.done():
+                        req.future.set_result(response)
+            except (ICConnectionError, ICCommandError, TimeoutError, OSError) as e:
+                # Propagate error to all waiters
+                for req in requests:
+                    if not req.future.done():
+                        req.future.set_exception(e)
+
+    # --------------------------------------------------------------------------
     # Convenience methods for common operations
     # --------------------------------------------------------------------------
 
@@ -551,8 +650,14 @@ class ICModelController(ICBaseController):
 
         Returns:
             Response dictionary
+
+        Note:
+            This method uses request coalescing. Multiple rapid calls will be
+            batched together, with the latest state winning for each circuit.
         """
-        return await self.request_changes(objnam, {STATUS_ATTR: STATUS_ON if state else STATUS_OFF})
+        return await self._queue_property_change(
+            objnam, {STATUS_ATTR: STATUS_ON if state else STATUS_OFF}
+        )
 
     async def set_multiple_circuit_states(self, objnams: list[str], state: bool) -> dict[str, Any]:
         """Set multiple circuits on or off simultaneously.
@@ -565,10 +670,38 @@ class ICModelController(ICBaseController):
 
         Returns:
             Response dictionary
+
+        Note:
+            This method uses request coalescing. All circuits are queued together
+            and sent in a single batch request.
         """
         status = STATUS_ON if state else STATUS_OFF
-        object_list = [{"objnam": objnam, "params": {STATUS_ATTR: status}} for objnam in objnams]
-        return await self.send_cmd("SETPARAMLIST", {"objectList": object_list})
+        changes = {objnam: {STATUS_ATTR: status} for objnam in objnams}
+        return await self._queue_batch_changes(changes)
+
+    async def _queue_batch_changes(self, changes: dict[str, dict[str, str]]) -> dict[str, Any]:
+        """Queue multiple object changes with automatic coalescing.
+
+        More efficient than multiple _queue_property_change calls when you have
+        multiple changes ready at once - creates only one Future for the batch.
+
+        Args:
+            changes: Dict mapping objnam -> {attr: value}
+
+        Returns:
+            Response dictionary from the batched request
+        """
+        request = _PendingRequest()
+
+        # Merge all changes into pending
+        for objnam, attrs in changes.items():
+            if objnam not in self._pending_changes:
+                self._pending_changes[objnam] = {}
+            self._pending_changes[objnam].update(attrs)
+
+        self._pending_requests.append(request)
+        await self._flush_pending_changes()
+        return await request.future
 
     async def set_heat_mode(self, body_objnam: str, mode: HeaterType) -> dict[str, Any]:
         """Set the heat mode for a body of water.
@@ -583,7 +716,7 @@ class ICModelController(ICBaseController):
         Example:
             await controller.set_heat_mode("B1101", HeaterType.HEATER)
         """
-        return await self.request_changes(body_objnam, {MODE_ATTR: str(mode.value)})
+        return await self._queue_property_change(body_objnam, {MODE_ATTR: str(mode.value)})
 
     async def set_setpoint(self, body_objnam: str, temperature: int) -> dict[str, Any]:
         """Set the temperature setpoint for a body of water.
@@ -595,7 +728,7 @@ class ICModelController(ICBaseController):
         Returns:
             Response dictionary
         """
-        return await self.request_changes(body_objnam, {LOTMP_ATTR: str(temperature)})
+        return await self._queue_property_change(body_objnam, {LOTMP_ATTR: str(temperature)})
 
     async def set_super_chlorinate(self, chem_objnam: str, enabled: bool) -> dict[str, Any]:
         """Enable or disable super chlorination (boost mode).
@@ -607,7 +740,7 @@ class ICModelController(ICBaseController):
         Returns:
             Response dictionary
         """
-        return await self.request_changes(
+        return await self._queue_property_change(
             chem_objnam, {SUPER_ATTR: STATUS_ON if enabled else STATUS_OFF}
         )
 
@@ -636,7 +769,7 @@ class ICModelController(ICBaseController):
         if abs(value - rounded) > 0.001:
             raise ValueError(f"pH setpoint {value} must be in 0.1 increments (e.g., 7.0, 7.1, 7.2)")
 
-        return await self.request_changes(chem_objnam, {PHSET_ATTR: str(rounded)})
+        return await self._queue_property_change(chem_objnam, {PHSET_ATTR: str(rounded)})
 
     async def set_orp_setpoint(self, chem_objnam: str, value: int) -> dict[str, Any]:
         """Set the ORP setpoint for an IntelliChem controller.
@@ -658,7 +791,7 @@ class ICModelController(ICBaseController):
         """
         if not 200 <= value <= 900:
             raise ValueError(f"ORP setpoint {value} outside valid range (200-900 mV)")
-        return await self.request_changes(chem_objnam, {ORPSET_ATTR: str(value)})
+        return await self._queue_property_change(chem_objnam, {ORPSET_ATTR: str(value)})
 
     async def set_chlorinator_output(
         self, chem_objnam: str, primary_percent: int, secondary_percent: int | None = None
@@ -695,7 +828,7 @@ class ICModelController(ICBaseController):
                 )
             changes[SEC_ATTR] = str(secondary_percent)
 
-        return await self.request_changes(chem_objnam, changes)
+        return await self._queue_property_change(chem_objnam, changes)
 
     async def set_alkalinity(self, chem_objnam: str, value: int) -> dict[str, Any]:
         """Set the alkalinity value for an IntelliChem controller.
@@ -718,7 +851,7 @@ class ICModelController(ICBaseController):
         """
         if not 0 <= value <= 800:
             raise ValueError(f"Alkalinity {value} outside valid range (0-800 ppm)")
-        return await self.request_changes(chem_objnam, {ALK_ATTR: str(value)})
+        return await self._queue_property_change(chem_objnam, {ALK_ATTR: str(value)})
 
     async def set_calcium_hardness(self, chem_objnam: str, value: int) -> dict[str, Any]:
         """Set the calcium hardness value for an IntelliChem controller.
@@ -741,7 +874,7 @@ class ICModelController(ICBaseController):
         """
         if not 0 <= value <= 800:
             raise ValueError(f"Calcium hardness {value} outside valid range (0-800 ppm)")
-        return await self.request_changes(chem_objnam, {CALC_ATTR: str(value)})
+        return await self._queue_property_change(chem_objnam, {CALC_ATTR: str(value)})
 
     async def set_cyanuric_acid(self, chem_objnam: str, value: int) -> dict[str, Any]:
         """Set the cyanuric acid (stabilizer) value for an IntelliChem controller.
@@ -764,7 +897,27 @@ class ICModelController(ICBaseController):
         """
         if not 0 <= value <= 200:
             raise ValueError(f"Cyanuric acid {value} outside valid range (0-200 ppm)")
-        return await self.request_changes(chem_objnam, {CYACID_ATTR: str(value)})
+        return await self._queue_property_change(chem_objnam, {CYACID_ATTR: str(value)})
+
+    def _get_attr_as_int(self, objnam: str, attr: str) -> int | None:
+        """Get an attribute value as an integer, or None if unavailable."""
+        obj = self._model[objnam]
+        if obj and obj[attr]:
+            try:
+                return int(obj[attr])
+            except (ValueError, TypeError):
+                return None
+        return None
+
+    def _get_attr_as_float(self, objnam: str, attr: str) -> float | None:
+        """Get an attribute value as a float, or None if unavailable."""
+        obj = self._model[objnam]
+        if obj and obj[attr]:
+            try:
+                return float(obj[attr])
+            except (ValueError, TypeError):
+                return None
+        return None
 
     def get_ph_setpoint(self, chem_objnam: str) -> float | None:
         """Get the current pH setpoint for a chemistry controller.
@@ -775,13 +928,7 @@ class ICModelController(ICBaseController):
         Returns:
             pH setpoint value, or None if unavailable
         """
-        obj = self._model[chem_objnam]
-        if obj and obj[PHSET_ATTR]:
-            try:
-                return float(obj[PHSET_ATTR])
-            except (ValueError, TypeError):
-                return None
-        return None
+        return self._get_attr_as_float(chem_objnam, PHSET_ATTR)
 
     def get_orp_setpoint(self, chem_objnam: str) -> int | None:
         """Get the current ORP setpoint for a chemistry controller.
@@ -792,13 +939,7 @@ class ICModelController(ICBaseController):
         Returns:
             ORP setpoint in mV, or None if unavailable
         """
-        obj = self._model[chem_objnam]
-        if obj and obj[ORPSET_ATTR]:
-            try:
-                return int(obj[ORPSET_ATTR])
-            except (ValueError, TypeError):
-                return None
-        return None
+        return self._get_attr_as_int(chem_objnam, ORPSET_ATTR)
 
     def get_chlorinator_output(self, chem_objnam: str) -> dict[str, int | None]:
         """Get the current chlorinator output percentages.
@@ -809,18 +950,10 @@ class ICModelController(ICBaseController):
         Returns:
             Dict with 'primary' and 'secondary' output percentages
         """
-        obj = self._model[chem_objnam]
-        result: dict[str, int | None] = {"primary": None, "secondary": None}
-
-        if obj:
-            if obj[PRIM_ATTR]:
-                with contextlib.suppress(ValueError, TypeError):
-                    result["primary"] = int(obj[PRIM_ATTR])
-            if obj[SEC_ATTR]:
-                with contextlib.suppress(ValueError, TypeError):
-                    result["secondary"] = int(obj[SEC_ATTR])
-
-        return result
+        return {
+            "primary": self._get_attr_as_int(chem_objnam, PRIM_ATTR),
+            "secondary": self._get_attr_as_int(chem_objnam, SEC_ATTR),
+        }
 
     def get_alkalinity(self, chem_objnam: str) -> int | None:
         """Get the alkalinity configuration value for a chemistry controller.
@@ -833,13 +966,7 @@ class ICModelController(ICBaseController):
         Returns:
             Alkalinity in ppm, or None if unavailable
         """
-        obj = self._model[chem_objnam]
-        if obj and obj[ALK_ATTR]:
-            try:
-                return int(obj[ALK_ATTR])
-            except (ValueError, TypeError):
-                return None
-        return None
+        return self._get_attr_as_int(chem_objnam, ALK_ATTR)
 
     def get_calcium_hardness(self, chem_objnam: str) -> int | None:
         """Get the calcium hardness configuration value for a chemistry controller.
@@ -852,13 +979,7 @@ class ICModelController(ICBaseController):
         Returns:
             Calcium hardness in ppm, or None if unavailable
         """
-        obj = self._model[chem_objnam]
-        if obj and obj[CALC_ATTR]:
-            try:
-                return int(obj[CALC_ATTR])
-            except (ValueError, TypeError):
-                return None
-        return None
+        return self._get_attr_as_int(chem_objnam, CALC_ATTR)
 
     def get_cyanuric_acid(self, chem_objnam: str) -> int | None:
         """Get the cyanuric acid configuration value for a chemistry controller.
@@ -871,13 +992,7 @@ class ICModelController(ICBaseController):
         Returns:
             Cyanuric acid in ppm, or None if unavailable
         """
-        obj = self._model[chem_objnam]
-        if obj and obj[CYACID_ATTR]:
-            try:
-                return int(obj[CYACID_ATTR])
-            except (ValueError, TypeError):
-                return None
-        return None
+        return self._get_attr_as_int(chem_objnam, CYACID_ATTR)
 
     # =========================================================================
     # Valve Control (for water features, spillovers, etc.)
@@ -899,7 +1014,7 @@ class ICModelController(ICBaseController):
         Example:
             await controller.set_valve_state("VAL01", True)
         """
-        return await self.request_changes(
+        return await self._queue_property_change(
             valve_objnam, {STATUS_ATTR: STATUS_ON if state else STATUS_OFF}
         )
 
@@ -939,7 +1054,7 @@ class ICModelController(ICBaseController):
         if not self._system_info:
             raise ICCommandError("System info not available")
 
-        return await self.request_changes(
+        return await self._queue_property_change(
             self._system_info.objnam, {VACFLO_ATTR: STATUS_ON if enabled else STATUS_OFF}
         )
 
@@ -1106,7 +1221,7 @@ class ICModelController(ICBaseController):
         if effect not in LIGHT_EFFECTS:
             valid = ", ".join(LIGHT_EFFECTS.keys())
             raise ValueError(f"Invalid effect '{effect}'. Valid effects: {valid}")
-        return await self.request_changes(objnam, {USE_ATTR: effect})
+        return await self._queue_property_change(objnam, {USE_ATTR: effect})
 
     def get_light_effect(self, objnam: str) -> str | None:
         """Get the current color effect for a light.
@@ -1164,13 +1279,7 @@ class ICModelController(ICBaseController):
         Returns:
             Current temperature as integer, or None if unavailable
         """
-        obj = self._model[body_objnam]
-        if obj and obj[TEMP_ATTR]:
-            try:
-                return int(obj[TEMP_ATTR])
-            except (ValueError, TypeError):
-                return None
-        return None
+        return self._get_attr_as_int(body_objnam, TEMP_ATTR)
 
     def get_body_setpoint(self, body_objnam: str) -> int | None:
         """Get the temperature setpoint for a body.
@@ -1181,13 +1290,7 @@ class ICModelController(ICBaseController):
         Returns:
             Setpoint temperature as integer, or None if unavailable
         """
-        obj = self._model[body_objnam]
-        if obj and obj[LOTMP_ATTR]:
-            try:
-                return int(obj[LOTMP_ATTR])
-            except (ValueError, TypeError):
-                return None
-        return None
+        return self._get_attr_as_int(body_objnam, LOTMP_ATTR)
 
     def get_body_heat_mode(self, body_objnam: str) -> HeaterType | None:
         """Get the current heat mode for a body.
@@ -1356,13 +1459,7 @@ class ICModelController(ICBaseController):
         Returns:
             Calibrated reading as integer, or None if unavailable
         """
-        obj = self._model[sensor_objnam]
-        if obj and obj[SOURCE_ATTR]:
-            try:
-                return int(obj[SOURCE_ATTR])
-            except (ValueError, TypeError):
-                return None
-        return None
+        return self._get_attr_as_int(sensor_objnam, SOURCE_ATTR)
 
     # =========================================================================
     # Pump Helpers (for Home Assistant sensor/switch entities)
@@ -1394,13 +1491,7 @@ class ICModelController(ICBaseController):
         Returns:
             Current RPM, or None if unavailable
         """
-        obj = self._model[pump_objnam]
-        if obj and obj[RPM_ATTR]:
-            try:
-                return int(obj[RPM_ATTR])
-            except (ValueError, TypeError):
-                return None
-        return None
+        return self._get_attr_as_int(pump_objnam, RPM_ATTR)
 
     def get_pump_gpm(self, pump_objnam: str) -> int | None:
         """Get current pump flow rate in gallons per minute.
@@ -1411,13 +1502,7 @@ class ICModelController(ICBaseController):
         Returns:
             Current GPM, or None if unavailable
         """
-        obj = self._model[pump_objnam]
-        if obj and obj[GPM_ATTR]:
-            try:
-                return int(obj[GPM_ATTR])
-            except (ValueError, TypeError):
-                return None
-        return None
+        return self._get_attr_as_int(pump_objnam, GPM_ATTR)
 
     def get_pump_watts(self, pump_objnam: str) -> int | None:
         """Get current pump power consumption in watts.
@@ -1428,13 +1513,7 @@ class ICModelController(ICBaseController):
         Returns:
             Current power in watts, or None if unavailable
         """
-        obj = self._model[pump_objnam]
-        if obj and obj[PWR_ATTR]:
-            try:
-                return int(obj[PWR_ATTR])
-            except (ValueError, TypeError):
-                return None
-        return None
+        return self._get_attr_as_int(pump_objnam, PWR_ATTR)
 
     def get_pump_metrics(self, pump_objnam: str) -> dict[str, int | None]:
         """Get all pump metrics in a single call.
