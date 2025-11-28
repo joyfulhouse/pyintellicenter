@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] - 2025-11-27
+
+### Added
+
+- **IntelliChem water balance configuration methods** on `ICModelController`:
+  - `set_alkalinity(chem_objnam, value)` - Set alkalinity in ppm (0-800 range)
+  - `set_calcium_hardness(chem_objnam, value)` - Set calcium hardness in ppm (0-800 range)
+  - `set_cyanuric_acid(chem_objnam, value)` - Set cyanuric acid in ppm (0-200 range)
+  - `get_alkalinity(chem_objnam)` - Get current alkalinity value
+  - `get_calcium_hardness(chem_objnam)` - Get current calcium hardness value
+  - `get_cyanuric_acid(chem_objnam)` - Get current cyanuric acid value
+  - These are user-entered configuration values used to calculate the Saturation Index (water quality), not sensor readings
+
 ## [0.1.2] - 2025-11-27
 
 ### Added
@@ -275,7 +288,8 @@ First stable release of pyintellicenter.
 - `orjson` for fast JSON serialization
 - Python 3.11+ required
 
-[Unreleased]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.0.5a13...v0.1.0

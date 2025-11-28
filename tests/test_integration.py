@@ -591,6 +591,221 @@ class TestICModelControllerNewMethods:
             await controller.stop()
 
 
+class TestIntelliChemConfigIntegration:
+    """Integration tests for IntelliChem configuration setters (ALK, CALC, CYACID)."""
+
+    @pytest.fixture
+    async def server(self):
+        """Create and start mock server with IntelliChem controller."""
+        async with MockIntelliCenterServer() as server:
+            server.set_system_info("Chemistry Test Pool", "2.0.0")
+            server.add_object("POOL1", "BODY", "POOL", "Pool", STATUS="OFF")
+            # IntelliChem with user-configurable values for Saturation Index calculation
+            server.add_object(
+                "CHEM1",
+                "CHEM",
+                "ICHEM",
+                "IntelliChem",
+                ALK="100",  # Alkalinity (ppm)
+                CALC="250",  # Calcium Hardness (ppm)
+                CYACID="30",  # Cyanuric Acid (ppm)
+                PHVAL="7.4",
+                ORPVAL="700",
+                PHSET="7.5",
+                ORPSET="650",
+            )
+            yield server
+
+    @pytest.mark.asyncio
+    async def test_set_alkalinity(self, server):
+        """Test setting alkalinity and resetting to original value."""
+        model = PoolModel()
+        controller = ICModelController(server.host, model, server.port)
+
+        await controller.start()
+        try:
+            # Get original value
+            original = server.get_object("CHEM1")["ALK"]
+
+            # Set new value
+            response = await controller.set_alkalinity("CHEM1", 120)
+            assert response["response"] == "200"
+            assert server.get_object("CHEM1")["ALK"] == "120"
+
+            # Reset to original
+            await controller.set_alkalinity("CHEM1", int(original))
+            assert server.get_object("CHEM1")["ALK"] == original
+        finally:
+            await controller.stop()
+
+    @pytest.mark.asyncio
+    async def test_set_alkalinity_invalid_range(self, server):
+        """Test that invalid alkalinity values raise ValueError."""
+        model = PoolModel()
+        controller = ICModelController(server.host, model, server.port)
+
+        await controller.start()
+        try:
+            with pytest.raises(ValueError, match="outside valid range"):
+                await controller.set_alkalinity("CHEM1", -1)
+
+            with pytest.raises(ValueError, match="outside valid range"):
+                await controller.set_alkalinity("CHEM1", 801)
+        finally:
+            await controller.stop()
+
+    @pytest.mark.asyncio
+    async def test_set_calcium_hardness(self, server):
+        """Test setting calcium hardness and resetting to original value."""
+        model = PoolModel()
+        controller = ICModelController(server.host, model, server.port)
+
+        await controller.start()
+        try:
+            # Get original value
+            original = server.get_object("CHEM1")["CALC"]
+
+            # Set new value
+            response = await controller.set_calcium_hardness("CHEM1", 350)
+            assert response["response"] == "200"
+            assert server.get_object("CHEM1")["CALC"] == "350"
+
+            # Reset to original
+            await controller.set_calcium_hardness("CHEM1", int(original))
+            assert server.get_object("CHEM1")["CALC"] == original
+        finally:
+            await controller.stop()
+
+    @pytest.mark.asyncio
+    async def test_set_calcium_hardness_invalid_range(self, server):
+        """Test that invalid calcium hardness values raise ValueError."""
+        model = PoolModel()
+        controller = ICModelController(server.host, model, server.port)
+
+        await controller.start()
+        try:
+            with pytest.raises(ValueError, match="outside valid range"):
+                await controller.set_calcium_hardness("CHEM1", -1)
+
+            with pytest.raises(ValueError, match="outside valid range"):
+                await controller.set_calcium_hardness("CHEM1", 801)
+        finally:
+            await controller.stop()
+
+    @pytest.mark.asyncio
+    async def test_set_cyanuric_acid(self, server):
+        """Test setting cyanuric acid and resetting to original value."""
+        model = PoolModel()
+        controller = ICModelController(server.host, model, server.port)
+
+        await controller.start()
+        try:
+            # Get original value
+            original = server.get_object("CHEM1")["CYACID"]
+
+            # Set new value
+            response = await controller.set_cyanuric_acid("CHEM1", 50)
+            assert response["response"] == "200"
+            assert server.get_object("CHEM1")["CYACID"] == "50"
+
+            # Reset to original
+            await controller.set_cyanuric_acid("CHEM1", int(original))
+            assert server.get_object("CHEM1")["CYACID"] == original
+        finally:
+            await controller.stop()
+
+    @pytest.mark.asyncio
+    async def test_set_cyanuric_acid_invalid_range(self, server):
+        """Test that invalid cyanuric acid values raise ValueError."""
+        model = PoolModel()
+        controller = ICModelController(server.host, model, server.port)
+
+        await controller.start()
+        try:
+            with pytest.raises(ValueError, match="outside valid range"):
+                await controller.set_cyanuric_acid("CHEM1", -1)
+
+            with pytest.raises(ValueError, match="outside valid range"):
+                await controller.set_cyanuric_acid("CHEM1", 201)
+        finally:
+            await controller.stop()
+
+    @pytest.mark.asyncio
+    async def test_get_alkalinity(self, server):
+        """Test getting alkalinity value from model."""
+        model = PoolModel()
+        controller = ICModelController(server.host, model, server.port)
+
+        await controller.start()
+        try:
+            alk = controller.get_alkalinity("CHEM1")
+            assert alk == 100
+        finally:
+            await controller.stop()
+
+    @pytest.mark.asyncio
+    async def test_get_calcium_hardness(self, server):
+        """Test getting calcium hardness value from model."""
+        model = PoolModel()
+        controller = ICModelController(server.host, model, server.port)
+
+        await controller.start()
+        try:
+            calc = controller.get_calcium_hardness("CHEM1")
+            assert calc == 250
+        finally:
+            await controller.stop()
+
+    @pytest.mark.asyncio
+    async def test_get_cyanuric_acid(self, server):
+        """Test getting cyanuric acid value from model."""
+        model = PoolModel()
+        controller = ICModelController(server.host, model, server.port)
+
+        await controller.start()
+        try:
+            cya = controller.get_cyanuric_acid("CHEM1")
+            assert cya == 30
+        finally:
+            await controller.stop()
+
+    @pytest.mark.asyncio
+    async def test_chemistry_config_full_workflow(self, server):
+        """Test complete workflow of setting all chemistry config values."""
+        model = PoolModel()
+        controller = ICModelController(server.host, model, server.port)
+
+        await controller.start()
+        try:
+            # Store original values
+            chem_obj = server.get_object("CHEM1")
+            orig_alk = chem_obj["ALK"]
+            orig_calc = chem_obj["CALC"]
+            orig_cya = chem_obj["CYACID"]
+
+            # Set new values
+            await controller.set_alkalinity("CHEM1", 110)
+            await controller.set_calcium_hardness("CHEM1", 300)
+            await controller.set_cyanuric_acid("CHEM1", 45)
+
+            # Verify changes
+            assert server.get_object("CHEM1")["ALK"] == "110"
+            assert server.get_object("CHEM1")["CALC"] == "300"
+            assert server.get_object("CHEM1")["CYACID"] == "45"
+
+            # Reset to original values
+            await controller.set_alkalinity("CHEM1", int(orig_alk))
+            await controller.set_calcium_hardness("CHEM1", int(orig_calc))
+            await controller.set_cyanuric_acid("CHEM1", int(orig_cya))
+
+            # Verify reset
+            assert server.get_object("CHEM1")["ALK"] == orig_alk
+            assert server.get_object("CHEM1")["CALC"] == orig_calc
+            assert server.get_object("CHEM1")["CYACID"] == orig_cya
+        finally:
+            await controller.stop()
+
+
 class TestPoolModelIntegration:
     """Integration tests for PoolModel with real data flow."""
 

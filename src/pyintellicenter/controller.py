@@ -697,6 +697,75 @@ class ICModelController(ICBaseController):
 
         return await self.request_changes(chem_objnam, changes)
 
+    async def set_alkalinity(self, chem_objnam: str, value: int) -> dict[str, Any]:
+        """Set the alkalinity value for an IntelliChem controller.
+
+        Alkalinity is a user-entered configuration value used to calculate
+        the Saturation Index (water quality). It is NOT a sensor reading.
+
+        Args:
+            chem_objnam: Object name of the chemistry controller
+            value: Alkalinity in ppm (typically 80-120 ppm for pools)
+
+        Returns:
+            Response dictionary
+
+        Raises:
+            ValueError: If value is outside valid range
+
+        Example:
+            await controller.set_alkalinity("CHEM1", 100)
+        """
+        if not 0 <= value <= 800:
+            raise ValueError(f"Alkalinity {value} outside valid range (0-800 ppm)")
+        return await self.request_changes(chem_objnam, {ALK_ATTR: str(value)})
+
+    async def set_calcium_hardness(self, chem_objnam: str, value: int) -> dict[str, Any]:
+        """Set the calcium hardness value for an IntelliChem controller.
+
+        Calcium hardness is a user-entered configuration value used to calculate
+        the Saturation Index (water quality). It is NOT a sensor reading.
+
+        Args:
+            chem_objnam: Object name of the chemistry controller
+            value: Calcium hardness in ppm (typically 200-400 ppm for pools)
+
+        Returns:
+            Response dictionary
+
+        Raises:
+            ValueError: If value is outside valid range
+
+        Example:
+            await controller.set_calcium_hardness("CHEM1", 300)
+        """
+        if not 0 <= value <= 800:
+            raise ValueError(f"Calcium hardness {value} outside valid range (0-800 ppm)")
+        return await self.request_changes(chem_objnam, {CALC_ATTR: str(value)})
+
+    async def set_cyanuric_acid(self, chem_objnam: str, value: int) -> dict[str, Any]:
+        """Set the cyanuric acid (stabilizer) value for an IntelliChem controller.
+
+        Cyanuric acid is a user-entered configuration value used to calculate
+        the Saturation Index (water quality). It is NOT a sensor reading.
+
+        Args:
+            chem_objnam: Object name of the chemistry controller
+            value: Cyanuric acid in ppm (typically 30-50 ppm for pools)
+
+        Returns:
+            Response dictionary
+
+        Raises:
+            ValueError: If value is outside valid range
+
+        Example:
+            await controller.set_cyanuric_acid("CHEM1", 40)
+        """
+        if not 0 <= value <= 200:
+            raise ValueError(f"Cyanuric acid {value} outside valid range (0-200 ppm)")
+        return await self.request_changes(chem_objnam, {CYACID_ATTR: str(value)})
+
     def get_ph_setpoint(self, chem_objnam: str) -> float | None:
         """Get the current pH setpoint for a chemistry controller.
 
@@ -752,6 +821,63 @@ class ICModelController(ICBaseController):
                     result["secondary"] = int(obj[SEC_ATTR])
 
         return result
+
+    def get_alkalinity(self, chem_objnam: str) -> int | None:
+        """Get the alkalinity configuration value for a chemistry controller.
+
+        Alkalinity is a user-entered configuration value (not a sensor reading).
+
+        Args:
+            chem_objnam: Object name of the chemistry controller
+
+        Returns:
+            Alkalinity in ppm, or None if unavailable
+        """
+        obj = self._model[chem_objnam]
+        if obj and obj[ALK_ATTR]:
+            try:
+                return int(obj[ALK_ATTR])
+            except (ValueError, TypeError):
+                return None
+        return None
+
+    def get_calcium_hardness(self, chem_objnam: str) -> int | None:
+        """Get the calcium hardness configuration value for a chemistry controller.
+
+        Calcium hardness is a user-entered configuration value (not a sensor reading).
+
+        Args:
+            chem_objnam: Object name of the chemistry controller
+
+        Returns:
+            Calcium hardness in ppm, or None if unavailable
+        """
+        obj = self._model[chem_objnam]
+        if obj and obj[CALC_ATTR]:
+            try:
+                return int(obj[CALC_ATTR])
+            except (ValueError, TypeError):
+                return None
+        return None
+
+    def get_cyanuric_acid(self, chem_objnam: str) -> int | None:
+        """Get the cyanuric acid configuration value for a chemistry controller.
+
+        Cyanuric acid is a user-entered configuration value (not a sensor reading).
+
+        Args:
+            chem_objnam: Object name of the chemistry controller
+
+        Returns:
+            Cyanuric acid in ppm, or None if unavailable
+        """
+        obj = self._model[chem_objnam]
+        if obj and obj[CYACID_ATTR]:
+            try:
+                return int(obj[CYACID_ATTR])
+            except (ValueError, TypeError):
+                return None
+        return None
 
     # =========================================================================
     # Valve Control (for water features, spillovers, etc.)
