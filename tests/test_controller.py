@@ -886,51 +886,6 @@ class TestICModelController:
         assert result["primary"] == 50
         assert result["secondary"] == 100
 
-    @pytest.mark.asyncio
-    async def test_set_valve_state(self, controller):
-        """Test set_valve_state convenience method."""
-        controller._connection = MagicMock()
-        controller._connection.connected = True
-        controller._connection.send_request = AsyncMock(
-            return_value={"response": "200", "objectList": []}
-        )
-
-        await controller.set_valve_state("VAL01", True)
-
-        call_args = controller._connection.send_request.call_args
-        assert call_args[1]["objectList"][0]["objnam"] == "VAL01"
-        assert call_args[1]["objectList"][0]["params"]["STATUS"] == "ON"
-
-    @pytest.mark.asyncio
-    async def test_set_valve_state_off(self, controller):
-        """Test set_valve_state with state=False."""
-        controller._connection = MagicMock()
-        controller._connection.connected = True
-        controller._connection.send_request = AsyncMock(
-            return_value={"response": "200", "objectList": []}
-        )
-
-        await controller.set_valve_state("VAL01", False)
-
-        call_args = controller._connection.send_request.call_args
-        assert call_args[1]["objectList"][0]["params"]["STATUS"] == "OFF"
-
-    def test_is_valve_on(self, controller, model):
-        """Test is_valve_on getter method."""
-        model.add_object(
-            "VAL01", {"OBJTYP": "VALVE", "SUBTYP": "LEGACY", "SNAME": "Valve 1", "STATUS": "ON"}
-        )
-
-        assert controller.is_valve_on("VAL01") is True
-
-    def test_is_valve_on_false(self, controller, model):
-        """Test is_valve_on returns False when valve is off."""
-        model.add_object(
-            "VAL01", {"OBJTYP": "VALVE", "SUBTYP": "LEGACY", "SNAME": "Valve 1", "STATUS": "OFF"}
-        )
-
-        assert controller.is_valve_on("VAL01") is False
-
     def test_get_valves(self, controller, model):
         """Test get_valves convenience method."""
         model.add_object("VAL01", {"OBJTYP": "VALVE", "SUBTYP": "LEGACY", "SNAME": "Valve 1"})
@@ -1426,7 +1381,7 @@ class TestRequestCoalescing:
 
         # Queue requests for different objects
         task2 = asyncio.create_task(controller.set_circuit_state("C002", True))
-        task3 = asyncio.create_task(controller.set_valve_state("VAL01", True))
+        task3 = asyncio.create_task(controller.set_circuit_state("C003", True))
         task4 = asyncio.create_task(controller.set_setpoint("B001", 85))
 
         await asyncio.sleep(0.01)
@@ -1439,7 +1394,7 @@ class TestRequestCoalescing:
         second_batch = captured_kwargs[1]["objectList"]
         assert len(second_batch) == 3
         objnams = {obj["objnam"] for obj in second_batch}
-        assert objnams == {"C002", "VAL01", "B001"}
+        assert objnams == {"C002", "C003", "B001"}
 
     @pytest.mark.asyncio
     async def test_set_multiple_circuits_uses_coalescing(self, controller):

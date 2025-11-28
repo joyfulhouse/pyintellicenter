@@ -81,6 +81,7 @@ VALVE_TYPE = "VALVE"
 
 # Attribute name constants (alphabetically sorted)
 ACT_ATTR = "ACT"
+ASSIGN_ATTR = "ASSIGN"
 ALK_ATTR = "ALK"
 AVAIL_ATTR = "AVAIL"
 BODY_ATTR = "BODY"

@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
 from .attributes import (
     ALK_ATTR,
+    ASSIGN_ATTR,
     BODY_TYPE,
     CALC_ATTR,
     CHEM_TYPE,
@@ -995,42 +996,28 @@ class ICModelController(ICBaseController):
         return self._get_attr_as_int(chem_objnam, CYACID_ATTR)
 
     # =========================================================================
-    # Valve Control (for water features, spillovers, etc.)
+    # Valve Helpers
     # =========================================================================
 
-    async def set_valve_state(self, valve_objnam: str, state: bool) -> dict[str, Any]:
-        """Set a valve actuator on or off.
+    def get_valve_assignment(self, valve_objnam: str) -> str | None:
+        """Get the assignment/role of a valve.
 
-        Controls valve actuators for water features, spillovers, and
-        other plumbing configurations.
-
-        Args:
-            valve_objnam: Object name of the valve (e.g., "VAL01")
-            state: True for ON, False for OFF
-
-        Returns:
-            Response dictionary
-
-        Example:
-            await controller.set_valve_state("VAL01", True)
-        """
-        return await self._queue_property_change(
-            valve_objnam, {STATUS_ATTR: STATUS_ON if state else STATUS_OFF}
-        )
-
-    def is_valve_on(self, valve_objnam: str) -> bool:
-        """Check if a valve is currently on.
+        Valves can be assigned to different roles in the pool system:
+        - 'INTAKE': Draws water from a specific body (pool or spa)
+        - 'RETURN': Returns water to a specific body (pool or spa)
+        - 'NONE': Not assigned to intake/return (e.g., water feature valve)
 
         Args:
             valve_objnam: Object name of the valve
 
         Returns:
-            True if valve is on
+            Assignment string ('NONE', 'INTAKE', 'RETURN'), or None if unavailable
         """
         obj = self._model[valve_objnam]
         if obj:
-            return bool(obj[STATUS_ATTR] == STATUS_ON)
-        return False
+            assign = obj[ASSIGN_ATTR]
+            return str(assign) if assign is not None else None
+        return None
 
     # =========================================================================
     # Vacation Mode Control

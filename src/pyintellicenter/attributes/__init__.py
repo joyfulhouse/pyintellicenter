@@ -16,6 +16,7 @@ from .constants import (
     # Attribute name constants
     ACT_ATTR,
     ALK_ATTR,
+    ASSIGN_ATTR,
     AVAIL_ATTR,
     BODY_ATTR,
     # Object type constants
@@ -203,6 +204,7 @@ __all__ = [
     "VALVE_TYPE",
     # Attribute name constants
     "ACT_ATTR",
+    "ASSIGN_ATTR",
     "ALK_ATTR",
     "AVAIL_ATTR",
     "BODY_ATTR",

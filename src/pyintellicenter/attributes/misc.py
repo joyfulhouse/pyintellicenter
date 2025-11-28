@@ -1,6 +1,7 @@
 """Miscellaneous attribute definitions (remote, valve, external instruments, etc.)."""
 
 from .constants import (
+    ASSIGN_ATTR,
     BODY_ATTR,
     CIRCUIT_ATTR,
     COMUART_ATTR,
@@ -75,14 +76,16 @@ REMOTE_ATTRIBUTES = {
 }
 
 # Valve attributes
+# Note: Legacy valves don't have a STATUS attribute - valve position is
+# controlled automatically by the system based on which body circuit is active
 VALVE_ATTRIBUTES = {
-    "ASSIGN",  # 'NONE', 'INTAKE' or 'RETURN'
+    ASSIGN_ATTR,  # 'NONE', 'INTAKE' or 'RETURN' - valve role assignment
     CIRCUIT_ATTR,  # I've only seen '00000'
-    DLY_ATTR,  # (ON/OFF)
+    DLY_ATTR,  # (ON/OFF) delay setting
     HNAME_ATTR,  # same as objnam
     PARENT_ATTR,  # (objnam) parent (a module)
     READY_ATTR,  # (ON/OFF) Ready state
     SNAME_ATTR,  # friendly name
     STATIC_ATTR,  # (ON/OFF) I've only seen 'OFF'
-    SUBTYP_ATTR,  # I've only seen 'LEGACY'
+    SUBTYP_ATTR,  # 'LEGACY' for standard valve actuators
 }
