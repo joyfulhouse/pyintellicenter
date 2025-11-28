@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **BREAKING**: `set_valve_state()` and `is_valve_on()` methods removed from `ICModelController`
+  - Legacy valves don't have a STATUS attribute - they are automatically controlled by the system based on which body circuit (pool/spa) is active
+  - These methods never worked correctly for standard valve actuators
+
+### Added
+
+- `get_valve_assignment(valve_objnam)` - Get the role assignment of a valve (`'INTAKE'`, `'RETURN'`, or `'NONE'`)
+- `ASSIGN_ATTR` constant for valve assignment attribute
+
+### Changed
+
+- `VALVE_ATTRIBUTES` no longer includes `STATUS_ATTR` (legacy valves don't have this attribute)
+
 ## [0.1.4] - 2025-11-27
 
 ### Added
