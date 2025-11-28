@@ -19,6 +19,7 @@ from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
 from .attributes import (
+    ACT_ATTR,
     ALK_ATTR,
     ASSIGN_ATTR,
     BODY_TYPE,
@@ -1055,6 +1056,60 @@ class ICModelController(ICBaseController):
             obj = self._model[self._system_info.objnam]
             if obj:
                 return bool(obj[VACFLO_ATTR] == STATUS_ON)
+        return False
+
+    # =========================================================================
+    # Schedule Control
+    # =========================================================================
+
+    async def set_schedule_enabled(
+        self, sched_objnam: str, enabled: bool
+    ) -> dict[str, Any]:
+        """Enable or disable a schedule.
+
+        Args:
+            sched_objnam: Object name of the schedule
+            enabled: True to enable, False to disable
+
+        Returns:
+            Response dictionary
+
+        Example:
+            await controller.set_schedule_enabled("SCH01", True)
+        """
+        return await self._queue_property_change(
+            sched_objnam, {STATUS_ATTR: STATUS_ON if enabled else STATUS_OFF}
+        )
+
+    def is_schedule_enabled(self, sched_objnam: str) -> bool:
+        """Check if a schedule is enabled.
+
+        Args:
+            sched_objnam: Object name of the schedule
+
+        Returns:
+            True if schedule is enabled
+        """
+        obj = self._model[sched_objnam]
+        if obj:
+            return bool(obj[STATUS_ATTR] == STATUS_ON)
+        return False
+
+    def is_schedule_active(self, sched_objnam: str) -> bool:
+        """Check if a schedule is currently running.
+
+        A schedule can be enabled but not active (outside its time window),
+        or active (currently running within its scheduled time).
+
+        Args:
+            sched_objnam: Object name of the schedule
+
+        Returns:
+            True if schedule is currently running
+        """
+        obj = self._model[sched_objnam]
+        if obj:
+            return bool(obj[ACT_ATTR] == STATUS_ON)
         return False
 
     def get_bodies(self) -> list[Any]:
