@@ -897,6 +897,84 @@ class TestICModelController:
         assert len(valves) == 2
         assert all(obj.objtype == "VALVE" for obj in valves)
 
+    def test_get_covers(self, controller, model):
+        """Test get_covers convenience method."""
+        model.add_object("CVR01", {"OBJTYP": "EXTINSTR", "SUBTYP": "COVER", "SNAME": "Pool Cover"})
+        model.add_object("CVR02", {"OBJTYP": "EXTINSTR", "SUBTYP": "COVER", "SNAME": "Spa Cover"})
+        model.add_object("C001", {"OBJTYP": "CIRCUIT", "SUBTYP": "LIGHT", "SNAME": "Light"})
+
+        covers = controller.get_covers()
+
+        assert len(covers) == 2
+        assert all(obj.objtype == "EXTINSTR" for obj in covers)
+        assert all(obj.subtype == "COVER" for obj in covers)
+
+    def test_get_covers_filters_by_subtype(self, controller, model):
+        """Test that get_covers only returns COVER subtype, not other EXTINSTR."""
+        model.add_object("CVR01", {"OBJTYP": "EXTINSTR", "SUBTYP": "COVER", "SNAME": "Pool Cover"})
+        model.add_object(
+            "EXT01", {"OBJTYP": "EXTINSTR", "SUBTYP": "OTHER", "SNAME": "Other Instrument"}
+        )
+
+        covers = controller.get_covers()
+
+        assert len(covers) == 1
+        assert covers[0].objnam == "CVR01"
+
+    @pytest.mark.asyncio
+    async def test_set_cover_state(self, controller, model):
+        """Test set_cover_state convenience method."""
+        controller._connection = MagicMock()
+        controller._connection.connected = True
+        controller._connection.send_request = AsyncMock(
+            return_value={"response": "200", "objectList": []}
+        )
+
+        model.add_object(
+            "CVR01",
+            {"OBJTYP": "EXTINSTR", "SUBTYP": "COVER", "SNAME": "Pool Cover", "STATUS": "OFF"},
+        )
+
+        await controller.set_cover_state("CVR01", True)
+
+        call_args = controller._connection.send_request.call_args
+        assert call_args[1]["objectList"][0]["objnam"] == "CVR01"
+        assert call_args[1]["objectList"][0]["params"]["STATUS"] == "ON"
+
+    @pytest.mark.asyncio
+    async def test_set_cover_state_off(self, controller, model):
+        """Test set_cover_state with state=False."""
+        controller._connection = MagicMock()
+        controller._connection.connected = True
+        controller._connection.send_request = AsyncMock(
+            return_value={"response": "200", "objectList": []}
+        )
+
+        model.add_object(
+            "CVR01",
+            {"OBJTYP": "EXTINSTR", "SUBTYP": "COVER", "SNAME": "Pool Cover", "STATUS": "ON"},
+        )
+
+        await controller.set_cover_state("CVR01", False)
+
+        call_args = controller._connection.send_request.call_args
+        assert call_args[1]["objectList"][0]["params"]["STATUS"] == "OFF"
+
+    def test_is_cover_on(self, controller, model):
+        """Test is_cover_on helper method."""
+        model.add_object(
+            "CVR01",
+            {"OBJTYP": "EXTINSTR", "SUBTYP": "COVER", "SNAME": "Pool Cover", "STATUS": "ON"},
+        )
+        model.add_object(
+            "CVR02",
+            {"OBJTYP": "EXTINSTR", "SUBTYP": "COVER", "SNAME": "Spa Cover", "STATUS": "OFF"},
+        )
+
+        assert controller.is_cover_on("CVR01") is True
+        assert controller.is_cover_on("CVR02") is False
+        assert controller.is_cover_on("NONEXISTENT") is False
+
     @pytest.mark.asyncio
     async def test_set_vacation_mode(self, controller, model):
         """Test set_vacation_mode convenience method."""

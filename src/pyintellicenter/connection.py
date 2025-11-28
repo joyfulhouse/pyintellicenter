@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 import orjson
 
-from .exceptions import ICConnectionError, ICResponseError
+from .exceptions import ICConnectionError, ICResponseError, ICTimeoutError
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -81,6 +81,51 @@ class ICTransportProtocol(Protocol):
     def _start_notification_consumer(self) -> None:
         """Start the notification consumer task."""
         ...
+
+
+class ICRequestMixin:
+    """Mixin providing shared request/response correlation logic.
+
+    This mixin is used by both ICProtocol and ICWebSocketTransport to avoid
+    code duplication for request ID generation and response handling.
+    """
+
+    # These are defined in subclasses
+    _response_future: asyncio.Future[dict[str, Any]] | None
+    _pending_message_id: str | None
+    _message_id: int
+
+    def _init_request_mixin(self) -> None:
+        """Initialize request/response correlation state."""
+        self._response_future = None
+        self._pending_message_id = None
+        self._message_id = 0
+
+    def _next_message_id(self) -> str:
+        """Generate the next message ID."""
+        self._message_id += 1
+        return str(self._message_id)
+
+    def _handle_response(self, msg: dict[str, Any]) -> None:
+        """Handle a response message by resolving the pending Future."""
+        msg_id = msg.get("messageID")
+
+        if self._pending_message_id and msg_id == self._pending_message_id:
+            if self._response_future and not self._response_future.done():
+                self._response_future.set_result(msg)
+            return
+
+        _LOGGER.debug("Ignoring response for another client: %s", msg_id)
+
+    def _clear_pending_request(self) -> None:
+        """Clear pending request state."""
+        self._response_future = None
+        self._pending_message_id = None
+
+    def _fail_pending_request(self, exc: Exception) -> None:
+        """Fail any pending request with the given exception."""
+        if self._response_future and not self._response_future.done():
+            self._response_future.set_exception(exc)
 
 
 class ICNotificationMixin:
@@ -187,7 +232,7 @@ class ICNotificationMixin:
                 self._notification_queue.task_done()
 
 
-class ICProtocol(ICNotificationMixin, asyncio.Protocol):
+class ICProtocol(ICRequestMixin, ICNotificationMixin, asyncio.Protocol):
     """TCP transport using asyncio.Protocol for IntelliCenter communication.
 
     This class handles low-level TCP communication using the event-driven
@@ -213,6 +258,7 @@ class ICProtocol(ICNotificationMixin, asyncio.Protocol):
             disconnect_callback: Called when connection is lost
             notification_queue_size: Max queued notifications (default: 100)
         """
+        self._init_request_mixin()
         self._init_notification_mixin(notification_callback, notification_queue_size)
         self._disconnect_callback = disconnect_callback
 
@@ -221,15 +267,6 @@ class ICProtocol(ICNotificationMixin, asyncio.Protocol):
 
         # Buffer for incomplete messages (bytearray for efficient appending)
         self._buffer = bytearray()
-
-        # Request/response correlation via Future
-        self._response_future: asyncio.Future[dict[str, Any]] | None = None
-
-        # Message ID for pending request (used to validate responses)
-        self._pending_message_id: str | None = None
-
-        # Message ID counter
-        self._message_id = 0
 
         # Connection state
         self._connected = False
@@ -258,11 +295,9 @@ class ICProtocol(ICNotificationMixin, asyncio.Protocol):
 
         self._stop_notification_consumer()
 
-        if self._response_future and not self._response_future.done():
-            if exc:
-                self._response_future.set_exception(ICConnectionError(f"Connection lost: {exc}"))
-            else:
-                self._response_future.set_exception(ICConnectionError("Connection closed"))
+        # Fail any pending request
+        error_msg = f"Connection lost: {exc}" if exc else "Connection closed"
+        self._fail_pending_request(ICConnectionError(error_msg))
 
         _LOGGER.debug("TCP connection lost: %s", exc)
 
@@ -291,22 +326,6 @@ class ICProtocol(ICNotificationMixin, asyncio.Protocol):
                 continue
 
             self._dispatch_message(msg)
-
-    def _handle_response(self, msg: dict[str, Any]) -> None:
-        """Handle a response message by resolving the pending Future."""
-        msg_id = msg.get("messageID")
-
-        if self._pending_message_id and msg_id == self._pending_message_id:
-            if self._response_future and not self._response_future.done():
-                self._response_future.set_result(msg)
-            return
-
-        _LOGGER.debug("Ignoring response for another client: %s", msg_id)
-
-    def _next_message_id(self) -> str:
-        """Generate the next message ID."""
-        self._message_id += 1
-        return str(self._message_id)
 
     async def send_request(
         self,
@@ -344,13 +363,12 @@ class ICProtocol(ICNotificationMixin, asyncio.Protocol):
             _LOGGER.debug("Received response for %s", msg.get("command"))
             return msg
 
-        except TimeoutError:
+        except TimeoutError as err:
             _LOGGER.error("Request %s timed out after %ss", command, request_timeout)
-            raise
+            raise ICTimeoutError(f"Request {command} timed out after {request_timeout}s") from err
 
         finally:
-            self._response_future = None
-            self._pending_message_id = None
+            self._clear_pending_request()
 
     def close(self) -> None:
         """Close the connection."""
@@ -359,7 +377,7 @@ class ICProtocol(ICNotificationMixin, asyncio.Protocol):
             self._transport.close()
 
 
-class ICWebSocketTransport(ICNotificationMixin):
+class ICWebSocketTransport(ICRequestMixin, ICNotificationMixin):
     """WebSocket transport for IntelliCenter communication.
 
     Uses the websockets library for WebSocket connections to IntelliCenter.
@@ -379,19 +397,18 @@ class ICWebSocketTransport(ICNotificationMixin):
             disconnect_callback: Called when connection is lost
             notification_queue_size: Max queued notifications (default: 100)
         """
+        self._init_request_mixin()
         self._init_notification_mixin(notification_callback, notification_queue_size)
         self._disconnect_callback = disconnect_callback
 
         self._ws: Any = None  # websockets.WebSocketClientProtocol
         self._connected = False
-        self._message_id = 0
-
-        # Request/response correlation
-        self._response_future: asyncio.Future[dict[str, Any]] | None = None
-        self._pending_message_id: str | None = None
 
         # Reader task for incoming messages
         self._reader_task: asyncio.Task[None] | None = None
+
+        # Close task for async cleanup
+        self._close_task: asyncio.Task[None] | None = None
 
     @property
     def connected(self) -> bool:
@@ -451,17 +468,6 @@ class ICWebSocketTransport(ICNotificationMixin):
             _LOGGER.debug("WebSocket reader error: %s", err)
             self._handle_disconnect(err)
 
-    def _handle_response(self, msg: dict[str, Any]) -> None:
-        """Handle a response message by resolving the pending Future."""
-        msg_id = msg.get("messageID")
-
-        if self._pending_message_id and msg_id == self._pending_message_id:
-            if self._response_future and not self._response_future.done():
-                self._response_future.set_result(msg)
-            return
-
-        _LOGGER.debug("Ignoring response for another client: %s", msg_id)
-
     def _handle_disconnect(self, exc: Exception | None) -> None:
         """Handle disconnection."""
         self._connected = False
@@ -469,21 +475,14 @@ class ICWebSocketTransport(ICNotificationMixin):
 
         self._stop_notification_consumer()
 
-        if self._response_future and not self._response_future.done():
-            if exc:
-                self._response_future.set_exception(ICConnectionError(f"Connection lost: {exc}"))
-            else:
-                self._response_future.set_exception(ICConnectionError("Connection closed"))
+        # Fail any pending request
+        error_msg = f"Connection lost: {exc}" if exc else "Connection closed"
+        self._fail_pending_request(ICConnectionError(error_msg))
 
         _LOGGER.debug("WebSocket connection lost: %s", exc)
 
         if self._disconnect_callback:
             self._disconnect_callback(exc)
-
-    def _next_message_id(self) -> str:
-        """Generate the next message ID."""
-        self._message_id += 1
-        return str(self._message_id)
 
     async def send_request(
         self,
@@ -522,13 +521,12 @@ class ICWebSocketTransport(ICNotificationMixin):
             _LOGGER.debug("Received response for %s", msg.get("command"))
             return msg
 
-        except TimeoutError:
+        except TimeoutError as err:
             _LOGGER.error("Request %s timed out after %ss", command, request_timeout)
-            raise
+            raise ICTimeoutError(f"Request {command} timed out after {request_timeout}s") from err
 
         finally:
-            self._response_future = None
-            self._pending_message_id = None
+            self._clear_pending_request()
 
     def close(self) -> None:
         """Close the connection."""
@@ -542,7 +540,8 @@ class ICWebSocketTransport(ICNotificationMixin):
 
         if self._ws:
             # Schedule close in background (can't await in sync method)
-            asyncio.create_task(self._async_close())
+            # Track the task to avoid orphaned coroutines
+            self._close_task = asyncio.create_task(self._async_close())
 
     async def _async_close(self) -> None:
         """Close WebSocket connection asynchronously."""
@@ -550,6 +549,20 @@ class ICWebSocketTransport(ICNotificationMixin):
             with contextlib.suppress(Exception):
                 await self._ws.close()
             self._ws = None
+
+    async def aclose(self) -> None:
+        """Close the connection asynchronously (preferred for proper cleanup)."""
+        self._connected = False
+
+        if self._reader_task and not self._reader_task.done():
+            self._reader_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._reader_task
+            self._reader_task = None
+
+        self._stop_notification_consumer()
+
+        await self._async_close()
 
 
 # Type alias for transport selection

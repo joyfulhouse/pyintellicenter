@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.6] - 2025-11-28
+
+### Changed
+
+- **Extracted `ICRequestMixin`**: Shared request/response correlation logic between `ICProtocol` and `ICWebSocketTransport`, reducing ~40 lines of duplicate code
+- **Improved type annotations**: All getter methods now return `list[PoolObject]` instead of `list[Any]` for better IDE support and type safety
+- **Added validation constants**: Chemistry controller limits are now defined as named constants (`PH_MIN`, `PH_MAX`, `ORP_MIN`, etc.) instead of magic numbers
+- **Consistent timeout exceptions**: `send_request()` methods now raise `ICTimeoutError` instead of raw `TimeoutError`, with descriptive messages including command name and timeout duration
+
+### Added
+
+- **`ICRequestMixin`**: New mixin class in `connection.py` providing `_handle_response()`, `_next_message_id()`, `_clear_pending_request()`, and `_fail_pending_request()` methods
+- **`aclose()` method**: Added async close method to `ICWebSocketTransport` for proper cleanup (awaits reader task cancellation)
+- **Validation constants** in `controller.py`:
+  - `PH_MIN`, `PH_MAX`, `PH_STEP` (6.0-8.5, 0.1 increments)
+  - `ORP_MIN`, `ORP_MAX` (200-900 mV)
+  - `CHLORINATOR_PERCENT_MIN`, `CHLORINATOR_PERCENT_MAX` (0-100)
+  - `ALKALINITY_MIN`, `ALKALINITY_MAX` (0-800 ppm)
+  - `CALCIUM_HARDNESS_MIN`, `CALCIUM_HARDNESS_MAX` (0-800 ppm)
+  - `CYANURIC_ACID_MIN`, `CYANURIC_ACID_MAX` (0-200 ppm)
+
+### Fixed
+
+- **WebSocket close tracking**: `ICWebSocketTransport.close()` now tracks the async close task to avoid orphaned coroutines
+- **Discovery resource leak**: Fixed potential resource leak when using external zeroconf instance - wrapper `AsyncZeroconf` is now properly closed
+
 ## [0.1.5] - 2025-11-27
 
 ### Removed
@@ -322,7 +348,8 @@ First stable release of pyintellicenter.
 - `orjson` for fast JSON serialization
 - Python 3.11+ required
 
-[Unreleased]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.6...HEAD
+[0.1.6]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.2...v0.1.3

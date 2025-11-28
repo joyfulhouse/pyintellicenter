@@ -179,7 +179,7 @@ try:
 except ImportError:
     _DISCOVERY_AVAILABLE = False
 
-__version__ = "0.0.5a13"
+__version__ = "0.1.6"
 
 __all__ = [
     # Version

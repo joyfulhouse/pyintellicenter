@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from pyintellicenter import ICConnection, ICConnectionError, ICResponseError
+from pyintellicenter import ICConnection, ICConnectionError, ICResponseError, ICTimeoutError
 from pyintellicenter.connection import (
     CONNECTION_TIMEOUT,
     DEFAULT_PORT,
@@ -492,7 +492,7 @@ class TestICProtocolIntegration:
         mock_transport = MagicMock()
         protocol.connection_made(mock_transport)
 
-        with pytest.raises(TimeoutError):
+        with pytest.raises(ICTimeoutError):
             await protocol.send_request("GetParamList", request_timeout=0.1)
 
     @pytest.mark.asyncio

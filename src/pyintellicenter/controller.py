@@ -28,6 +28,7 @@ from .attributes import (
     CIRCUIT_ATTR,
     CIRCUIT_TYPE,
     CYACID_ATTR,
+    EXTINSTR_TYPE,
     GPM_ATTR,
     HEATER_TYPE,
     HTMODE_ATTR,
@@ -71,18 +72,38 @@ from .attributes import (
     HeaterType,
 )
 from .connection import DEFAULT_TCP_PORT, DEFAULT_WEBSOCKET_PORT, ICConnection, TransportType
-from .exceptions import ICCommandError, ICConnectionError, ICResponseError
+from .exceptions import ICCommandError, ICConnectionError, ICResponseError, ICTimeoutError
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from .model import PoolModel
+    from .model import PoolModel, PoolObject
     from .types import ObjectEntry
 
 _LOGGER = logging.getLogger(__name__)
 
 # Configuration constants
 MAX_ATTRIBUTES_PER_QUERY = 50  # Maximum attributes per query batch
+
+# Validation range constants for chemistry controllers
+PH_MIN = 6.0
+PH_MAX = 8.5
+PH_STEP = 0.1
+
+ORP_MIN = 200  # mV
+ORP_MAX = 900  # mV
+
+CHLORINATOR_PERCENT_MIN = 0
+CHLORINATOR_PERCENT_MAX = 100
+
+ALKALINITY_MIN = 0  # ppm
+ALKALINITY_MAX = 800  # ppm
+
+CALCIUM_HARDNESS_MIN = 0  # ppm
+CALCIUM_HARDNESS_MAX = 800  # ppm
+
+CYANURIC_ACID_MIN = 0  # ppm
+CYANURIC_ACID_MAX = 200  # ppm
 
 
 @dataclass
@@ -632,7 +653,7 @@ class ICModelController(ICBaseController):
                 for req in requests:
                     if not req.future.done():
                         req.future.set_result(response)
-            except (ICConnectionError, ICCommandError, TimeoutError, OSError) as e:
+            except (ICConnectionError, ICCommandError, ICTimeoutError, OSError) as e:
                 # Propagate error to all waiters
                 for req in requests:
                     if not req.future.done():
@@ -750,7 +771,7 @@ class ICModelController(ICBaseController):
 
         Args:
             chem_objnam: Object name of the chemistry controller
-            value: Target pH value (6.0-8.5, in 0.1 increments)
+            value: Target pH value (PH_MIN-PH_MAX, in PH_STEP increments)
 
         Returns:
             Response dictionary
@@ -761,14 +782,16 @@ class ICModelController(ICBaseController):
         Example:
             await controller.set_ph_setpoint("CHEM1", 7.4)
         """
-        if not 6.0 <= value <= 8.5:
-            raise ValueError(f"pH setpoint {value} outside valid range (6.0-8.5)")
+        if not PH_MIN <= value <= PH_MAX:
+            raise ValueError(f"pH setpoint {value} outside valid range ({PH_MIN}-{PH_MAX})")
 
-        # IntelliChem only accepts pH values in 0.1 increments
-        # Check if value is a valid 0.1 step (e.g., 7.0, 7.1, 7.2, not 7.05 or 7.15)
+        # IntelliChem only accepts pH values in PH_STEP increments
+        # Check if value is a valid step (e.g., 7.0, 7.1, 7.2, not 7.05 or 7.15)
         rounded = round(value, 1)
         if abs(value - rounded) > 0.001:
-            raise ValueError(f"pH setpoint {value} must be in 0.1 increments (e.g., 7.0, 7.1, 7.2)")
+            raise ValueError(
+                f"pH setpoint {value} must be in {PH_STEP} increments (e.g., 7.0, 7.1, 7.2)"
+            )
 
         return await self._queue_property_change(chem_objnam, {PHSET_ATTR: str(rounded)})
 
@@ -790,8 +813,8 @@ class ICModelController(ICBaseController):
         Example:
             await controller.set_orp_setpoint("CHEM1", 700)
         """
-        if not 200 <= value <= 900:
-            raise ValueError(f"ORP setpoint {value} outside valid range (200-900 mV)")
+        if not ORP_MIN <= value <= ORP_MAX:
+            raise ValueError(f"ORP setpoint {value} outside valid range ({ORP_MIN}-{ORP_MAX} mV)")
         return await self._queue_property_change(chem_objnam, {ORPSET_ATTR: str(value)})
 
     async def set_chlorinator_output(
@@ -817,15 +840,19 @@ class ICModelController(ICBaseController):
             # Set pool only
             await controller.set_chlorinator_output("CHEM1", 75)
         """
-        if not 0 <= primary_percent <= 100:
-            raise ValueError(f"Primary percentage {primary_percent} outside valid range (0-100)")
+        if not CHLORINATOR_PERCENT_MIN <= primary_percent <= CHLORINATOR_PERCENT_MAX:
+            raise ValueError(
+                f"Primary percentage {primary_percent} outside valid range "
+                f"({CHLORINATOR_PERCENT_MIN}-{CHLORINATOR_PERCENT_MAX})"
+            )
 
         changes: dict[str, str] = {PRIM_ATTR: str(primary_percent)}
 
         if secondary_percent is not None:
-            if not 0 <= secondary_percent <= 100:
+            if not CHLORINATOR_PERCENT_MIN <= secondary_percent <= CHLORINATOR_PERCENT_MAX:
                 raise ValueError(
-                    f"Secondary percentage {secondary_percent} outside valid range (0-100)"
+                    f"Secondary percentage {secondary_percent} outside valid range "
+                    f"({CHLORINATOR_PERCENT_MIN}-{CHLORINATOR_PERCENT_MAX})"
                 )
             changes[SEC_ATTR] = str(secondary_percent)
 
@@ -850,8 +877,10 @@ class ICModelController(ICBaseController):
         Example:
             await controller.set_alkalinity("CHEM1", 100)
         """
-        if not 0 <= value <= 800:
-            raise ValueError(f"Alkalinity {value} outside valid range (0-800 ppm)")
+        if not ALKALINITY_MIN <= value <= ALKALINITY_MAX:
+            raise ValueError(
+                f"Alkalinity {value} outside valid range ({ALKALINITY_MIN}-{ALKALINITY_MAX} ppm)"
+            )
         return await self._queue_property_change(chem_objnam, {ALK_ATTR: str(value)})
 
     async def set_calcium_hardness(self, chem_objnam: str, value: int) -> dict[str, Any]:
@@ -873,8 +902,11 @@ class ICModelController(ICBaseController):
         Example:
             await controller.set_calcium_hardness("CHEM1", 300)
         """
-        if not 0 <= value <= 800:
-            raise ValueError(f"Calcium hardness {value} outside valid range (0-800 ppm)")
+        if not CALCIUM_HARDNESS_MIN <= value <= CALCIUM_HARDNESS_MAX:
+            raise ValueError(
+                f"Calcium hardness {value} outside valid range "
+                f"({CALCIUM_HARDNESS_MIN}-{CALCIUM_HARDNESS_MAX} ppm)"
+            )
         return await self._queue_property_change(chem_objnam, {CALC_ATTR: str(value)})
 
     async def set_cyanuric_acid(self, chem_objnam: str, value: int) -> dict[str, Any]:
@@ -896,8 +928,11 @@ class ICModelController(ICBaseController):
         Example:
             await controller.set_cyanuric_acid("CHEM1", 40)
         """
-        if not 0 <= value <= 200:
-            raise ValueError(f"Cyanuric acid {value} outside valid range (0-200 ppm)")
+        if not CYANURIC_ACID_MIN <= value <= CYANURIC_ACID_MAX:
+            raise ValueError(
+                f"Cyanuric acid {value} outside valid range "
+                f"({CYANURIC_ACID_MIN}-{CYANURIC_ACID_MAX} ppm)"
+            )
         return await self._queue_property_change(chem_objnam, {CYACID_ATTR: str(value)})
 
     def _get_attr_as_int(self, objnam: str, attr: str) -> int | None:
@@ -1057,43 +1092,86 @@ class ICModelController(ICBaseController):
                 return bool(obj[VACFLO_ATTR] == STATUS_ON)
         return False
 
-    def get_bodies(self) -> list[Any]:
+    def get_bodies(self) -> list[PoolObject]:
         """Get all body objects (pools and spas)."""
         return self._model.get_by_type(BODY_TYPE)
 
-    def get_circuits(self) -> list[Any]:
+    def get_circuits(self) -> list[PoolObject]:
         """Get all circuit objects."""
         return self._model.get_by_type(CIRCUIT_TYPE)
 
-    def get_heaters(self) -> list[Any]:
+    def get_heaters(self) -> list[PoolObject]:
         """Get all heater objects."""
         return self._model.get_by_type(HEATER_TYPE)
 
-    def get_schedules(self) -> list[Any]:
+    def get_schedules(self) -> list[PoolObject]:
         """Get all schedule objects."""
         return self._model.get_by_type(SCHED_TYPE)
 
-    def get_sensors(self) -> list[Any]:
+    def get_sensors(self) -> list[PoolObject]:
         """Get all sensor objects."""
         return self._model.get_by_type(SENSE_TYPE)
 
-    def get_pumps(self) -> list[Any]:
+    def get_pumps(self) -> list[PoolObject]:
         """Get all pump objects."""
         return self._model.get_by_type(PUMP_TYPE)
 
-    def get_chem_controllers(self) -> list[Any]:
+    def get_chem_controllers(self) -> list[PoolObject]:
         """Get all chemistry controller objects (IntelliChem, IntelliChlor)."""
         return self._model.get_by_type(CHEM_TYPE)
 
-    def get_valves(self) -> list[Any]:
+    def get_valves(self) -> list[PoolObject]:
         """Get all valve objects."""
         return self._model.get_by_type(VALVE_TYPE)
+
+    # =========================================================================
+    # Cover (External Instrument) Helpers
+    # =========================================================================
+
+    def get_covers(self) -> list[PoolObject]:
+        """Get all cover objects (pool covers, spa covers).
+
+        Covers are external instruments (EXTINSTR) with SUBTYP=COVER.
+        They can be controlled via set_cover_state().
+
+        Returns:
+            List of PoolObject for covers
+        """
+        return [obj for obj in self._model.get_by_type(EXTINSTR_TYPE) if obj.subtype == "COVER"]
+
+    async def set_cover_state(self, objnam: str, state: bool) -> dict[str, Any]:
+        """Turn a cover on or off.
+
+        Args:
+            objnam: Object name of the cover (e.g., "CVR01")
+            state: True to turn on, False to turn off
+
+        Returns:
+            Response dictionary from the controller
+        """
+        return await self._queue_property_change(
+            objnam, {STATUS_ATTR: STATUS_ON if state else STATUS_OFF}
+        )
+
+    def is_cover_on(self, cover_objnam: str) -> bool:
+        """Check if a cover is currently on.
+
+        Args:
+            cover_objnam: Object name of the cover
+
+        Returns:
+            True if the cover status is ON, False otherwise
+        """
+        obj = self._model[cover_objnam]
+        if not obj:
+            return False
+        return obj.status == STATUS_ON
 
     # =========================================================================
     # Circuit Group Helpers
     # =========================================================================
 
-    def get_circuit_groups(self) -> list[Any]:
+    def get_circuit_groups(self) -> list[PoolObject]:
         """Get all circuit group objects.
 
         Circuit groups allow multiple circuits to be controlled together.
@@ -1104,7 +1182,7 @@ class ICModelController(ICBaseController):
         """
         return self._model.get_by_type(CIRCGRP_TYPE)
 
-    def get_circuits_in_group(self, circgrp_objnam: str) -> list[Any]:
+    def get_circuits_in_group(self, circgrp_objnam: str) -> list[PoolObject]:
         """Get all circuit objects that belong to a circuit group.
 
         Args:
@@ -1146,7 +1224,7 @@ class ICModelController(ICBaseController):
         circuits = self.get_circuits_in_group(circgrp_objnam)
         return any(circuit.supports_color_effects for circuit in circuits)
 
-    def get_color_light_groups(self) -> list[Any]:
+    def get_color_light_groups(self) -> list[PoolObject]:
         """Get circuit groups that contain color-capable lights.
 
         These groups can have light effects applied via set_light_effect().
@@ -1164,7 +1242,7 @@ class ICModelController(ICBaseController):
     # Light Helpers (for Home Assistant light entities)
     # =========================================================================
 
-    def get_lights(self, include_shows: bool = True) -> list[Any]:
+    def get_lights(self, include_shows: bool = True) -> list[PoolObject]:
         """Get all light circuits.
 
         Args:
@@ -1178,7 +1256,7 @@ class ICModelController(ICBaseController):
             lights.extend(obj for obj in self._model if obj.is_a_light_show)
         return lights
 
-    def get_color_lights(self) -> list[Any]:
+    def get_color_lights(self) -> list[PoolObject]:
         """Get lights that support color effects (IntelliBrite, MagicStream, etc.).
 
         These lights can have their effect/color changed via set_light_effect().
@@ -1402,7 +1480,7 @@ class ICModelController(ICBaseController):
     # Sensor Helpers (for Home Assistant sensor entities)
     # =========================================================================
 
-    def get_sensors_by_type(self, subtype: str) -> list[Any]:
+    def get_sensors_by_type(self, subtype: str) -> list[PoolObject]:
         """Get sensors of a specific type.
 
         Args:
@@ -1413,7 +1491,7 @@ class ICModelController(ICBaseController):
         """
         return self._model.get_by_type(SENSE_TYPE, subtype)
 
-    def get_solar_sensors(self) -> list[Any]:
+    def get_solar_sensors(self) -> list[PoolObject]:
         """Get all solar temperature sensors.
 
         Returns:
@@ -1421,7 +1499,7 @@ class ICModelController(ICBaseController):
         """
         return self.get_sensors_by_type("SOLAR")
 
-    def get_air_sensors(self) -> list[Any]:
+    def get_air_sensors(self) -> list[PoolObject]:
         """Get all air temperature sensors.
 
         Returns:
@@ -1429,7 +1507,7 @@ class ICModelController(ICBaseController):
         """
         return self.get_sensors_by_type("AIR")
 
-    def get_pool_temp_sensors(self) -> list[Any]:
+    def get_pool_temp_sensors(self) -> list[PoolObject]:
         """Get all pool water temperature sensors.
 
         Returns:
@@ -1544,7 +1622,7 @@ class ICModelController(ICBaseController):
             "valves": self.get_valves(),
         }
 
-    def get_featured_entities(self) -> list[Any]:
+    def get_featured_entities(self) -> list[PoolObject]:
         """Get entities marked as 'featured' in IntelliCenter.
 
         These are typically the most important entities that should
@@ -1682,7 +1760,7 @@ class ICConnectionHandler:
                         self._first_time = False
                     self._is_connected = True
                     self._starter_task = None
-                except (TimeoutError, OSError, ICConnectionError, ICCommandError) as err:
+                except (ICTimeoutError, OSError, ICConnectionError, ICCommandError) as err:
                     first_attempt_error = err
                 finally:
                     first_attempt_done.set()

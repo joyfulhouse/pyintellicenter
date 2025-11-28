@@ -270,6 +270,9 @@ async def discover_intellicenter_units(
     listener = ICDiscoveryListener(queue)
     browsers: list[ServiceBrowser] = []
 
+    # Track if we create a wrapper for external zeroconf
+    aiozc_wrapper: AsyncZeroconf | None = None
+
     try:
         # Browse for HTTP services (IntelliCenter uses HTTP on port 6681)
         browser = ServiceBrowser(
@@ -291,7 +294,11 @@ async def discover_intellicenter_units(
         # Process discovery events from the queue
         # Note: _process_discovery_queue needs AsyncZeroconf for resolution
         # When using external zeroconf, wrap it
-        aiozc_for_resolution = AsyncZeroconf(zc=zc) if aiozc is None else aiozc
+        if aiozc is None:
+            aiozc_wrapper = AsyncZeroconf(zc=zc)
+            aiozc_for_resolution = aiozc_wrapper
+        else:
+            aiozc_for_resolution = aiozc
 
         await _process_discovery_queue(queue, listener, aiozc_for_resolution, discovery_timeout)
 
@@ -301,8 +308,11 @@ async def discover_intellicenter_units(
         # Cancel browsers before closing zeroconf
         for browser in browsers:
             browser.cancel()
-        # Only close zeroconf if we created it
-        if own_zeroconf and aiozc is not None:
+        # Close wrapper if we created one for external zeroconf
+        if aiozc_wrapper is not None:
+            await aiozc_wrapper.async_close()
+        # Close our own zeroconf if we created it
+        elif own_zeroconf and aiozc is not None:
             await aiozc.async_close()
 
 
