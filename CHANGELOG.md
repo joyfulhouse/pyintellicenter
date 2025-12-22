@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7] - 2025-12-22
+
+### Fixed
+
+- **Light effect 404 error**: Fixed `set_light_effect()` returning 404 errors from IntelliCenter. The method now correctly uses `ACT` attribute (action trigger) instead of `USE` attribute (state reflection) when setting light effects. The IntelliCenter protocol requires write operations to use `ACT` while read operations use `USE`.
+
 ## [0.1.6] - 2025-11-28
 
 ### Changed
@@ -348,7 +354,8 @@ First stable release of pyintellicenter.
 - `orjson` for fast JSON serialization
 - Python 3.11+ required
 
-[Unreleased]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.6...HEAD
+[Unreleased]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.7...HEAD
+[0.1.7]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.3...v0.1.4

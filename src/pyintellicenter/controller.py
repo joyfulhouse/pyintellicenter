@@ -19,6 +19,7 @@ from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
 from .attributes import (
+    ACT_ATTR,
     ALK_ATTR,
     ASSIGN_ATTR,
     BODY_TYPE,
@@ -1269,6 +1270,10 @@ class ICModelController(ICBaseController):
     async def set_light_effect(self, objnam: str, effect: str) -> dict[str, Any]:
         """Set the color effect for a color-capable light.
 
+        Note: IntelliCenter uses ACT (action) attribute to set effects,
+        while USE attribute reflects the current state. The effect change
+        propagates to USE after IntelliCenter processes the command.
+
         Args:
             objnam: Object name of the light
             effect: Effect code (e.g., "PARTY", "CARIB", "ROYAL")
@@ -1286,7 +1291,7 @@ class ICModelController(ICBaseController):
         if effect not in LIGHT_EFFECTS:
             valid = ", ".join(LIGHT_EFFECTS.keys())
             raise ValueError(f"Invalid effect '{effect}'. Valid effects: {valid}")
-        return await self._queue_property_change(objnam, {USE_ATTR: effect})
+        return await self._queue_property_change(objnam, {ACT_ATTR: effect})
 
     def get_light_effect(self, objnam: str) -> str | None:
         """Get the current color effect for a light.
