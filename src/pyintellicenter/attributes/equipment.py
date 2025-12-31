@@ -23,12 +23,14 @@ from .constants import (
     ORPSET_ATTR,
     ORPTNK_ATTR,
     ORPVAL_ATTR,
+    ORPVOL_ATTR,
     PARENT_ATTR,
     PHHI_ATTR,
     PHLO_ATTR,
     PHSET_ATTR,
     PHTNK_ATTR,
     PHVAL_ATTR,
+    PHVOL_ATTR,
     PRIM_ATTR,
     PROBE_ATTR,
     PWR_ATTR,
@@ -65,11 +67,13 @@ CHEM_ATTRIBUTES = {
     ORPSET_ATTR,  # (int) IntelliChem ORP level setpoint (400-800 mV)
     ORPTNK_ATTR,  # (int) IntelliChem: ORP Tank Level
     ORPVAL_ATTR,  # (int) IntelliChem: ORP Level
+    ORPVOL_ATTR,  # (int) IntelliChem: Cumulative ORP dosing volume in mL
     PHHI_ATTR,  # (ON/OFF) IntelliChem: pH Level too high?
     PHLO_ATTR,  # (ON/OFF) IntelliChem: pH Level too low?
     PHSET_ATTR,  # (float) IntelliChem pH level setpoint (7.0-7.6)
     PHTNK_ATTR,  # (int) IntelliChem: pH Tank Level
     PHVAL_ATTR,  # (float) IntelliChem: pH Level
+    PHVOL_ATTR,  # (int) IntelliChem: Cumulative pH dosing volume in mL
     PRIM_ATTR,  # (int) IntelliChlor: primary body output setting in %
     PROBE_ATTR,  # (str) IntelliChem: Raw probe reading indicator
     QUALTY_ATTR,  # (float) IntelliChem: Water Quality (Saturation Index)

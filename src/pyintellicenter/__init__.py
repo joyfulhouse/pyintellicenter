@@ -76,6 +76,7 @@ from .attributes import (
     ORPSET_ATTR,
     ORPTNK_ATTR,
     ORPVAL_ATTR,
+    ORPVOL_ATTR,
     PANEL_TYPE,
     PARENT_ATTR,
     PERMIT_ATTR,
@@ -85,6 +86,7 @@ from .attributes import (
     PHSET_ATTR,
     PHTNK_ATTR,
     PHVAL_ATTR,
+    PHVOL_ATTR,
     PMPCIRC_TYPE,
     PRESS_TYPE,
     PRIM_ATTR,
@@ -179,7 +181,7 @@ try:
 except ImportError:
     _DISCOVERY_AVAILABLE = False
 
-__version__ = "0.1.6"
+__version__ = "0.1.7"
 
 __all__ = [
     # Version
@@ -285,6 +287,7 @@ __all__ = [
     "ORPSET_ATTR",
     "ORPTNK_ATTR",
     "ORPVAL_ATTR",
+    "ORPVOL_ATTR",
     "PARENT_ATTR",
     "PERMIT_ATTR",
     "PHHI_ATTR",
@@ -292,6 +295,7 @@ __all__ = [
     "PHSET_ATTR",
     "PHTNK_ATTR",
     "PHVAL_ATTR",
+    "PHVOL_ATTR",
     "PRIM_ATTR",
     "PROPNAME_ATTR",
     "PWR_ATTR",
