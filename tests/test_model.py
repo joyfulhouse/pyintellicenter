@@ -358,3 +358,72 @@ class TestPoolModel:
         repr_str = repr(pool_model)
         assert "PoolModel" in repr_str
         assert "num_objects" in repr_str
+
+    def test_pool_model_skip_objects_without_objtyp(self):
+        """Test that objects without OBJTYP attribute are skipped.
+
+        Firmware 3.008+ returns objects like _FDR where all params have
+        key==value (e.g., OBJTYP: "OBJTYP"). After pruning, these objects
+        have empty params and should be gracefully skipped.
+
+        See: https://github.com/joyfulhouse/pyintellicenter/issues/12
+        """
+        model = PoolModel()
+
+        # Simulate the _FDR object after pruning (empty params)
+        obj = model.add_object("_FDR", {})
+        assert obj is None
+        assert model.num_objects == 0
+
+        # Also test with partial params missing OBJTYP
+        obj2 = model.add_object("PARTIAL", {SNAME_ATTR: "Test", "PARENT": "ROOT"})
+        assert obj2 is None
+        assert model.num_objects == 0
+
+        # Ensure valid objects still work
+        obj3 = model.add_object(
+            "VALID1",
+            {
+                OBJTYP_ATTR: CIRCUIT_TYPE,
+                SNAME_ATTR: "Valid Circuit",
+                STATUS_ATTR: "OFF",
+            },
+        )
+        assert obj3 is not None
+        assert model.num_objects == 1
+
+    def test_pool_model_add_objects_batch_skips_malformed(self):
+        """Test that batch add_objects skips malformed entries gracefully."""
+        model = PoolModel()
+
+        # Mix of valid and invalid objects (simulating firmware 3.008 response)
+        objects = [
+            {
+                "objnam": "VALID1",
+                "params": {
+                    OBJTYP_ATTR: CIRCUIT_TYPE,
+                    SNAME_ATTR: "Valid Circuit",
+                    STATUS_ATTR: "OFF",
+                },
+            },
+            {
+                "objnam": "_FDR",
+                "params": {},  # Pruned firmware definition object
+            },
+            {
+                "objnam": "VALID2",
+                "params": {
+                    OBJTYP_ATTR: BODY_TYPE,
+                    SUBTYP_ATTR: "POOL",
+                    SNAME_ATTR: "Pool",
+                },
+            },
+        ]
+
+        model.add_objects(objects)
+
+        # Should have added only the 2 valid objects
+        assert model.num_objects == 2
+        assert model["VALID1"] is not None
+        assert model["_FDR"] is None
+        assert model["VALID2"] is not None

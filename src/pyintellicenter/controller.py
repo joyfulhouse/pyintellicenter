@@ -34,6 +34,10 @@ from .attributes import (
     HTMODE_ATTR,
     LIGHT_EFFECTS,
     LOTMP_ATTR,
+    MAX_ATTR,
+    MAXF_ATTR,
+    MIN_ATTR,
+    MINF_ATTR,
     MODE_ATTR,
     OBJTYP_ATTR,
     ORPHI_ATTR,
@@ -45,6 +49,7 @@ from .attributes import (
     PHLO_ATTR,
     PHSET_ATTR,
     PHVAL_ATTR,
+    PMPCIRC_TYPE,
     PRIM_ATTR,
     PROPNAME_ATTR,
     PUMP_STATUS_ON,
@@ -55,9 +60,11 @@ from .attributes import (
     SALT_ATTR,
     SCHED_TYPE,
     SEC_ATTR,
+    SELECT_ATTR,
     SENSE_TYPE,
     SNAME_ATTR,
     SOURCE_ATTR,
+    SPEED_ATTR,
     STATUS_ATTR,
     STATUS_OFF,
     STATUS_ON,
@@ -1593,6 +1600,120 @@ class ICModelController(ICBaseController):
             "rpm": self.get_pump_rpm(pump_objnam),
             "gpm": self.get_pump_gpm(pump_objnam),
             "watts": self.get_pump_watts(pump_objnam),
+        }
+
+    # =========================================================================
+    # Pump Circuit Helpers (for VSF pump speed/flow control)
+    # =========================================================================
+
+    def get_pump_circuits(self) -> list[PoolObject]:
+        """Get all pump circuit objects.
+
+        Pump circuits (PMPCIRC) represent per-circuit speed/flow settings
+        for variable speed pumps. Each PMPCIRC links a pump to a circuit
+        with a speed setpoint.
+
+        Returns:
+            List of PoolObject for pump circuits
+        """
+        return self._model.get_by_type(PMPCIRC_TYPE)
+
+    def get_pump_circuit_speed(self, pmpcirc_objnam: str) -> int | None:
+        """Get the effective speed for a pump circuit, clamped to valid range.
+
+        VSF (Variable Speed/Flow) pumps use a unified SPEED attribute that holds
+        either RPM or GPM depending on the SELECT mode. When switching modes,
+        IntelliCenter may send SELECT and SPEED updates in separate NotifyList
+        messages, causing a brief period where the speed value is stale.
+
+        This method returns the speed value clamped to the valid range for the
+        current mode, ensuring the returned value is always valid. This matches
+        what IntelliCenter does internally when the mode changes.
+
+        Example scenario this handles:
+        - Pump is at 450 RPM (minimum)
+        - User switches mode to GPM
+        - SELECT update arrives first, SPEED still shows 450
+        - Without clamping: would show "450 GPM" (invalid, max is 140)
+        - With clamping: returns 140 GPM (the actual clamped value)
+
+        Args:
+            pmpcirc_objnam: Object name of the pump circuit (e.g., "p0101")
+
+        Returns:
+            Effective speed value clamped to valid range, or None if unavailable
+        """
+        pmpcirc = self._model[pmpcirc_objnam]
+        if not pmpcirc or pmpcirc.objtype != PMPCIRC_TYPE:
+            return None
+
+        speed = self._get_attr_as_int(pmpcirc_objnam, SPEED_ATTR)
+        if speed is None:
+            return None
+
+        # Get parent pump for limits
+        parent_objnam = pmpcirc[PARENT_ATTR]
+        parent = self._model[parent_objnam] if parent_objnam else None
+        if not parent:
+            return speed  # No parent pump, can't determine limits
+
+        # Determine limits based on current mode
+        mode = pmpcirc[SELECT_ATTR] or "RPM"
+        if mode == "GPM":
+            min_val = self._get_attr_as_int(parent_objnam, MINF_ATTR) or 15
+            max_val = self._get_attr_as_int(parent_objnam, MAXF_ATTR) or 140
+        else:
+            min_val = self._get_attr_as_int(parent_objnam, MIN_ATTR) or 450
+            max_val = self._get_attr_as_int(parent_objnam, MAX_ATTR) or 3450
+
+        return max(min_val, min(speed, max_val))
+
+    def get_pump_circuit_mode(self, pmpcirc_objnam: str) -> str | None:
+        """Get the current mode (RPM or GPM) for a pump circuit.
+
+        Args:
+            pmpcirc_objnam: Object name of the pump circuit
+
+        Returns:
+            "RPM" or "GPM", or None if unavailable
+        """
+        pmpcirc = self._model[pmpcirc_objnam]
+        if not pmpcirc:
+            return None
+        mode = pmpcirc[SELECT_ATTR]
+        return str(mode) if mode else None
+
+    def get_pump_circuit_limits(self, pmpcirc_objnam: str) -> dict[str, dict[str, int | None]]:
+        """Get the speed/flow limits for a pump circuit from its parent pump.
+
+        Returns limits for both RPM and GPM modes, useful for UI controls
+        that need to know the valid range for each mode.
+
+        Args:
+            pmpcirc_objnam: Object name of the pump circuit
+
+        Returns:
+            Dict with 'rpm' and 'gpm' keys, each containing 'min' and 'max' values.
+            Values are None if the pump doesn't support that mode.
+        """
+        pmpcirc = self._model[pmpcirc_objnam]
+        if not pmpcirc:
+            return {"rpm": {"min": None, "max": None}, "gpm": {"min": None, "max": None}}
+
+        parent_objnam = pmpcirc[PARENT_ATTR]
+        parent = self._model[parent_objnam] if parent_objnam else None
+        if not parent:
+            return {"rpm": {"min": None, "max": None}, "gpm": {"min": None, "max": None}}
+
+        return {
+            "rpm": {
+                "min": self._get_attr_as_int(parent_objnam, MIN_ATTR),
+                "max": self._get_attr_as_int(parent_objnam, MAX_ATTR),
+            },
+            "gpm": {
+                "min": self._get_attr_as_int(parent_objnam, MINF_ATTR),
+                "max": self._get_attr_as_int(parent_objnam, MAXF_ATTR),
+            },
         }
 
     # =========================================================================
