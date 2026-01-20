@@ -1721,9 +1721,7 @@ class TestRequestCoalescing:
         controller._connection.send_request = AsyncMock(
             return_value={
                 "response": "200",
-                "objectList": [
-                    {"objnam": "PMPCIRC01", "params": {"SPEED": "1500"}}
-                ],
+                "objectList": [{"objnam": "PMPCIRC01", "params": {"SPEED": "1500"}}],
             }
         )
 
