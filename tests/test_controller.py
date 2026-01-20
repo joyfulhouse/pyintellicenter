@@ -1585,11 +1585,12 @@ class TestRequestCoalescing:
         speed = controller.get_pump_circuit_speed("PMPCIRC01")
         assert speed == 80
 
-    def test_get_pump_circuit_speed_clamps_high_value_in_gpm_mode(self, controller):
-        """Test speed is clamped to max when switching from RPM to GPM mode.
+    def test_get_pump_circuit_speed_returns_none_for_stale_gpm_value(self, controller):
+        """Test speed returns None when stale RPM value is outside GPM range.
 
-        This is the key bug fix: when switching from RPM (e.g., 450) to GPM mode,
-        the value should be clamped to the GPM max (140), not show as 450 GPM.
+        When switching from RPM (e.g., 450) to GPM mode, the stale SPEED value
+        (450) is outside the valid GPM range (15-140), so return None to indicate
+        the value is unavailable until IntelliCenter sends the real value.
         """
         controller._model.add_object(
             "PUMP1",
@@ -1612,12 +1613,12 @@ class TestRequestCoalescing:
             },
         )
 
-        # Should clamp 450 to GPM max of 140
+        # Should return None since 450 is outside GPM range (15-140)
         speed = controller.get_pump_circuit_speed("PMPCIRC01")
-        assert speed == 140
+        assert speed is None
 
-    def test_get_pump_circuit_speed_clamps_low_value_in_rpm_mode(self, controller):
-        """Test speed is clamped to min when switching from GPM to RPM mode."""
+    def test_get_pump_circuit_speed_returns_none_for_stale_rpm_value(self, controller):
+        """Test speed returns None when stale GPM value is outside RPM range."""
         controller._model.add_object(
             "PUMP1",
             {
@@ -1635,13 +1636,13 @@ class TestRequestCoalescing:
                 "OBJTYP": "PMPCIRC",
                 "PARENT": "PUMP1",
                 "SELECT": "RPM",  # Mode switched to RPM
-                "SPEED": "20",  # But SPEED still has old GPM value (stale)
+                "SPEED": "80",  # But SPEED still has old GPM value (stale)
             },
         )
 
-        # Should clamp 20 to RPM min of 450
+        # Should return None since 80 is outside RPM range (450-3450)
         speed = controller.get_pump_circuit_speed("PMPCIRC01")
-        assert speed == 450
+        assert speed is None
 
     def test_get_pump_circuit_speed_returns_none_for_missing_object(self, controller):
         """Test get_pump_circuit_speed returns None for non-existent object."""
@@ -1700,6 +1701,47 @@ class TestRequestCoalescing:
         assert limits["rpm"]["max"] == 3450
         assert limits["gpm"]["min"] == 15
         assert limits["gpm"]["max"] == 140
+
+    @pytest.mark.asyncio
+    async def test_refresh_pump_circuit_speed(self, controller):
+        """Test refresh_pump_circuit_speed fetches fresh value from IntelliCenter."""
+        # Add PMPCIRC to the model first
+        controller._model.add_object(
+            "PMPCIRC01",
+            {
+                "OBJTYP": "PMPCIRC",
+                "PARENT": "PUMP1",
+                "SELECT": "RPM",
+                "SPEED": "1000",  # Old value
+            },
+        )
+
+        controller._connection = MagicMock()
+        controller._connection.connected = True
+        controller._connection.send_request = AsyncMock(
+            return_value={
+                "response": "200",
+                "objectList": [{"objnam": "PMPCIRC01", "params": {"SPEED": "1500"}}],
+            }
+        )
+
+        speed = await controller.refresh_pump_circuit_speed("PMPCIRC01")
+
+        assert speed == 1500
+        controller._connection.send_request.assert_called_once()
+        # Verify the model was updated
+        assert controller._model["PMPCIRC01"]["SPEED"] == "1500"
+
+    @pytest.mark.asyncio
+    async def test_refresh_pump_circuit_speed_returns_none_on_error(self, controller):
+        """Test refresh_pump_circuit_speed returns None when request fails."""
+        controller._connection = MagicMock()
+        controller._connection.connected = True
+        controller._connection.send_request = AsyncMock(return_value={})
+
+        speed = await controller.refresh_pump_circuit_speed("PMPCIRC01")
+
+        assert speed is None
 
 
 class TestICConnectionHandler:

@@ -1619,29 +1619,29 @@ class ICModelController(ICBaseController):
         return self._model.get_by_type(PMPCIRC_TYPE)
 
     def get_pump_circuit_speed(self, pmpcirc_objnam: str) -> int | None:
-        """Get the effective speed for a pump circuit, clamped to valid range.
+        """Get the speed for a pump circuit if valid for current mode.
 
         VSF (Variable Speed/Flow) pumps use a unified SPEED attribute that holds
         either RPM or GPM depending on the SELECT mode. When switching modes,
         IntelliCenter may send SELECT and SPEED updates in separate NotifyList
         messages, causing a brief period where the speed value is stale.
 
-        This method returns the speed value clamped to the valid range for the
-        current mode, ensuring the returned value is always valid. This matches
-        what IntelliCenter does internally when the mode changes.
+        This method returns None if the speed value is outside the valid range
+        for the current mode, indicating the value is stale and should be shown
+        as "unavailable" until the real value arrives from IntelliCenter.
 
         Example scenario this handles:
-        - Pump is at 450 RPM (minimum)
-        - User switches mode to GPM
-        - SELECT update arrives first, SPEED still shows 450
-        - Without clamping: would show "450 GPM" (invalid, max is 140)
-        - With clamping: returns 140 GPM (the actual clamped value)
+        - Pump is at 80 GPM
+        - User switches mode to RPM
+        - SELECT update arrives first, SPEED still shows 80
+        - 80 is outside RPM range (450-3450), so return None
+        - Entity shows "unavailable" until real RPM value arrives
 
         Args:
             pmpcirc_objnam: Object name of the pump circuit (e.g., "p0101")
 
         Returns:
-            Effective speed value clamped to valid range, or None if unavailable
+            Speed value if within valid range for current mode, None otherwise
         """
         pmpcirc = self._model[pmpcirc_objnam]
         if not pmpcirc or pmpcirc.objtype != PMPCIRC_TYPE:
@@ -1666,7 +1666,52 @@ class ICModelController(ICBaseController):
             min_val = self._get_attr_as_int(parent_objnam, MIN_ATTR) or 450
             max_val = self._get_attr_as_int(parent_objnam, MAX_ATTR) or 3450
 
-        return max(min_val, min(speed, max_val))
+        # Return None if value is outside valid range (stale value from mode switch)
+        if speed < min_val or speed > max_val:
+            return None
+
+        return speed
+
+    async def refresh_pump_circuit_speed(self, pmpcirc_objnam: str) -> int | None:
+        """Request fresh SPEED value from IntelliCenter for a pump circuit.
+
+        Use this after changing the pump mode (SELECT attribute) to get the
+        actual SPEED value that IntelliCenter calculated for the new mode.
+
+        This also updates the internal model with the fresh value.
+
+        Args:
+            pmpcirc_objnam: Object name of the pump circuit (e.g., "p0101")
+
+        Returns:
+            Fresh speed value from IntelliCenter, or None if unavailable
+        """
+        try:
+            response = await self.send_cmd(
+                "GetParamList",
+                {
+                    "condition": "",
+                    "objectList": [{"objnam": pmpcirc_objnam, "keys": [SPEED_ATTR]}],
+                },
+            )
+        except (ICConnectionError, ICCommandError):
+            return None
+
+        if response and "objectList" in response:
+            for obj in response["objectList"]:
+                if obj.get("objnam") == pmpcirc_objnam:
+                    params = obj.get("params", {})
+                    speed_str = params.get(SPEED_ATTR)
+                    if speed_str is not None:
+                        # Update the model with fresh value
+                        pmpcirc = self._model[pmpcirc_objnam]
+                        if pmpcirc:
+                            pmpcirc.update({SPEED_ATTR: speed_str})
+                        try:
+                            return int(speed_str)
+                        except (ValueError, TypeError):
+                            pass
+        return None
 
     def get_pump_circuit_mode(self, pmpcirc_objnam: str) -> str | None:
         """Get the current mode (RPM or GPM) for a pump circuit.
