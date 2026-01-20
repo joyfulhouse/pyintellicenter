@@ -1498,6 +1498,209 @@ class TestRequestCoalescing:
 
         assert result == expected_response
 
+    # =========================================================================
+    # Pump Circuit Helper Tests
+    # =========================================================================
+
+    def test_get_pump_circuits(self, controller):
+        """Test get_pump_circuits returns all PMPCIRC objects."""
+        # Add pump and pump circuit objects
+        controller._model.add_object(
+            "PUMP1",
+            {
+                "OBJTYP": "PUMP",
+                "SUBTYP": "VSF",
+                "SNAME": "Pool Pump",
+                "MIN": "450",
+                "MAX": "3450",
+                "MINF": "15",
+                "MAXF": "140",
+            },
+        )
+        controller._model.add_object(
+            "PMPCIRC01",
+            {
+                "OBJTYP": "PMPCIRC",
+                "SNAME": "Pool Circuit",
+                "PARENT": "PUMP1",
+                "SELECT": "RPM",
+                "SPEED": "2400",
+            },
+        )
+
+        circuits = controller.get_pump_circuits()
+        assert len(circuits) == 1
+        assert circuits[0].objnam == "PMPCIRC01"
+
+    def test_get_pump_circuit_speed_rpm_mode(self, controller):
+        """Test get_pump_circuit_speed returns clamped value in RPM mode."""
+        # Add pump and pump circuit
+        controller._model.add_object(
+            "PUMP1",
+            {
+                "OBJTYP": "PUMP",
+                "SUBTYP": "VSF",
+                "MIN": "450",
+                "MAX": "3450",
+                "MINF": "15",
+                "MAXF": "140",
+            },
+        )
+        controller._model.add_object(
+            "PMPCIRC01",
+            {
+                "OBJTYP": "PMPCIRC",
+                "PARENT": "PUMP1",
+                "SELECT": "RPM",
+                "SPEED": "2400",
+            },
+        )
+
+        speed = controller.get_pump_circuit_speed("PMPCIRC01")
+        assert speed == 2400
+
+    def test_get_pump_circuit_speed_gpm_mode(self, controller):
+        """Test get_pump_circuit_speed returns clamped value in GPM mode."""
+        controller._model.add_object(
+            "PUMP1",
+            {
+                "OBJTYP": "PUMP",
+                "SUBTYP": "VSF",
+                "MIN": "450",
+                "MAX": "3450",
+                "MINF": "15",
+                "MAXF": "140",
+            },
+        )
+        controller._model.add_object(
+            "PMPCIRC01",
+            {
+                "OBJTYP": "PMPCIRC",
+                "PARENT": "PUMP1",
+                "SELECT": "GPM",
+                "SPEED": "80",
+            },
+        )
+
+        speed = controller.get_pump_circuit_speed("PMPCIRC01")
+        assert speed == 80
+
+    def test_get_pump_circuit_speed_clamps_high_value_in_gpm_mode(self, controller):
+        """Test speed is clamped to max when switching from RPM to GPM mode.
+
+        This is the key bug fix: when switching from RPM (e.g., 450) to GPM mode,
+        the value should be clamped to the GPM max (140), not show as 450 GPM.
+        """
+        controller._model.add_object(
+            "PUMP1",
+            {
+                "OBJTYP": "PUMP",
+                "SUBTYP": "VSF",
+                "MIN": "450",
+                "MAX": "3450",
+                "MINF": "15",
+                "MAXF": "140",
+            },
+        )
+        controller._model.add_object(
+            "PMPCIRC01",
+            {
+                "OBJTYP": "PMPCIRC",
+                "PARENT": "PUMP1",
+                "SELECT": "GPM",  # Mode switched to GPM
+                "SPEED": "450",  # But SPEED still has old RPM value (stale)
+            },
+        )
+
+        # Should clamp 450 to GPM max of 140
+        speed = controller.get_pump_circuit_speed("PMPCIRC01")
+        assert speed == 140
+
+    def test_get_pump_circuit_speed_clamps_low_value_in_rpm_mode(self, controller):
+        """Test speed is clamped to min when switching from GPM to RPM mode."""
+        controller._model.add_object(
+            "PUMP1",
+            {
+                "OBJTYP": "PUMP",
+                "SUBTYP": "VSF",
+                "MIN": "450",
+                "MAX": "3450",
+                "MINF": "15",
+                "MAXF": "140",
+            },
+        )
+        controller._model.add_object(
+            "PMPCIRC01",
+            {
+                "OBJTYP": "PMPCIRC",
+                "PARENT": "PUMP1",
+                "SELECT": "RPM",  # Mode switched to RPM
+                "SPEED": "20",  # But SPEED still has old GPM value (stale)
+            },
+        )
+
+        # Should clamp 20 to RPM min of 450
+        speed = controller.get_pump_circuit_speed("PMPCIRC01")
+        assert speed == 450
+
+    def test_get_pump_circuit_speed_returns_none_for_missing_object(self, controller):
+        """Test get_pump_circuit_speed returns None for non-existent object."""
+        speed = controller.get_pump_circuit_speed("NONEXISTENT")
+        assert speed is None
+
+    def test_get_pump_circuit_speed_returns_none_for_non_pmpcirc(self, controller):
+        """Test get_pump_circuit_speed returns None for non-PMPCIRC object."""
+        controller._model.add_object(
+            "PUMP1",
+            {
+                "OBJTYP": "PUMP",
+                "SUBTYP": "VSF",
+            },
+        )
+
+        speed = controller.get_pump_circuit_speed("PUMP1")
+        assert speed is None
+
+    def test_get_pump_circuit_mode(self, controller):
+        """Test get_pump_circuit_mode returns current mode."""
+        controller._model.add_object(
+            "PMPCIRC01",
+            {
+                "OBJTYP": "PMPCIRC",
+                "SELECT": "GPM",
+            },
+        )
+
+        mode = controller.get_pump_circuit_mode("PMPCIRC01")
+        assert mode == "GPM"
+
+    def test_get_pump_circuit_limits(self, controller):
+        """Test get_pump_circuit_limits returns limits from parent pump."""
+        controller._model.add_object(
+            "PUMP1",
+            {
+                "OBJTYP": "PUMP",
+                "SUBTYP": "VSF",
+                "MIN": "450",
+                "MAX": "3450",
+                "MINF": "15",
+                "MAXF": "140",
+            },
+        )
+        controller._model.add_object(
+            "PMPCIRC01",
+            {
+                "OBJTYP": "PMPCIRC",
+                "PARENT": "PUMP1",
+            },
+        )
+
+        limits = controller.get_pump_circuit_limits("PMPCIRC01")
+        assert limits["rpm"]["min"] == 450
+        assert limits["rpm"]["max"] == 3450
+        assert limits["gpm"]["min"] == 15
+        assert limits["gpm"]["max"] == 140
+
 
 class TestICConnectionHandler:
     """Test ICConnectionHandler class."""

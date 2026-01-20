@@ -271,10 +271,22 @@ class PoolModel:
 
         Returns:
             The created/updated PoolObject, or None if type not in attribute map
+            or if required attributes are missing
         """
         pool_obj = self._objects.get(objnam)
 
         if pool_obj is None:
+            # Validate required OBJTYP attribute before creating object
+            # Some firmware versions (3.008+) return objects like _FDR where
+            # all params are stripped during pruning (key==value pattern)
+            if OBJTYP_ATTR not in params:
+                _LOGGER.debug(
+                    "Skipping object %s: missing required OBJTYP attribute (params: %s)",
+                    objnam,
+                    params,
+                )
+                return None
+
             pool_obj = PoolObject(objnam, params)
             if pool_obj.objtype in self._attribute_map:
                 self._objects[objnam] = pool_obj
