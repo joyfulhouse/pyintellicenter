@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.12] - 2026-01-21
+
+### Added
+
+- **Cooling capability detection** for heat pump systems:
+  - `body_supports_cooling(body_objnam)` - Check if a body's heater supports cooling (UltraTemp heat pumps)
+  - Returns `True` for bodies with SUBTYP="ULTRA" heaters, `False` for gas/solar/generic heaters
+  - Enables Home Assistant integration to conditionally create climate entities with dual setpoints
+
 ## [0.1.11] - 2026-01-21
 
 ### Added

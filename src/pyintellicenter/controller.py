@@ -30,6 +30,7 @@ from .attributes import (
     CYACID_ATTR,
     EXTINSTR_TYPE,
     GPM_ATTR,
+    HEATER_ATTR,
     HEATER_TYPE,
     HITMP_ATTR,
     HTMODE_ATTR,
@@ -40,6 +41,7 @@ from .attributes import (
     MIN_ATTR,
     MINF_ATTR,
     MODE_ATTR,
+    NULL_OBJNAM,
     OBJTYP_ATTR,
     ORPHI_ATTR,
     ORPLO_ATTR,
@@ -1468,6 +1470,46 @@ class ICModelController(ICBaseController):
             htmode = obj[HTMODE_ATTR]
             return htmode is not None and htmode != "0"
         return False
+
+    def body_supports_cooling(self, body_objnam: str) -> bool:
+        """Check if a body has a heater that supports cooling.
+
+        UltraTemp heat pumps (SUBTYP="ULTRA") support both heating and cooling.
+        Gas heaters (SUBTYP="HEATER"), solar heaters (SUBTYP="SOLAR"), and
+        generic heaters (SUBTYP="GENERIC") do not support cooling.
+
+        This is determined by checking the heater's SUBTYP attribute.
+        UltraTemp heat pumps are the primary pool equipment that can both
+        heat and cool water.
+
+        Args:
+            body_objnam: Object name of the body (pool or spa)
+
+        Returns:
+            True if the body's heater supports cooling (is an UltraTemp heat pump)
+
+        Example:
+            if controller.body_supports_cooling("B1101"):
+                # Show both heating and cooling setpoints
+                heat_sp = controller.get_body_heating_setpoint("B1101")
+                cool_sp = controller.get_body_cooling_setpoint("B1101")
+        """
+        body = self._model[body_objnam]
+        if not body:
+            return False
+
+        # Get the heater reference from the body
+        heater_objnam = body[HEATER_ATTR]
+        if not heater_objnam or heater_objnam == NULL_OBJNAM:
+            return False
+
+        # Look up the heater object
+        heater = self._model[heater_objnam]
+        if not heater:
+            return False
+
+        # UltraTemp heat pumps have SUBTYP="ULTRA" and support cooling
+        return bool(heater[SUBTYP_ATTR] == "ULTRA")
 
     # =========================================================================
     # Chemistry Helpers (for Home Assistant sensor entities)
