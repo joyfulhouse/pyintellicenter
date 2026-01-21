@@ -35,10 +35,10 @@ SCHED_ATTRIBUTES = {
     GROUP_ATTR,  # Schedule group
     HEATER_ATTR,  # Set to HEATER objnam if schedule should trigger heating
     # '00000' for off, '00001' for Don't Change
-    "HITMP",  # (int) High temperature setting
+    "HITMP",  # (int) Cooling setpoint for schedule (cool down to this temperature)
     HNAME_ATTR,  # Same as objnam
     LISTORD_ATTR,  # (int) Used to order in UI
-    LOTMP_ATTR,  # (int) When heater is set, this is the desired temperature
+    LOTMP_ATTR,  # (int) Heat setpoint for schedule (heat up to this temperature)
     MODE_ATTR,  # (str) Schedule mode
     READY_ATTR,  # (ON/OFF) Ready state
     "SINGLE",  # (ON/OFF) ON if the schedule should not repeat

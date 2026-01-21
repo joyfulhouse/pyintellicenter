@@ -37,12 +37,12 @@ BODY_ATTRIBUTES = {
     CIRCUIT_ATTR,  # (objnam) Associated circuit
     "FILTER",  # (objnam) Circuit object that filters this body
     HEATER_ATTR,  # (objnam) Associated heater
-    HITMP_ATTR,  # (int) Maximum temperature setting
+    HITMP_ATTR,  # (int) Cooling setpoint (cool down to this temperature)
     HNAME_ATTR,  # equals to OBJNAM
     HTMODE_ATTR,  # (int) >0 if currently heating, 0 if not
     "HTSRC",  # (objnam) the heating source (or '00000')
     LISTORD_ATTR,  # (int) used to order in UI
-    LOTMP_ATTR,  # (int) Desired temperature setpoint
+    LOTMP_ATTR,  # (int) Heat setpoint (heat up to this temperature)
     LSTTMP_ATTR,  # (int) Last recorded temperature
     "MANHT",  # Manual heating
     "MANUAL",  # (int) Manual mode

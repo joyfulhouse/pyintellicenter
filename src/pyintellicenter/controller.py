@@ -31,6 +31,7 @@ from .attributes import (
     EXTINSTR_TYPE,
     GPM_ATTR,
     HEATER_TYPE,
+    HITMP_ATTR,
     HTMODE_ATTR,
     LIGHT_EFFECTS,
     LOTMP_ATTR,
@@ -748,16 +749,56 @@ class ICModelController(ICBaseController):
         return await self._queue_property_change(body_objnam, {MODE_ATTR: str(mode.value)})
 
     async def set_setpoint(self, body_objnam: str, temperature: int) -> dict[str, Any]:
-        """Set the temperature setpoint for a body of water.
+        """Set the heating setpoint for a body of water.
+
+        This is the temperature the system will heat UP to.
+        Alias for set_heating_setpoint().
 
         Args:
             body_objnam: Object name of the body (pool or spa)
-            temperature: Target temperature (units match system config)
+            temperature: Target heating temperature (units match system config)
 
         Returns:
             Response dictionary
         """
         return await self._queue_property_change(body_objnam, {LOTMP_ATTR: str(temperature)})
+
+    async def set_heating_setpoint(self, body_objnam: str, temperature: int) -> dict[str, Any]:
+        """Set the heating setpoint for a body of water.
+
+        This is the temperature the system will heat UP to (LOTMP attribute).
+        For the cooling setpoint, use set_cooling_setpoint().
+
+        Args:
+            body_objnam: Object name of the body (pool or spa)
+            temperature: Target heating temperature (units match system config)
+
+        Returns:
+            Response dictionary
+
+        Example:
+            await controller.set_heating_setpoint("B1101", 84)
+        """
+        return await self._queue_property_change(body_objnam, {LOTMP_ATTR: str(temperature)})
+
+    async def set_cooling_setpoint(self, body_objnam: str, temperature: int) -> dict[str, Any]:
+        """Set the cooling setpoint for a body of water.
+
+        This is the temperature the system will cool DOWN to (HITMP attribute).
+        Only relevant for systems with heat pumps or chillers that support cooling.
+        The cooling setpoint must be higher than the heat setpoint.
+
+        Args:
+            body_objnam: Object name of the body (pool or spa)
+            temperature: Target cooling temperature (units match system config)
+
+        Returns:
+            Response dictionary
+
+        Example:
+            await controller.set_cooling_setpoint("B1101", 86)
+        """
+        return await self._queue_property_change(body_objnam, {HITMP_ATTR: str(temperature)})
 
     async def set_super_chlorinate(self, chem_objnam: str, enabled: bool) -> dict[str, Any]:
         """Enable or disable super chlorination (boost mode).
@@ -1354,15 +1395,47 @@ class ICModelController(ICBaseController):
         return self._get_attr_as_int(body_objnam, TEMP_ATTR)
 
     def get_body_setpoint(self, body_objnam: str) -> int | None:
-        """Get the temperature setpoint for a body.
+        """Get the heating setpoint for a body.
+
+        This is the temperature the system will heat UP to.
+        Alias for get_body_heating_setpoint().
 
         Args:
             body_objnam: Object name of the body (pool or spa)
 
         Returns:
-            Setpoint temperature as integer, or None if unavailable
+            Heating setpoint temperature as integer, or None if unavailable
         """
         return self._get_attr_as_int(body_objnam, LOTMP_ATTR)
+
+    def get_body_heating_setpoint(self, body_objnam: str) -> int | None:
+        """Get the heating setpoint for a body.
+
+        This is the temperature the system will heat UP to (LOTMP attribute).
+        For the cooling setpoint, use get_body_cooling_setpoint().
+
+        Args:
+            body_objnam: Object name of the body (pool or spa)
+
+        Returns:
+            Heating setpoint temperature as integer, or None if unavailable
+        """
+        return self._get_attr_as_int(body_objnam, LOTMP_ATTR)
+
+    def get_body_cooling_setpoint(self, body_objnam: str) -> int | None:
+        """Get the cooling setpoint for a body.
+
+        This is the temperature the system will cool DOWN to (HITMP attribute).
+        Only relevant for systems with heat pumps or chillers that support cooling.
+        The cooling setpoint must be higher than the heat setpoint.
+
+        Args:
+            body_objnam: Object name of the body (pool or spa)
+
+        Returns:
+            Cooling setpoint temperature as integer, or None if unavailable
+        """
+        return self._get_attr_as_int(body_objnam, HITMP_ATTR)
 
     def get_body_heat_mode(self, body_objnam: str) -> HeaterType | None:
         """Get the current heat mode for a body.
