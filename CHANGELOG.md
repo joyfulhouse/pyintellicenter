@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.11] - 2026-01-21
+
+### Added
+
+- **Cooling setpoint support** for heat pump systems (UltraTemp, etc.):
+  - `get_body_cooling_setpoint(body_objnam)` - Get the cooling setpoint (temperature to cool down to)
+  - `set_cooling_setpoint(body_objnam, temperature)` - Set the cooling setpoint
+  - `get_body_heating_setpoint(body_objnam)` - Explicit getter for heating setpoint (alias for `get_body_setpoint`)
+  - `set_heating_setpoint(body_objnam, temperature)` - Explicit setter for heating setpoint (alias for `set_setpoint`)
+
+### Changed
+
+- **Clarified HITMP/LOTMP attribute meanings**:
+  - `HITMP` is the **cooling setpoint** (temperature to cool DOWN to)
+  - `LOTMP` is the **heating setpoint** (temperature to heat UP to)
+  - Updated documentation in `body.py` and `schedule.py` to reflect correct meanings
+
+## [0.1.10] - 2026-01-14
+
+### Changed
+
+- **Pump mode switch handling**: `get_pump_circuit_speed()` now returns `None` when speed value is outside valid range for current mode (instead of clamping), allowing UI to show "unavailable" during mode transition
+
+### Added
+
+- `refresh_pump_circuit_speed(pmpcirc_objnam)` - Async method to request fresh SPEED value from IntelliCenter after mode change
+
+## [0.1.9] - 2026-01-13
+
+### Added
+
+- **Pump circuit speed helpers**:
+  - `get_pump_circuits()` - Get all PMPCIRC objects
+  - `get_pump_circuit_speed(pmpcirc_objnam)` - Get speed clamped to valid range for current mode
+  - `get_pump_circuit_mode(pmpcirc_objnam)` - Get current mode (RPM/GPM)
+  - `get_pump_circuit_limits(pmpcirc_objnam)` - Get min/max limits for both modes
+
+### Fixed
+
+- Skip objects missing `OBJTYP` attribute instead of crashing (firmware 3.008+ compatibility)
+
+## [0.1.8] - 2026-01-10
+
+### Added
+
+- **IntelliChem dosing volume attributes**:
+  - `PHVOL_ATTR` - Cumulative pH chemical dosing volume in mL
+  - `ORPVOL_ATTR` - Cumulative ORP chemical dosing volume in mL
+
+## [0.1.7] - 2025-12-22
+
+### Fixed
+
+- **Light effect 404 error**: Fixed `set_light_effect()` returning 404 errors from IntelliCenter. The method now correctly uses `ACT` attribute (action trigger) instead of `USE` attribute (state reflection) when setting light effects.
+
 ## [0.1.6] - 2025-11-28
 
 ### Changed
@@ -348,7 +403,12 @@ First stable release of pyintellicenter.
 - `orjson` for fast JSON serialization
 - Python 3.11+ required
 
-[Unreleased]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.6...HEAD
+[Unreleased]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.11...HEAD
+[0.1.11]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.10...v0.1.11
+[0.1.10]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.9...v0.1.10
+[0.1.9]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.8...v0.1.9
+[0.1.8]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.7...v0.1.8
+[0.1.7]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.3...v0.1.4

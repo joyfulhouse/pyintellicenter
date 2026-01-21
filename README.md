@@ -206,7 +206,8 @@ print(f"Uses Metric: {info.uses_metric}")
 await controller.set_circuit_state("POOL", True)
 await controller.set_circuit_state("SPA", False)
 await controller.set_heat_mode("B1101", HeaterType.HEATER)
-await controller.set_setpoint("B1101", 84)
+await controller.set_heating_setpoint("B1101", 84)  # Heat to 84°
+await controller.set_cooling_setpoint("B1101", 88)  # Cool to 88° (for heat pumps)
 await controller.set_super_chlorinate("C0001", True)
 await controller.set_light_effect("C0003", "PARTY")
 
@@ -243,7 +244,8 @@ hardware = await controller.get_hardware_definition()  # Full equipment hierarch
 # Temperature helpers
 unit = controller.get_temperature_unit()  # "F" or "C"
 temp = controller.get_body_temperature("B1101")
-setpoint = controller.get_body_setpoint("B1101")
+heat_setpoint = controller.get_body_heating_setpoint("B1101")  # Heat to this temp
+cool_setpoint = controller.get_body_cooling_setpoint("B1101")  # Cool to this temp
 heat_mode = controller.get_body_heat_mode("B1101")
 is_heating = controller.is_body_heating("B1101")
 
