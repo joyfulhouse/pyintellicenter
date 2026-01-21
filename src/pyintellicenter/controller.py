@@ -1471,6 +1471,35 @@ class ICModelController(ICBaseController):
             return htmode is not None and htmode != "0"
         return False
 
+    def is_body_cooling(self, body_objnam: str) -> bool:
+        """Check if a body is actively cooling.
+
+        This checks the heater's COOL attribute to determine if the system
+        is currently in cooling mode. Only UltraTemp heat pumps support cooling.
+
+        Args:
+            body_objnam: Object name of the body (pool or spa)
+
+        Returns:
+            True if cooling is active
+        """
+        body = self._model[body_objnam]
+        if not body:
+            return False
+
+        # Get the heater reference from the body
+        heater_objnam = body[HEATER_ATTR]
+        if not heater_objnam or heater_objnam == NULL_OBJNAM:
+            return False
+
+        # Look up the heater object
+        heater = self._model[heater_objnam]
+        if not heater:
+            return False
+
+        # Check if the heater's COOL attribute is ON
+        return bool(heater["COOL"] == "ON")
+
     def body_supports_cooling(self, body_objnam: str) -> bool:
         """Check if a body has a heater that supports cooling.
 

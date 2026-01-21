@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.13] - 2026-01-21
+
+### Added
+
+- **Active cooling detection** for heat pump systems:
+  - `is_body_cooling(body_objnam)` - Check if a body is actively cooling
+  - Checks heater's `COOL` attribute to determine if cooling mode is active
+  - Enables Home Assistant integration to show `HVACAction.COOLING` state
+
 ## [0.1.12] - 2026-01-21
 
 ### Added
