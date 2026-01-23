@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.14] - 2026-01-23
+
+### Fixed
+
+- **body_supports_cooling() now checks ALL heaters** that support a body, not just the currently assigned one
+  - Previously, climate entities weren't created when the heater was off or a different heater was selected
+  - Now checks all heaters in the system to find any that support cooling for the body
+  - Contributed by @scottshanafelt (PR #19)
+
 ## [0.1.13] - 2026-01-21
 
 ### Added

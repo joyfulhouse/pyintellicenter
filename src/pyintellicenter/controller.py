@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 from .attributes import (
     ALK_ATTR,
     ASSIGN_ATTR,
+    BODY_ATTR,
     BODY_TYPE,
     CALC_ATTR,
     CHEM_TYPE,
@@ -1507,15 +1508,15 @@ class ICModelController(ICBaseController):
         Gas heaters (SUBTYP="HEATER"), solar heaters (SUBTYP="SOLAR"), and
         generic heaters (SUBTYP="GENERIC") do not support cooling.
 
-        This is determined by checking the heater's SUBTYP attribute.
-        UltraTemp heat pumps are the primary pool equipment that can both
-        heat and cool water.
+        This checks ALL heaters that support this body, not just the currently
+        active one, so it returns True even if the system is currently off or
+        using a different heater.
 
         Args:
             body_objnam: Object name of the body (pool or spa)
 
         Returns:
-            True if the body's heater supports cooling (is an UltraTemp heat pump)
+            True if any available heater for this body supports cooling
 
         Example:
             if controller.body_supports_cooling("B1101"):
@@ -1525,20 +1526,27 @@ class ICModelController(ICBaseController):
         """
         body = self._model[body_objnam]
         if not body:
+            _LOGGER.warning("body_supports_cooling: body %s not found", body_objnam)
             return False
 
-        # Get the heater reference from the body
-        heater_objnam = body[HEATER_ATTR]
-        if not heater_objnam or heater_objnam == NULL_OBJNAM:
-            return False
+        # Check ALL heaters to see if any support this body AND can cool
+        all_heaters = list(self._model.get_by_type(HEATER_TYPE))
 
-        # Look up the heater object
-        heater = self._model[heater_objnam]
-        if not heater:
-            return False
+        for heater in all_heaters:
+            # Check if this heater supports this body
+            supported_bodies = heater[BODY_ATTR]
+            if supported_bodies:
+                body_list = supported_bodies.split(" ")
+                if body_objnam in body_list:
+                    # Check if this heater supports cooling via either:
+                    # 1. Subtype being ULTRA (UltraTemp heat pump)
+                    # 2. Having a COOL attribute set to "ON"
+                    has_ultra = heater.subtype == "ULTRA"
+                    has_cool = heater["COOL"] == "ON"
+                    if has_ultra or has_cool:
+                        return True
 
-        # UltraTemp heat pumps have SUBTYP="ULTRA" and support cooling
-        return bool(heater[SUBTYP_ATTR] == "ULTRA")
+        return False
 
     # =========================================================================
     # Chemistry Helpers (for Home Assistant sensor entities)
