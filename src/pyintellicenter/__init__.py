@@ -181,7 +181,7 @@ try:
 except ImportError:
     _DISCOVERY_AVAILABLE = False
 
-__version__ = "0.1.13"
+__version__ = "0.1.14"
 
 __all__ = [
     # Version
