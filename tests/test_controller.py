@@ -1243,6 +1243,47 @@ class TestICModelController:
         assert len(entities["circuit_groups"]) == 1
         assert len(entities["color_light_groups"]) == 1
 
+    @pytest.mark.asyncio
+    async def test_set_light_effect_uses_act_attr(self, controller):
+        """Regression test: set_light_effect must use ACT attribute, not USE.
+
+        IntelliCenter returns 404 when USE is sent via SETPARAMLIST. The ACT
+        attribute is the action trigger; USE reflects current state read-only.
+        Regression introduced in v0.1.8 (pump speed commit) and fixed in v0.1.15.
+        """
+        controller._connection = MagicMock()
+        controller._connection.connected = True
+        controller._connection.send_request = AsyncMock(
+            return_value={"response": "200", "objectList": []}
+        )
+
+        await controller.set_light_effect("C001", "PARTY")
+
+        call_args = controller._connection.send_request.call_args
+        assert call_args[0][0] == "SETPARAMLIST"
+        params = call_args[1]["objectList"][0]["params"]
+        assert "ACT" in params, "set_light_effect must send ACT attribute (not USE)"
+        assert params["ACT"] == "PARTY"
+        assert "USE" not in params, "set_light_effect must NOT send USE attribute"
+
+    @pytest.mark.asyncio
+    async def test_set_light_effect_invalid_raises(self, controller):
+        """Test set_light_effect raises ValueError for unknown effect codes."""
+        with pytest.raises(ValueError, match="Invalid effect"):
+            await controller.set_light_effect("C001", "NOTANEFFECT")
+
+    def test_get_light_effect_reads_use_attr(self, controller, model):
+        """Test get_light_effect reads USE attribute (state reflection)."""
+        model.add_object(
+            "C001",
+            {"OBJTYP": "CIRCUIT", "SUBTYP": "INTELLI", "SNAME": "Light", "USE": "CARIB"},
+        )
+        assert controller.get_light_effect("C001") == "CARIB"
+
+    def test_get_light_effect_none_for_missing(self, controller, model):
+        """Test get_light_effect returns None when object doesn't exist."""
+        assert controller.get_light_effect("NONEXISTENT") is None
+
 
 class TestRequestCoalescing:
     """Test request coalescing behavior in ICModelController."""
