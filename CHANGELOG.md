@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.15] - 2026-02-26
+
+### Fixed
+
+- **set_light_effect() 404 error regression** (re-fixes issue first fixed in v0.1.7):
+  - `set_light_effect()` was sending `USE` attribute in `SETPARAMLIST`, which IntelliCenter rejects with a 404 error
+  - Correctly uses `ACT` (action trigger) attribute to set light effects; `USE` is read-only state reflection
+  - Regression was introduced in v0.1.8 (pump speed helpers commit) which accidentally removed the `ACT_ATTR` import
+  - Added regression tests to prevent recurrence (fixes #30)
+
 ## [0.1.14] - 2026-01-23
 
 ### Fixed
