@@ -2180,3 +2180,403 @@ class TestICConnectionHandler:
         # Should not have started any tasks
         assert handler._starter_task is None
         assert handler._disconnect_debounce_task is None
+
+
+# =============================================================================
+# get_saturation_index
+# =============================================================================
+
+
+class TestGetSaturationIndex:
+    """Tests for get_saturation_index()."""
+
+    @pytest.fixture
+    def model(self):
+        return PoolModel()
+
+    @pytest.fixture
+    def controller(self, model):
+        ctrl = ICModelController("192.168.1.100", model, 6681)
+        ctrl._connection = MagicMock()
+        ctrl._connection.connected = True
+        ctrl._connection.send_request = AsyncMock(
+            return_value={"response": "200", "objectList": []}
+        )
+        return ctrl
+
+    def test_returns_value_when_present(self, controller, model):
+        """Returns the saturation index float when SINDEX is set."""
+        model.add_object(
+            "CHM01",
+            {"OBJTYP": "CHEM", "SUBTYP": "ICHEM", "SNAME": "IntelliChem", "SINDEX": "1.94"},
+        )
+        result = controller.get_saturation_index("CHM01")
+        assert result == pytest.approx(1.94)
+
+    def test_returns_negative_value(self, controller, model):
+        """Returns negative saturation index (corrosive water)."""
+        model.add_object(
+            "CHM01",
+            {"OBJTYP": "CHEM", "SUBTYP": "ICHEM", "SNAME": "IntelliChem", "SINDEX": "-0.42"},
+        )
+        result = controller.get_saturation_index("CHM01")
+        assert result == pytest.approx(-0.42)
+
+    def test_returns_none_when_missing(self, controller, model):
+        """Returns None when SINDEX attribute is not present."""
+        model.add_object(
+            "CHM01",
+            {"OBJTYP": "CHEM", "SUBTYP": "ICHEM", "SNAME": "IntelliChem"},
+        )
+        assert controller.get_saturation_index("CHM01") is None
+
+    def test_returns_none_for_unknown_object(self, controller):
+        """Returns None when the object does not exist in the model."""
+        assert controller.get_saturation_index("NONEXISTENT") is None
+
+    def test_returns_none_for_ichlor(self, controller, model):
+        """Returns None for IntelliChlor (which does not provide SINDEX)."""
+        model.add_object(
+            "CHR01",
+            {"OBJTYP": "CHEM", "SUBTYP": "ICHLOR", "SNAME": "IntelliChlor"},
+        )
+        assert controller.get_saturation_index("CHR01") is None
+
+
+# =============================================================================
+# get_body_last_temperature
+# =============================================================================
+
+
+class TestGetBodyLastTemperature:
+    """Tests for get_body_last_temperature()."""
+
+    @pytest.fixture
+    def model(self):
+        return PoolModel()
+
+    @pytest.fixture
+    def controller(self, model):
+        ctrl = ICModelController("192.168.1.100", model, 6681)
+        ctrl._connection = MagicMock()
+        ctrl._connection.connected = True
+        ctrl._connection.send_request = AsyncMock(
+            return_value={"response": "200", "objectList": []}
+        )
+        return ctrl
+
+    def test_returns_value_when_body_is_on(self, controller, model):
+        """Returns last temperature when pool circuit is active."""
+        model.add_object(
+            "B1101",
+            {"OBJTYP": "BODY", "SUBTYP": "POOL", "SNAME": "Pool", "STATUS": "ON", "LSTTMP": "79"},
+        )
+        assert controller.get_body_last_temperature("B1101") == 79
+
+    def test_returns_value_when_body_is_off(self, controller, model):
+        """Returns last temperature even when pool circuit is off.
+
+        This is the key advantage over get_body_temperature() — LSTTMP is
+        always valid, TEMP is only valid when STATUS=ON.
+        """
+        model.add_object(
+            "B1101",
+            {"OBJTYP": "BODY", "SUBTYP": "POOL", "SNAME": "Pool", "STATUS": "OFF", "LSTTMP": "74"},
+        )
+        assert controller.get_body_last_temperature("B1101") == 74
+
+    def test_returns_none_when_missing(self, controller, model):
+        """Returns None when LSTTMP attribute is not present."""
+        model.add_object(
+            "B1101",
+            {"OBJTYP": "BODY", "SUBTYP": "POOL", "SNAME": "Pool", "STATUS": "OFF"},
+        )
+        assert controller.get_body_last_temperature("B1101") is None
+
+    def test_returns_none_for_unknown_object(self, controller):
+        """Returns None when the body object does not exist in the model."""
+        assert controller.get_body_last_temperature("NONEXISTENT") is None
+
+    def test_works_for_spa(self, controller, model):
+        """Returns last temperature for spa body."""
+        model.add_object(
+            "B1202",
+            {"OBJTYP": "BODY", "SUBTYP": "SPA", "SNAME": "Spa", "STATUS": "OFF", "LSTTMP": "102"},
+        )
+        assert controller.get_body_last_temperature("B1202") == 102
+
+
+# =============================================================================
+# is_heater_ready / is_heater_heating / get_heater_for_body
+# =============================================================================
+
+
+class TestHeaterStateHelpers:
+    """Tests for is_heater_ready(), is_heater_heating(), and get_heater_for_body()."""
+
+    @pytest.fixture
+    def model(self):
+        return PoolModel()
+
+    @pytest.fixture
+    def controller(self, model):
+        ctrl = ICModelController("192.168.1.100", model, 6681)
+        ctrl._connection = MagicMock()
+        ctrl._connection.connected = True
+        ctrl._connection.send_request = AsyncMock(
+            return_value={"response": "200", "objectList": []}
+        )
+        return ctrl
+
+    def test_is_heater_ready_true(self, controller, model):
+        """Returns True when heater READY attribute is ON."""
+        model.add_object(
+            "H0001",
+            {"OBJTYP": "HEATER", "SUBTYP": "GENERIC", "SNAME": "Gas Heater", "STATUS": "ON", "READY": "ON"},
+        )
+        assert controller.is_heater_ready("H0001") is True
+
+    def test_is_heater_ready_false(self, controller, model):
+        """Returns False when heater READY attribute is OFF."""
+        model.add_object(
+            "H0001",
+            {"OBJTYP": "HEATER", "SUBTYP": "GENERIC", "SNAME": "Gas Heater", "STATUS": "ON", "READY": "OFF"},
+        )
+        assert controller.is_heater_ready("H0001") is False
+
+    def test_is_heater_ready_false_for_missing_object(self, controller):
+        """Returns False for non-existent heater objects."""
+        assert controller.is_heater_ready("NONEXISTENT") is False
+
+    def test_is_heater_ready_false_when_ready_missing(self, controller, model):
+        """Returns False when READY attribute is absent."""
+        model.add_object(
+            "H0001",
+            {"OBJTYP": "HEATER", "SUBTYP": "GENERIC", "SNAME": "Gas Heater", "STATUS": "ON"},
+        )
+        assert controller.is_heater_ready("H0001") is False
+
+    def test_is_heater_heating_true(self, controller, model):
+        """Returns True when heater HEATING attribute is ON."""
+        model.add_object(
+            "H0001",
+            {"OBJTYP": "HEATER", "SUBTYP": "GENERIC", "SNAME": "Gas Heater", "STATUS": "ON", "HEATING": "ON"},
+        )
+        assert controller.is_heater_heating("H0001") is True
+
+    def test_is_heater_heating_false(self, controller, model):
+        """Returns False when heater HEATING attribute is OFF."""
+        model.add_object(
+            "H0001",
+            {"OBJTYP": "HEATER", "SUBTYP": "GENERIC", "SNAME": "Gas Heater", "STATUS": "ON", "HEATING": "OFF"},
+        )
+        assert controller.is_heater_heating("H0001") is False
+
+    def test_is_heater_heating_false_for_missing_object(self, controller):
+        """Returns False for non-existent heater objects."""
+        assert controller.is_heater_heating("NONEXISTENT") is False
+
+    def test_is_heater_heating_false_when_attribute_missing(self, controller, model):
+        """Returns False when HEATING attribute is absent."""
+        model.add_object(
+            "H0001",
+            {"OBJTYP": "HEATER", "SUBTYP": "GENERIC", "SNAME": "Gas Heater", "STATUS": "ON"},
+        )
+        assert controller.is_heater_heating("H0001") is False
+
+    def test_get_heater_for_body_returns_heater(self, controller, model):
+        """Returns the heater PoolObject when a heater is assigned to the body."""
+        model.add_object(
+            "H0001",
+            {"OBJTYP": "HEATER", "SUBTYP": "GENERIC", "SNAME": "Gas Heater"},
+        )
+        model.add_object(
+            "B1101",
+            {"OBJTYP": "BODY", "SUBTYP": "POOL", "SNAME": "Pool", "STATUS": "ON", "HEATER": "H0001"},
+        )
+        result = controller.get_heater_for_body("B1101")
+        assert result is not None
+        assert result.objnam == "H0001"
+        assert result.sname == "Gas Heater"
+
+    def test_get_heater_for_body_returns_none_when_no_heater(self, controller, model):
+        """Returns None when body has no active heater (HEATER=00000)."""
+        model.add_object(
+            "B1101",
+            {"OBJTYP": "BODY", "SUBTYP": "POOL", "SNAME": "Pool", "STATUS": "ON", "HEATER": "00000"},
+        )
+        assert controller.get_heater_for_body("B1101") is None
+
+    def test_get_heater_for_body_returns_none_for_missing_body(self, controller):
+        """Returns None when the body object does not exist in the model."""
+        assert controller.get_heater_for_body("NONEXISTENT") is None
+
+    def test_get_heater_for_body_returns_none_when_heater_attr_missing(self, controller, model):
+        """Returns None when HEATER attribute is absent."""
+        model.add_object(
+            "B1101",
+            {"OBJTYP": "BODY", "SUBTYP": "POOL", "SNAME": "Pool", "STATUS": "OFF"},
+        )
+        assert controller.get_heater_for_body("B1101") is None
+
+
+# =============================================================================
+# Schedule helpers
+# =============================================================================
+
+
+class TestScheduleHelpers:
+    """Tests for schedule read and write helper methods."""
+
+    @pytest.fixture
+    def model(self):
+        return PoolModel()
+
+    @pytest.fixture
+    def controller(self, model):
+        ctrl = ICModelController("192.168.1.100", model, 6681)
+        ctrl._connection = MagicMock()
+        ctrl._connection.connected = True
+        ctrl._connection.send_request = AsyncMock(
+            return_value={"response": "200", "objectList": []}
+        )
+        return ctrl
+
+    def _add_schedule(self, model, objnam="SCH00", **kwargs):
+        """Helper to add a schedule object to the model."""
+        params = {
+            "OBJTYP": "SCHED",
+            "SNAME": "Pool",
+            "STATUS": "ON",
+            "ACT": "OFF",
+            "CIRCUIT": "C0006",
+            "DAY": "MTWRFAU",
+            "TIME": "09,00,00",
+            "TIMOUT": "17,00,00",
+        }
+        params.update(kwargs)
+        model.add_object(objnam, params)
+
+    def test_is_schedule_enabled_true(self, controller, model):
+        """Returns True when schedule STATUS is ON."""
+        self._add_schedule(model, STATUS="ON")
+        assert controller.is_schedule_enabled("SCH00") is True
+
+    def test_is_schedule_enabled_false(self, controller, model):
+        """Returns False when schedule STATUS is OFF."""
+        self._add_schedule(model, STATUS="OFF")
+        assert controller.is_schedule_enabled("SCH00") is False
+
+    def test_is_schedule_enabled_false_for_missing(self, controller):
+        """Returns False for non-existent schedule objects."""
+        assert controller.is_schedule_enabled("NONEXISTENT") is False
+
+    def test_enabled_vs_active_distinction(self, controller, model):
+        """Confirms STATUS (enabled) and ACT (currently running) are independent."""
+        self._add_schedule(model, STATUS="ON", ACT="OFF")
+        assert controller.is_schedule_enabled("SCH00") is True
+
+    def test_get_schedule_circuit(self, controller, model):
+        """Returns the circuit object name for the schedule."""
+        self._add_schedule(model, CIRCUIT="C0006")
+        assert controller.get_schedule_circuit("SCH00") == "C0006"
+
+    def test_get_schedule_circuit_none_for_missing(self, controller):
+        """Returns None for non-existent schedule."""
+        assert controller.get_schedule_circuit("NONEXISTENT") is None
+
+    def test_get_schedule_start_time(self, controller, model):
+        """Returns start time string in HH,MM,SS format."""
+        self._add_schedule(model, TIME="09,00,00")
+        assert controller.get_schedule_start_time("SCH00") == "09,00,00"
+
+    def test_get_schedule_start_time_none_for_missing(self, controller):
+        """Returns None for non-existent schedule."""
+        assert controller.get_schedule_start_time("NONEXISTENT") is None
+
+    def test_get_schedule_stop_time(self, controller, model):
+        """Returns stop time string in HH,MM,SS format."""
+        self._add_schedule(model, TIMOUT="17,00,00")
+        assert controller.get_schedule_stop_time("SCH00") == "17,00,00"
+
+    def test_get_schedule_stop_time_none_for_missing(self, controller):
+        """Returns None for non-existent schedule."""
+        assert controller.get_schedule_stop_time("NONEXISTENT") is None
+
+    def test_get_schedule_days_all_days(self, controller, model):
+        """Returns MTWRFAU for a schedule that runs every day."""
+        self._add_schedule(model, DAY="MTWRFAU")
+        assert controller.get_schedule_days("SCH00") == "MTWRFAU"
+
+    def test_get_schedule_days_weekdays_only(self, controller, model):
+        """Returns MTWRF for a weekdays-only schedule."""
+        self._add_schedule(model, DAY="MTWRF")
+        assert controller.get_schedule_days("SCH00") == "MTWRF"
+
+    def test_get_schedule_days_weekends_only(self, controller, model):
+        """Returns AU for a weekends-only schedule."""
+        self._add_schedule(model, DAY="AU")
+        assert controller.get_schedule_days("SCH00") == "AU"
+
+    def test_get_schedule_days_none_for_missing(self, controller):
+        """Returns None for non-existent schedule."""
+        assert controller.get_schedule_days("NONEXISTENT") is None
+
+    @pytest.mark.asyncio
+    async def test_set_schedule_enabled_true(self, controller):
+        """Sends STATUS=ON to enable a schedule."""
+        await controller.set_schedule_enabled("SCH00", True)
+
+        call_args = controller._connection.send_request.call_args
+        assert call_args[0][0] == "SETPARAMLIST"
+        obj = call_args[1]["objectList"][0]
+        assert obj["objnam"] == "SCH00"
+        assert obj["params"]["STATUS"] == "ON"
+
+    @pytest.mark.asyncio
+    async def test_set_schedule_enabled_false(self, controller):
+        """Sends STATUS=OFF to disable a schedule."""
+        await controller.set_schedule_enabled("SCH00", False)
+
+        call_args = controller._connection.send_request.call_args
+        obj = call_args[1]["objectList"][0]
+        assert obj["objnam"] == "SCH00"
+        assert obj["params"]["STATUS"] == "OFF"
+
+    @pytest.mark.asyncio
+    async def test_set_schedule_enabled_different_schedules(self, controller):
+        """Can target different schedule objects independently."""
+        await controller.set_schedule_enabled("SCH01", False)
+
+        call_args = controller._connection.send_request.call_args
+        obj = call_args[1]["objectList"][0]
+        assert obj["objnam"] == "SCH01"
+        assert obj["params"]["STATUS"] == "OFF"
+
+    @pytest.mark.asyncio
+    async def test_set_schedule_heating_setpoint(self, controller):
+        """Sends LOTMP with the target temperature."""
+        await controller.set_schedule_heating_setpoint("SCH00", 84)
+
+        call_args = controller._connection.send_request.call_args
+        assert call_args[0][0] == "SETPARAMLIST"
+        obj = call_args[1]["objectList"][0]
+        assert obj["objnam"] == "SCH00"
+        assert obj["params"]["LOTMP"] == "84"
+
+    @pytest.mark.asyncio
+    async def test_set_schedule_heating_setpoint_low_temp(self, controller):
+        """Sends a low temperature setpoint for energy-saving schedules."""
+        await controller.set_schedule_heating_setpoint("SCH00", 65)
+
+        call_args = controller._connection.send_request.call_args
+        obj = call_args[1]["objectList"][0]
+        assert obj["params"]["LOTMP"] == "65"
+
+    @pytest.mark.asyncio
+    async def test_set_schedule_uses_coalescing(self, controller):
+        """set_schedule_enabled uses the coalescing mechanism (SETPARAMLIST)."""
+        await controller.set_schedule_enabled("SCH00", True)
+
+        call_args = controller._connection.send_request.call_args
+        assert call_args[0][0] == "SETPARAMLIST"

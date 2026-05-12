@@ -34,10 +34,12 @@ from .attributes import (
     GPM_ATTR,
     HEATER_ATTR,
     HEATER_TYPE,
+    HEATING_ATTR,
     HITMP_ATTR,
     HTMODE_ATTR,
     LIGHT_EFFECTS,
     LOTMP_ATTR,
+    LSTTMP_ATTR,
     MAX_ATTR,
     MAXF_ATTR,
     MIN_ATTR,
@@ -61,12 +63,14 @@ from .attributes import (
     PUMP_TYPE,
     PWR_ATTR,
     QUALTY_ATTR,
+    READY_ATTR,
     RPM_ATTR,
     SALT_ATTR,
     SCHED_TYPE,
     SEC_ATTR,
     SELECT_ATTR,
     SENSE_TYPE,
+    SINDEX_ATTR,
     SNAME_ATTR,
     SOURCE_ATTR,
     SPEED_ATTR,
@@ -77,6 +81,8 @@ from .attributes import (
     SUPER_ATTR,
     SYSTEM_TYPE,
     TEMP_ATTR,
+    TIME_ATTR,
+    TIMOUT_ATTR,
     USE_ATTR,
     VACFLO_ATTR,
     VALVE_TYPE,
@@ -1639,6 +1645,338 @@ class ICModelController(ICBaseController):
             True if any alert is active
         """
         return len(self.get_chem_alerts(chem_objnam)) > 0
+
+    def get_saturation_index(self, chem_objnam: str) -> float | None:
+        """Get the Saturation Index (water balance score) for an IntelliChem controller.
+
+        The Saturation Index (also called the Langelier Saturation Index) is a
+        calculated value that indicates overall water balance. IntelliChem computes
+        it from pH, alkalinity, calcium hardness, cyanuric acid, and temperature.
+
+        Ideal range: -0.3 to +0.5
+        - Positive values: water is scale-forming (can deposit calcium)
+        - Negative values: water is corrosive (can etch surfaces)
+
+        Note: Only available on systems with IntelliChem (SUBTYP=ICHEM).
+        Returns None for IntelliChlor (SUBTYP=ICHLOR) controllers.
+
+        Args:
+            chem_objnam: Object name of the chemistry controller (e.g., "CHM01")
+
+        Returns:
+            Saturation Index as a float, or None if unavailable
+
+        Example:
+            si = controller.get_saturation_index("CHM01")
+            if si is not None and si > 0.5:
+                print("Water is scale-forming, consider reducing alkalinity")
+        """
+        return self._get_attr_as_float(chem_objnam, SINDEX_ATTR)
+
+    # =========================================================================
+    # Body Last Temperature Helper
+    # =========================================================================
+
+    def get_body_last_temperature(self, body_objnam: str) -> int | None:
+        """Get the last recorded temperature for a body of water.
+
+        Unlike get_body_temperature() which only returns a valid reading when the
+        body circuit is active (STATUS=ON), this method returns the most recently
+        recorded temperature regardless of whether the body is currently on or off.
+
+        This is the most reliable temperature source from IntelliCenter because:
+        - It is always populated, even when the pump/circuit is off
+        - It reflects the actual water temperature at last measurement
+        - It is not affected by sun heating of the equipment pad plumbing
+
+        For the most accurate real-time temperature, prefer a dedicated water
+        sensor (SENSE_TYPE with SUBTYP=POOL) if available, as it reads directly
+        from the pool water.
+
+        Args:
+            body_objnam: Object name of the body (e.g., "B1101" for Pool,
+                        "B1202" for Spa)
+
+        Returns:
+            Last recorded temperature as integer, or None if unavailable
+
+        Example:
+            # Works whether the pool circuit is on or off
+            temp = controller.get_body_last_temperature("B1101")
+        """
+        return self._get_attr_as_int(body_objnam, LSTTMP_ATTR)
+
+    # =========================================================================
+    # Heater State Helpers
+    # =========================================================================
+
+    def is_heater_ready(self, heater_objnam: str) -> bool:
+        """Check if a heater is ready to fire.
+
+        A heater that is enabled (STATUS=ON) may not be ready if it is in a
+        cool-down period, waiting for flow, or experiencing a fault condition.
+        READY=ON indicates the heater hardware is able to begin heating if
+        demanded by the body temperature setpoint.
+
+        Args:
+            heater_objnam: Object name of the heater (e.g., "H0001")
+
+        Returns:
+            True if the heater is ready to fire, False otherwise
+
+        Example:
+            if controller.is_heater_ready("H0001"):
+                print("Heater is ready")
+        """
+        obj = self._model[heater_objnam]
+        if not obj:
+            return False
+        return bool(obj[READY_ATTR] == STATUS_ON)
+
+    def is_heater_heating(self, heater_objnam: str) -> bool:
+        """Check if a heater is actively heating right now.
+
+        Unlike is_body_heating() which checks the body's HTMODE attribute,
+        this method checks the heater object's own HEATING attribute, which
+        indicates whether the heater flame/element is currently active.
+
+        A heater can be enabled (STATUS=ON) and ready (READY=ON) without
+        actively heating — it only heats when the water temperature is below
+        the setpoint and the body circuit is running.
+
+        Note: Not all heater types populate the HEATING attribute. Gas heaters
+        (SUBTYP=GENERIC) typically do. Returns False if the attribute is absent.
+
+        Args:
+            heater_objnam: Object name of the heater (e.g., "H0001")
+
+        Returns:
+            True if the heater is actively heating, False otherwise
+
+        Example:
+            if controller.is_heater_heating("H0001"):
+                print("Heater flame is on")
+        """
+        obj = self._model[heater_objnam]
+        if not obj:
+            return False
+        return bool(obj[HEATING_ATTR] == STATUS_ON)
+
+    def get_heater_for_body(self, body_objnam: str) -> PoolObject | None:
+        """Get the heater object currently assigned to a body of water.
+
+        Each body tracks its active heater via the HEATER attribute. This method
+        resolves that reference to the actual PoolObject, or returns None if no
+        heater is assigned or active.
+
+        Args:
+            body_objnam: Object name of the body (e.g., "B1101" for Pool)
+
+        Returns:
+            PoolObject for the assigned heater, or None if no heater is active
+
+        Example:
+            heater = controller.get_heater_for_body("B1101")
+            if heater:
+                print(f"Pool heater: {heater.sname}")
+        """
+        body = self._model[body_objnam]
+        if not body:
+            return None
+        heater_objnam = body[HEATER_ATTR]
+        if not heater_objnam or heater_objnam == NULL_OBJNAM:
+            return None
+        return self._model[heater_objnam]
+
+    # =========================================================================
+    # Schedule Helpers
+    # =========================================================================
+
+    def is_schedule_enabled(self, sched_objnam: str) -> bool:
+        """Check if a schedule is enabled (will run when its time comes).
+
+        Note the distinction between enabled and active:
+        - STATUS=ON means the schedule is enabled and will run at its scheduled time
+        - ACT=ON means the schedule is currently running right now
+
+        A schedule can be enabled (STATUS=ON) but not currently active (ACT=OFF)
+        when it is outside its scheduled time window.
+
+        Args:
+            sched_objnam: Object name of the schedule (e.g., "SCH00")
+
+        Returns:
+            True if the schedule is enabled, False if disabled
+
+        Example:
+            if controller.is_schedule_enabled("SCH00"):
+                print("Pool schedule is enabled")
+        """
+        obj = self._model[sched_objnam]
+        if not obj:
+            return False
+        return bool(obj[STATUS_ATTR] == STATUS_ON)
+
+    def get_schedule_circuit(self, sched_objnam: str) -> str | None:
+        """Get the object name of the circuit controlled by a schedule.
+
+        Args:
+            sched_objnam: Object name of the schedule (e.g., "SCH00")
+
+        Returns:
+            Object name of the controlled circuit (e.g., "C0006"), or None
+
+        Example:
+            circuit_objnam = controller.get_schedule_circuit("SCH00")
+            if circuit_objnam:
+                circuit = controller._model[circuit_objnam]
+                print(f"Schedule controls: {circuit.sname}")
+        """
+        obj = self._model[sched_objnam]
+        if not obj:
+            return None
+        circuit = obj[CIRCUIT_ATTR]
+        return str(circuit) if circuit else None
+
+    def get_schedule_start_time(self, sched_objnam: str) -> str | None:
+        """Get the start time of a schedule.
+
+        Returns the time in 'HH,MM,SS' format using a 24-hour clock
+        (e.g., '09,00,00' for 9:00 AM, '21,30,00' for 9:30 PM).
+
+        Note: This reflects the absolute start time when the START attribute
+        is 'ABSTIM'. Sunrise/sunset-relative schedules use different values.
+
+        Args:
+            sched_objnam: Object name of the schedule (e.g., "SCH00")
+
+        Returns:
+            Start time string in 'HH,MM,SS' format, or None if unavailable
+
+        Example:
+            start = controller.get_schedule_start_time("SCH00")
+            if start:
+                h, m, s = start.split(',')
+                print(f"Schedule starts at {h}:{m}")
+        """
+        obj = self._model[sched_objnam]
+        if not obj:
+            return None
+        t = obj[TIME_ATTR]
+        return str(t) if t else None
+
+    def get_schedule_stop_time(self, sched_objnam: str) -> str | None:
+        """Get the stop time of a schedule.
+
+        Returns the time in 'HH,MM,SS' format using a 24-hour clock
+        (e.g., '17,00,00' for 5:00 PM, '23,00,00' for 11:00 PM).
+
+        Note: This reflects the absolute stop time when the STOP attribute
+        is 'ABSTIM'. Sunrise/sunset-relative schedules use different values.
+
+        Args:
+            sched_objnam: Object name of the schedule (e.g., "SCH00")
+
+        Returns:
+            Stop time string in 'HH,MM,SS' format, or None if unavailable
+
+        Example:
+            stop = controller.get_schedule_stop_time("SCH00")
+            if stop:
+                h, m, s = stop.split(',')
+                print(f"Schedule stops at {h}:{m}")
+        """
+        obj = self._model[sched_objnam]
+        if not obj:
+            return None
+        t = obj[TIMOUT_ATTR]
+        return str(t) if t else None
+
+    def get_schedule_days(self, sched_objnam: str) -> str | None:
+        """Get the days of the week a schedule runs.
+
+        Returns a string where each character represents a day:
+        - M = Monday
+        - T = Tuesday
+        - W = Wednesday
+        - R = Thursday
+        - F = Friday
+        - A = Saturday
+        - U = Sunday
+
+        Examples:
+        - 'MTWRFAU' = every day
+        - 'MTWRF' = weekdays only
+        - 'AU' = weekends only
+
+        Args:
+            sched_objnam: Object name of the schedule (e.g., "SCH00")
+
+        Returns:
+            Day string (e.g., 'MTWRFAU'), or None if unavailable
+
+        Example:
+            days = controller.get_schedule_days("SCH00")
+            if days and 'A' in days and 'U' in days:
+                print("Schedule runs on weekends")
+        """
+        obj = self._model[sched_objnam]
+        if not obj:
+            return None
+        days = obj["DAY"]
+        return str(days) if days else None
+
+    async def set_schedule_enabled(self, sched_objnam: str, enabled: bool) -> dict[str, Any]:
+        """Enable or disable a schedule.
+
+        Disabling a schedule (STATUS=OFF) prevents it from running at its
+        scheduled time without deleting it. This is useful for temporarily
+        suspending a schedule during maintenance, vacation, or seasonal changes
+        while preserving all its settings for later re-enabling.
+
+        Note: This changes whether the schedule will run in future — it does
+        not immediately stop a schedule that is currently active (ACT=ON).
+
+        Args:
+            sched_objnam: Object name of the schedule (e.g., "SCH00")
+            enabled: True to enable the schedule, False to disable it
+
+        Returns:
+            Response dictionary
+
+        Example:
+            # Disable pool pump schedule during maintenance
+            await controller.set_schedule_enabled("SCH00", False)
+
+            # Re-enable when maintenance is complete
+            await controller.set_schedule_enabled("SCH00", True)
+        """
+        return await self._queue_property_change(
+            sched_objnam, {STATUS_ATTR: STATUS_ON if enabled else STATUS_OFF}
+        )
+
+    async def set_schedule_heating_setpoint(
+        self, sched_objnam: str, temperature: int
+    ) -> dict[str, Any]:
+        """Set the heating setpoint for a schedule.
+
+        Each schedule can have its own heating setpoint (LOTMP) that overrides
+        the body's default setpoint when the schedule is active. This allows
+        different temperatures for different times of day — for example, heating
+        to a lower temperature during off-peak hours to save energy.
+
+        Args:
+            sched_objnam: Object name of the schedule (e.g., "SCH00")
+            temperature: Target heating temperature in system units (°F or °C)
+
+        Returns:
+            Response dictionary
+
+        Example:
+            # Heat to 84°F during the daytime schedule
+            await controller.set_schedule_heating_setpoint("SCH00", 84)
+        """
+        return await self._queue_property_change(sched_objnam, {LOTMP_ATTR: str(temperature)})
 
     # =========================================================================
     # Sensor Helpers (for Home Assistant sensor entities)

@@ -41,6 +41,7 @@ from .constants import (
     SEC_ATTR,
     SELECT_ATTR,
     SHOMNU_ATTR,
+    SINDEX_ATTR,
     SNAME_ATTR,
     SOURCE_ATTR,
     STATIC_ATTR,
@@ -81,7 +82,7 @@ CHEM_ATTRIBUTES = {
     SALT_ATTR,  # (int) Salt level
     SEC_ATTR,  # (int) IntelliChlor: secondary body output setting in %
     "SHARE",  # (objnam) Body sharing
-    "SINDEX",  # (float) Saturation Index
+    SINDEX_ATTR,  # (float) Saturation Index
     SNAME_ATTR,  # friendly name
     STATIC_ATTR,  # (ON/OFF) Static mode
     SUBTYP_ATTR,  # 'ICHLOR' for IntelliChlor, 'ICHEM' for IntelliChem
