@@ -2580,3 +2580,114 @@ class TestScheduleHelpers:
 
         call_args = controller._connection.send_request.call_args
         assert call_args[0][0] == "SETPARAMLIST"
+
+
+# =============================================================================
+# get_sensor_probe_reading / get_sensor_calibration
+# =============================================================================
+
+
+class TestSensorProbeAndCalibration:
+    """Tests for get_sensor_probe_reading() and get_sensor_calibration()."""
+
+    @pytest.fixture
+    def model(self):
+        return PoolModel()
+
+    @pytest.fixture
+    def controller(self, model):
+        ctrl = ICModelController("192.168.1.100", model, 6681)
+        ctrl._connection = MagicMock()
+        ctrl._connection.connected = True
+        ctrl._connection.send_request = AsyncMock(
+            return_value={"response": "200", "objectList": []}
+        )
+        return ctrl
+
+    def _add_sensor(self, model, objnam="SSW11", **kwargs):
+        """Helper to add a sensor object to the model."""
+        params = {
+            "OBJTYP": "SENSE",
+            "SUBTYP": "POOL",
+            "SNAME": "Water Sensor",
+            "SOURCE": "79",
+            "PROBE": "79",
+            "CALIB": "0",
+            "STATUS": "OK",
+        }
+        params.update(kwargs)
+        model.add_object(objnam, params)
+
+    # --- get_sensor_probe_reading ---
+
+    def test_probe_returns_value_when_no_offset(self, controller, model):
+        """Returns probe reading when CALIB=0 (matches SOURCE)."""
+        self._add_sensor(model, SOURCE="79", PROBE="79", CALIB="0")
+        assert controller.get_sensor_probe_reading("SSW11") == 79
+
+    def test_probe_returns_raw_value_when_offset_applied(self, controller, model):
+        """Returns raw uncalibrated reading when a calibration offset is in effect."""
+        # SOURCE=81 with CALIB=2 means PROBE=79
+        self._add_sensor(model, SOURCE="81", PROBE="79", CALIB="2")
+        assert controller.get_sensor_probe_reading("SSW11") == 79
+
+    def test_probe_returns_none_when_missing(self, controller, model):
+        """Returns None when PROBE attribute is not present."""
+        model.add_object(
+            "SSW11",
+            {"OBJTYP": "SENSE", "SUBTYP": "POOL", "SNAME": "Water Sensor", "SOURCE": "79"},
+        )
+        assert controller.get_sensor_probe_reading("SSW11") is None
+
+    def test_probe_returns_none_for_unknown_object(self, controller):
+        """Returns None when sensor does not exist in the model."""
+        assert controller.get_sensor_probe_reading("NONEXISTENT") is None
+
+    def test_probe_works_for_air_sensor(self, controller, model):
+        """Returns probe reading for air temperature sensor."""
+        self._add_sensor(model, "_A135", SUBTYP="AIR", SNAME="Air Sensor",
+                         SOURCE="114", PROBE="114", CALIB="0")
+        assert controller.get_sensor_probe_reading("_A135") == 114
+
+    def test_probe_source_difference_equals_calib(self, controller, model):
+        """Confirms SOURCE - PROBE == CALIB offset relationship."""
+        self._add_sensor(model, SOURCE="83", PROBE="80", CALIB="3")
+        source = controller.get_sensor_reading("SSW11")
+        probe = controller.get_sensor_probe_reading("SSW11")
+        calib = controller.get_sensor_calibration("SSW11")
+        assert source - probe == calib
+
+    # --- get_sensor_calibration ---
+
+    def test_calibration_returns_zero_when_no_offset(self, controller, model):
+        """Returns 0 when no calibration offset is applied."""
+        self._add_sensor(model, CALIB="0")
+        assert controller.get_sensor_calibration("SSW11") == 0
+
+    def test_calibration_returns_positive_offset(self, controller, model):
+        """Returns positive calibration offset."""
+        self._add_sensor(model, CALIB="3")
+        assert controller.get_sensor_calibration("SSW11") == 3
+
+    def test_calibration_returns_negative_offset(self, controller, model):
+        """Returns negative calibration offset."""
+        self._add_sensor(model, CALIB="-2")
+        assert controller.get_sensor_calibration("SSW11") == -2
+
+    def test_calibration_returns_none_when_missing(self, controller, model):
+        """Returns None when CALIB attribute is not present."""
+        model.add_object(
+            "SSW11",
+            {"OBJTYP": "SENSE", "SUBTYP": "POOL", "SNAME": "Water Sensor", "SOURCE": "79"},
+        )
+        assert controller.get_sensor_calibration("SSW11") is None
+
+    def test_calibration_returns_none_for_unknown_object(self, controller):
+        """Returns None when sensor does not exist in the model."""
+        assert controller.get_sensor_calibration("NONEXISTENT") is None
+
+    def test_calibration_works_for_solar_sensor(self, controller, model):
+        """Returns calibration for solar sensor subtype."""
+        self._add_sensor(model, "SSS11", SUBTYP="SOLAR", SNAME="Solar Sensor",
+                         SOURCE="95", PROBE="93", CALIB="2")
+        assert controller.get_sensor_calibration("SSS11") == 2

@@ -25,6 +25,7 @@ from .attributes import (
     BODY_ATTR,
     BODY_TYPE,
     CALC_ATTR,
+    CALIB_ATTR,
     CHEM_TYPE,
     CIRCGRP_TYPE,
     CIRCUIT_ATTR,
@@ -58,6 +59,7 @@ from .attributes import (
     PHVAL_ATTR,
     PMPCIRC_TYPE,
     PRIM_ATTR,
+    PROBE_ATTR,
     PROPNAME_ATTR,
     PUMP_STATUS_ON,
     PUMP_TYPE,
@@ -2027,6 +2029,75 @@ class ICModelController(ICBaseController):
             Calibrated reading as integer, or None if unavailable
         """
         return self._get_attr_as_int(sensor_objnam, SOURCE_ATTR)
+
+    def get_sensor_probe_reading(self, sensor_objnam: str) -> int | None:
+        """Get the raw uncalibrated probe reading from a sensor.
+
+        Each IntelliCenter temperature sensor exposes two readings:
+        - SOURCE: the calibrated reading (after CALIB offset is applied)
+        - PROBE:  the raw uncalibrated reading directly from the sensor hardware
+
+        Comparing PROBE against SOURCE reveals the calibration offset currently
+        in effect. When PROBE and SOURCE match, no calibration offset is applied
+        (CALIB=0). When they differ, the difference equals the CALIB offset.
+
+        This is useful for diagnosing probe accuracy issues — for example, if
+        the equipment pad water sensor reads abnormally high, comparing its
+        SOURCE vs PROBE values confirms whether the discrepancy is a hardware
+        issue or a calibration offset.
+
+        Note: Not all sensor types populate PROBE. Returns None if the
+        attribute is absent or the sensor does not exist.
+
+        Args:
+            sensor_objnam: Object name of the sensor (e.g., "SSW11", "_A135")
+
+        Returns:
+            Raw uncalibrated probe reading as integer, or None if unavailable
+
+        Example:
+            source = controller.get_sensor_reading("SSW11")
+            probe = controller.get_sensor_probe_reading("SSW11")
+            if source is not None and probe is not None:
+                offset = source - probe
+                print(f"Calibration offset in effect: {offset}°")
+        """
+        return self._get_attr_as_int(sensor_objnam, PROBE_ATTR)
+
+    def get_sensor_calibration(self, sensor_objnam: str) -> int | None:
+        """Get the calibration offset currently applied to a sensor.
+
+        The CALIB attribute stores the calibration offset (in the system's
+        temperature units) that IntelliCenter adds to the raw PROBE reading
+        to produce the calibrated SOURCE reading:
+
+            SOURCE = PROBE + CALIB
+
+        A CALIB value of 0 means no calibration has been applied. Positive
+        values shift the reading up; negative values shift it down.
+
+        This is useful for verifying probe calibration or detecting drift.
+        For example, if a water temperature sensor reads consistently high,
+        checking CALIB confirms whether a previous calibration adjustment is
+        contributing to the offset.
+
+        Note: Not all sensor types expose a writable CALIB attribute. Whether
+        CALIB is writable via SetParamList is unconfirmed — read-only use is
+        safe.
+
+        Args:
+            sensor_objnam: Object name of the sensor (e.g., "SSW11", "_A135")
+
+        Returns:
+            Calibration offset as integer (positive, negative, or zero),
+            or None if the attribute is absent or the sensor does not exist
+
+        Example:
+            calib = controller.get_sensor_calibration("SSW11")
+            if calib is not None and calib != 0:
+                print(f"Sensor has {calib}° calibration offset applied")
+        """
+        return self._get_attr_as_int(sensor_objnam, CALIB_ATTR)
 
     # =========================================================================
     # Pump Helpers (for Home Assistant sensor/switch entities)
