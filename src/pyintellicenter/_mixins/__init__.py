@@ -12,6 +12,7 @@ from .body import _BodyMixin
 from .chemistry import _ChemistryMixin
 from .circuit_group import _CircuitGroupMixin
 from .cover import _CoverMixin
+from .heater import _HeaterMixin
 from .light import _LightMixin
 from .pump import _PumpMixin
 from .schedule import _ScheduleMixin
@@ -23,6 +24,7 @@ __all__ = [
     "_ChemistryMixin",
     "_CircuitGroupMixin",
     "_CoverMixin",
+    "_HeaterMixin",
     "_LightMixin",
     "_PumpMixin",
     "_ScheduleMixin",
