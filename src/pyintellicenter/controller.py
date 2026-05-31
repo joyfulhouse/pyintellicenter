@@ -18,25 +18,69 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
+from ._mixins import (
+    _ChemistryMixin,
+    _CircuitGroupMixin,
+    _CoverMixin,
+    _LightMixin,
+    _ScheduleMixin,
+    _SensorMixin,
+)
+
+# Backward-compatible re-exports: these chemistry validation constants now live in
+# ._mixins.chemistry but were historically importable from this module
+# (pyintellicenter.controller.<CONST>). Re-export them with redundant aliases so
+# the original import path keeps working and consumers are not broken.
+from ._mixins.chemistry import (
+    ALKALINITY_MAX as ALKALINITY_MAX,
+)
+from ._mixins.chemistry import (
+    ALKALINITY_MIN as ALKALINITY_MIN,
+)
+from ._mixins.chemistry import (
+    CALCIUM_HARDNESS_MAX as CALCIUM_HARDNESS_MAX,
+)
+from ._mixins.chemistry import (
+    CALCIUM_HARDNESS_MIN as CALCIUM_HARDNESS_MIN,
+)
+from ._mixins.chemistry import (
+    CHLORINATOR_PERCENT_MAX as CHLORINATOR_PERCENT_MAX,
+)
+from ._mixins.chemistry import (
+    CHLORINATOR_PERCENT_MIN as CHLORINATOR_PERCENT_MIN,
+)
+from ._mixins.chemistry import (
+    CYANURIC_ACID_MAX as CYANURIC_ACID_MAX,
+)
+from ._mixins.chemistry import (
+    CYANURIC_ACID_MIN as CYANURIC_ACID_MIN,
+)
+from ._mixins.chemistry import (
+    ORP_MAX as ORP_MAX,
+)
+from ._mixins.chemistry import (
+    ORP_MIN as ORP_MIN,
+)
+from ._mixins.chemistry import (
+    PH_MAX as PH_MAX,
+)
+from ._mixins.chemistry import (
+    PH_MIN as PH_MIN,
+)
+from ._mixins.chemistry import (
+    PH_STEP as PH_STEP,
+)
 from .attributes import (
-    ACT_ATTR,
-    ALK_ATTR,
     ASSIGN_ATTR,
     BODY_ATTR,
     BODY_TYPE,
-    CALC_ATTR,
     CHEM_TYPE,
-    CIRCGRP_TYPE,
-    CIRCUIT_ATTR,
     CIRCUIT_TYPE,
-    CYACID_ATTR,
-    EXTINSTR_TYPE,
     GPM_ATTR,
     HEATER_ATTR,
     HEATER_TYPE,
     HITMP_ATTR,
     HTMODE_ATTR,
-    LIGHT_EFFECTS,
     LOTMP_ATTR,
     MAX_ATTR,
     MAXF_ATTR,
@@ -45,39 +89,23 @@ from .attributes import (
     MODE_ATTR,
     NULL_OBJNAM,
     OBJTYP_ATTR,
-    ORPHI_ATTR,
-    ORPLO_ATTR,
-    ORPSET_ATTR,
-    ORPVAL_ATTR,
     PARENT_ATTR,
-    PHHI_ATTR,
-    PHLO_ATTR,
-    PHSET_ATTR,
-    PHVAL_ATTR,
     PMPCIRC_TYPE,
-    PRIM_ATTR,
     PROPNAME_ATTR,
     PUMP_STATUS_ON,
     PUMP_TYPE,
     PWR_ATTR,
-    QUALTY_ATTR,
     RPM_ATTR,
-    SALT_ATTR,
-    SCHED_TYPE,
-    SEC_ATTR,
     SELECT_ATTR,
     SENSE_TYPE,
     SNAME_ATTR,
-    SOURCE_ATTR,
     SPEED_ATTR,
     STATUS_ATTR,
     STATUS_OFF,
     STATUS_ON,
     SUBTYP_ATTR,
-    SUPER_ATTR,
     SYSTEM_TYPE,
     TEMP_ATTR,
-    USE_ATTR,
     VACFLO_ATTR,
     VALVE_TYPE,
     VER_ATTR,
@@ -96,26 +124,6 @@ _LOGGER = logging.getLogger(__name__)
 
 # Configuration constants
 MAX_ATTRIBUTES_PER_QUERY = 50  # Maximum attributes per query batch
-
-# Validation range constants for chemistry controllers
-PH_MIN = 6.0
-PH_MAX = 8.5
-PH_STEP = 0.1
-
-ORP_MIN = 200  # mV
-ORP_MAX = 900  # mV
-
-CHLORINATOR_PERCENT_MIN = 0
-CHLORINATOR_PERCENT_MAX = 100
-
-ALKALINITY_MIN = 0  # ppm
-ALKALINITY_MAX = 800  # ppm
-
-CALCIUM_HARDNESS_MIN = 0  # ppm
-CALCIUM_HARDNESS_MAX = 800  # ppm
-
-CYANURIC_ACID_MIN = 0  # ppm
-CYANURIC_ACID_MAX = 200  # ppm
 
 
 @dataclass
@@ -477,7 +485,15 @@ class ICBaseController:
         return await self.get_query("GetHardwareDefinition")
 
 
-class ICModelController(ICBaseController):
+class ICModelController(
+    _ChemistryMixin,
+    _SensorMixin,
+    _CoverMixin,
+    _ScheduleMixin,
+    _CircuitGroupMixin,
+    _LightMixin,
+    ICBaseController,
+):
     """Controller that maintains a PoolModel of equipment state."""
 
     def __init__(
@@ -804,189 +820,6 @@ class ICModelController(ICBaseController):
         """
         return await self._queue_property_change(body_objnam, {HITMP_ATTR: str(temperature)})
 
-    async def set_super_chlorinate(self, chem_objnam: str, enabled: bool) -> dict[str, Any]:
-        """Enable or disable super chlorination (boost mode).
-
-        Args:
-            chem_objnam: Object name of the chemistry controller
-            enabled: True to enable, False to disable
-
-        Returns:
-            Response dictionary
-        """
-        return await self._queue_property_change(
-            chem_objnam, {SUPER_ATTR: STATUS_ON if enabled else STATUS_OFF}
-        )
-
-    async def set_ph_setpoint(self, chem_objnam: str, value: float) -> dict[str, Any]:
-        """Set the pH setpoint for an IntelliChem controller.
-
-        Args:
-            chem_objnam: Object name of the chemistry controller
-            value: Target pH value (PH_MIN-PH_MAX, in PH_STEP increments)
-
-        Returns:
-            Response dictionary
-
-        Raises:
-            ValueError: If value is outside valid range or not a 0.1 increment
-
-        Example:
-            await controller.set_ph_setpoint("CHEM1", 7.4)
-        """
-        if not PH_MIN <= value <= PH_MAX:
-            raise ValueError(f"pH setpoint {value} outside valid range ({PH_MIN}-{PH_MAX})")
-
-        # IntelliChem only accepts pH values in PH_STEP increments
-        # Check if value is a valid step (e.g., 7.0, 7.1, 7.2, not 7.05 or 7.15)
-        rounded = round(value, 1)
-        if abs(value - rounded) > 0.001:
-            raise ValueError(
-                f"pH setpoint {value} must be in {PH_STEP} increments (e.g., 7.0, 7.1, 7.2)"
-            )
-
-        return await self._queue_property_change(chem_objnam, {PHSET_ATTR: str(rounded)})
-
-    async def set_orp_setpoint(self, chem_objnam: str, value: int) -> dict[str, Any]:
-        """Set the ORP setpoint for an IntelliChem controller.
-
-        ORP (Oxidation Reduction Potential) measures sanitizer effectiveness.
-
-        Args:
-            chem_objnam: Object name of the chemistry controller
-            value: Target ORP in millivolts (typically 400-800 mV)
-
-        Returns:
-            Response dictionary
-
-        Raises:
-            ValueError: If value is outside valid range
-
-        Example:
-            await controller.set_orp_setpoint("CHEM1", 700)
-        """
-        if not ORP_MIN <= value <= ORP_MAX:
-            raise ValueError(f"ORP setpoint {value} outside valid range ({ORP_MIN}-{ORP_MAX} mV)")
-        return await self._queue_property_change(chem_objnam, {ORPSET_ATTR: str(value)})
-
-    async def set_chlorinator_output(
-        self, chem_objnam: str, primary_percent: int, secondary_percent: int | None = None
-    ) -> dict[str, Any]:
-        """Set the chlorinator output percentage for an IntelliChlor.
-
-        Args:
-            chem_objnam: Object name of the chemistry controller (IntelliChlor)
-            primary_percent: Output percentage for primary body (0-100)
-            secondary_percent: Output percentage for secondary body (0-100),
-                             or None to leave unchanged
-
-        Returns:
-            Response dictionary
-
-        Raises:
-            ValueError: If percentage is outside valid range
-
-        Example:
-            # Set pool to 50%, spa to 100%
-            await controller.set_chlorinator_output("CHEM1", 50, 100)
-            # Set pool only
-            await controller.set_chlorinator_output("CHEM1", 75)
-        """
-        if not CHLORINATOR_PERCENT_MIN <= primary_percent <= CHLORINATOR_PERCENT_MAX:
-            raise ValueError(
-                f"Primary percentage {primary_percent} outside valid range "
-                f"({CHLORINATOR_PERCENT_MIN}-{CHLORINATOR_PERCENT_MAX})"
-            )
-
-        changes: dict[str, str] = {PRIM_ATTR: str(primary_percent)}
-
-        if secondary_percent is not None:
-            if not CHLORINATOR_PERCENT_MIN <= secondary_percent <= CHLORINATOR_PERCENT_MAX:
-                raise ValueError(
-                    f"Secondary percentage {secondary_percent} outside valid range "
-                    f"({CHLORINATOR_PERCENT_MIN}-{CHLORINATOR_PERCENT_MAX})"
-                )
-            changes[SEC_ATTR] = str(secondary_percent)
-
-        return await self._queue_property_change(chem_objnam, changes)
-
-    async def set_alkalinity(self, chem_objnam: str, value: int) -> dict[str, Any]:
-        """Set the alkalinity value for an IntelliChem controller.
-
-        Alkalinity is a user-entered configuration value used to calculate
-        the Saturation Index (water quality). It is NOT a sensor reading.
-
-        Args:
-            chem_objnam: Object name of the chemistry controller
-            value: Alkalinity in ppm (typically 80-120 ppm for pools)
-
-        Returns:
-            Response dictionary
-
-        Raises:
-            ValueError: If value is outside valid range
-
-        Example:
-            await controller.set_alkalinity("CHEM1", 100)
-        """
-        if not ALKALINITY_MIN <= value <= ALKALINITY_MAX:
-            raise ValueError(
-                f"Alkalinity {value} outside valid range ({ALKALINITY_MIN}-{ALKALINITY_MAX} ppm)"
-            )
-        return await self._queue_property_change(chem_objnam, {ALK_ATTR: str(value)})
-
-    async def set_calcium_hardness(self, chem_objnam: str, value: int) -> dict[str, Any]:
-        """Set the calcium hardness value for an IntelliChem controller.
-
-        Calcium hardness is a user-entered configuration value used to calculate
-        the Saturation Index (water quality). It is NOT a sensor reading.
-
-        Args:
-            chem_objnam: Object name of the chemistry controller
-            value: Calcium hardness in ppm (typically 200-400 ppm for pools)
-
-        Returns:
-            Response dictionary
-
-        Raises:
-            ValueError: If value is outside valid range
-
-        Example:
-            await controller.set_calcium_hardness("CHEM1", 300)
-        """
-        if not CALCIUM_HARDNESS_MIN <= value <= CALCIUM_HARDNESS_MAX:
-            raise ValueError(
-                f"Calcium hardness {value} outside valid range "
-                f"({CALCIUM_HARDNESS_MIN}-{CALCIUM_HARDNESS_MAX} ppm)"
-            )
-        return await self._queue_property_change(chem_objnam, {CALC_ATTR: str(value)})
-
-    async def set_cyanuric_acid(self, chem_objnam: str, value: int) -> dict[str, Any]:
-        """Set the cyanuric acid (stabilizer) value for an IntelliChem controller.
-
-        Cyanuric acid is a user-entered configuration value used to calculate
-        the Saturation Index (water quality). It is NOT a sensor reading.
-
-        Args:
-            chem_objnam: Object name of the chemistry controller
-            value: Cyanuric acid in ppm (typically 30-50 ppm for pools)
-
-        Returns:
-            Response dictionary
-
-        Raises:
-            ValueError: If value is outside valid range
-
-        Example:
-            await controller.set_cyanuric_acid("CHEM1", 40)
-        """
-        if not CYANURIC_ACID_MIN <= value <= CYANURIC_ACID_MAX:
-            raise ValueError(
-                f"Cyanuric acid {value} outside valid range "
-                f"({CYANURIC_ACID_MIN}-{CYANURIC_ACID_MAX} ppm)"
-            )
-        return await self._queue_property_change(chem_objnam, {CYACID_ATTR: str(value)})
-
     def _get_attr_as_int(self, objnam: str, attr: str) -> int | None:
         """Get an attribute value as an integer, or None if unavailable."""
         obj = self._model[objnam]
@@ -1006,81 +839,6 @@ class ICModelController(ICBaseController):
             except (ValueError, TypeError):
                 return None
         return None
-
-    def get_ph_setpoint(self, chem_objnam: str) -> float | None:
-        """Get the current pH setpoint for a chemistry controller.
-
-        Args:
-            chem_objnam: Object name of the chemistry controller
-
-        Returns:
-            pH setpoint value, or None if unavailable
-        """
-        return self._get_attr_as_float(chem_objnam, PHSET_ATTR)
-
-    def get_orp_setpoint(self, chem_objnam: str) -> int | None:
-        """Get the current ORP setpoint for a chemistry controller.
-
-        Args:
-            chem_objnam: Object name of the chemistry controller
-
-        Returns:
-            ORP setpoint in mV, or None if unavailable
-        """
-        return self._get_attr_as_int(chem_objnam, ORPSET_ATTR)
-
-    def get_chlorinator_output(self, chem_objnam: str) -> dict[str, int | None]:
-        """Get the current chlorinator output percentages.
-
-        Args:
-            chem_objnam: Object name of the chemistry controller (IntelliChlor)
-
-        Returns:
-            Dict with 'primary' and 'secondary' output percentages
-        """
-        return {
-            "primary": self._get_attr_as_int(chem_objnam, PRIM_ATTR),
-            "secondary": self._get_attr_as_int(chem_objnam, SEC_ATTR),
-        }
-
-    def get_alkalinity(self, chem_objnam: str) -> int | None:
-        """Get the alkalinity configuration value for a chemistry controller.
-
-        Alkalinity is a user-entered configuration value (not a sensor reading).
-
-        Args:
-            chem_objnam: Object name of the chemistry controller
-
-        Returns:
-            Alkalinity in ppm, or None if unavailable
-        """
-        return self._get_attr_as_int(chem_objnam, ALK_ATTR)
-
-    def get_calcium_hardness(self, chem_objnam: str) -> int | None:
-        """Get the calcium hardness configuration value for a chemistry controller.
-
-        Calcium hardness is a user-entered configuration value (not a sensor reading).
-
-        Args:
-            chem_objnam: Object name of the chemistry controller
-
-        Returns:
-            Calcium hardness in ppm, or None if unavailable
-        """
-        return self._get_attr_as_int(chem_objnam, CALC_ATTR)
-
-    def get_cyanuric_acid(self, chem_objnam: str) -> int | None:
-        """Get the cyanuric acid configuration value for a chemistry controller.
-
-        Cyanuric acid is a user-entered configuration value (not a sensor reading).
-
-        Args:
-            chem_objnam: Object name of the chemistry controller
-
-        Returns:
-            Cyanuric acid in ppm, or None if unavailable
-        """
-        return self._get_attr_as_int(chem_objnam, CYACID_ATTR)
 
     # =========================================================================
     # Valve Helpers
@@ -1156,10 +914,6 @@ class ICModelController(ICBaseController):
         """Get all heater objects."""
         return self._model.get_by_type(HEATER_TYPE)
 
-    def get_schedules(self) -> list[PoolObject]:
-        """Get all schedule objects."""
-        return self._model.get_by_type(SCHED_TYPE)
-
     def get_sensors(self) -> list[PoolObject]:
         """Get all sensor objects."""
         return self._model.get_by_type(SENSE_TYPE)
@@ -1175,207 +929,6 @@ class ICModelController(ICBaseController):
     def get_valves(self) -> list[PoolObject]:
         """Get all valve objects."""
         return self._model.get_by_type(VALVE_TYPE)
-
-    # =========================================================================
-    # Cover (External Instrument) Helpers
-    # =========================================================================
-
-    def get_covers(self) -> list[PoolObject]:
-        """Get all cover objects (pool covers, spa covers).
-
-        Covers are external instruments (EXTINSTR) with SUBTYP=COVER.
-        They can be controlled via set_cover_state().
-
-        Returns:
-            List of PoolObject for covers
-        """
-        return [obj for obj in self._model.get_by_type(EXTINSTR_TYPE) if obj.subtype == "COVER"]
-
-    async def set_cover_state(self, objnam: str, state: bool) -> dict[str, Any]:
-        """Turn a cover on or off.
-
-        Args:
-            objnam: Object name of the cover (e.g., "CVR01")
-            state: True to turn on, False to turn off
-
-        Returns:
-            Response dictionary from the controller
-        """
-        return await self._queue_property_change(
-            objnam, {STATUS_ATTR: STATUS_ON if state else STATUS_OFF}
-        )
-
-    def is_cover_on(self, cover_objnam: str) -> bool:
-        """Check if a cover is currently on.
-
-        Args:
-            cover_objnam: Object name of the cover
-
-        Returns:
-            True if the cover status is ON, False otherwise
-        """
-        obj = self._model[cover_objnam]
-        if not obj:
-            return False
-        return obj.status == STATUS_ON
-
-    # =========================================================================
-    # Circuit Group Helpers
-    # =========================================================================
-
-    def get_circuit_groups(self) -> list[PoolObject]:
-        """Get all circuit group objects.
-
-        Circuit groups allow multiple circuits to be controlled together.
-        Groups containing color lights can have light effects applied.
-
-        Returns:
-            List of PoolObject for circuit groups
-        """
-        return self._model.get_by_type(CIRCGRP_TYPE)
-
-    def get_circuits_in_group(self, circgrp_objnam: str) -> list[PoolObject]:
-        """Get all circuit objects that belong to a circuit group.
-
-        Args:
-            circgrp_objnam: Object name of the circuit group
-
-        Returns:
-            List of PoolObject for circuits in the group
-        """
-        obj = self._model[circgrp_objnam]
-        if not obj or obj.objtype != CIRCGRP_TYPE:
-            return []
-
-        circuit_ref = obj[CIRCUIT_ATTR]
-        if not circuit_ref:
-            return []
-
-        # CIRCUIT attribute can be a single objnam or space-separated list
-        circuit_objnams = circuit_ref.split() if isinstance(circuit_ref, str) else [circuit_ref]
-
-        circuits = []
-        for objnam in circuit_objnams:
-            circuit = self._model[objnam]
-            if circuit:
-                circuits.append(circuit)
-        return circuits
-
-    def circuit_group_has_color_lights(self, circgrp_objnam: str) -> bool:
-        """Check if a circuit group contains any color-capable lights.
-
-        Circuit groups that contain IntelliBrite, MagicStream, or other
-        color lights can have light effects applied to the entire group.
-
-        Args:
-            circgrp_objnam: Object name of the circuit group
-
-        Returns:
-            True if the group contains at least one color light
-        """
-        circuits = self.get_circuits_in_group(circgrp_objnam)
-        return any(circuit.supports_color_effects for circuit in circuits)
-
-    def get_color_light_groups(self) -> list[PoolObject]:
-        """Get circuit groups that contain color-capable lights.
-
-        These groups can have light effects applied via set_light_effect().
-
-        Returns:
-            List of PoolObject for circuit groups with color lights
-        """
-        return [
-            group
-            for group in self.get_circuit_groups()
-            if self.circuit_group_has_color_lights(group.objnam)
-        ]
-
-    # =========================================================================
-    # Light Helpers (for Home Assistant light entities)
-    # =========================================================================
-
-    def get_lights(self, include_shows: bool = True) -> list[PoolObject]:
-        """Get all light circuits.
-
-        Args:
-            include_shows: If True, include light show circuits (LITSHO)
-
-        Returns:
-            List of PoolObject for light circuits
-        """
-        lights = [obj for obj in self._model if obj.is_a_light]
-        if include_shows:
-            lights.extend(obj for obj in self._model if obj.is_a_light_show)
-        return lights
-
-    def get_color_lights(self) -> list[PoolObject]:
-        """Get lights that support color effects (IntelliBrite, MagicStream, etc.).
-
-        These lights can have their effect/color changed via set_light_effect().
-
-        Returns:
-            List of PoolObject for color-capable lights
-        """
-        return [obj for obj in self._model if obj.supports_color_effects]
-
-    async def set_light_effect(self, objnam: str, effect: str) -> dict[str, Any]:
-        """Set the color effect for a color-capable light.
-
-        Note: IntelliCenter uses ACT (action) attribute to set effects,
-        while USE attribute reflects the current state. The effect change
-        propagates to USE after IntelliCenter processes the command.
-
-        Args:
-            objnam: Object name of the light
-            effect: Effect code (e.g., "PARTY", "CARIB", "ROYAL")
-                   Use LIGHT_EFFECTS.keys() for valid codes.
-
-        Returns:
-            Response dictionary
-
-        Raises:
-            ValueError: If effect code is invalid
-
-        Example:
-            await controller.set_light_effect("C0012", "PARTY")
-        """
-        if effect not in LIGHT_EFFECTS:
-            valid = ", ".join(LIGHT_EFFECTS.keys())
-            raise ValueError(f"Invalid effect '{effect}'. Valid effects: {valid}")
-        return await self._queue_property_change(objnam, {ACT_ATTR: effect})
-
-    def get_light_effect(self, objnam: str) -> str | None:
-        """Get the current color effect for a light.
-
-        Args:
-            objnam: Object name of the light
-
-        Returns:
-            Effect code (e.g., "PARTY") or None if not set/not a color light
-        """
-        obj = self._model[objnam]
-        return obj[USE_ATTR] if obj else None
-
-    def get_light_effect_name(self, objnam: str) -> str | None:
-        """Get the human-readable name of the current light effect.
-
-        Args:
-            objnam: Object name of the light
-
-        Returns:
-            Effect name (e.g., "Party Mode") or None
-        """
-        effect = self.get_light_effect(objnam)
-        return LIGHT_EFFECTS.get(effect) if effect else None
-
-    @staticmethod
-    def get_available_light_effects() -> dict[str, str]:
-        """Get all available light effect codes and their names.
-
-        Returns:
-            Dict mapping effect codes to human-readable names
-        """
-        return dict(LIGHT_EFFECTS)
 
     # =========================================================================
     # Temperature/Body Helpers (for Home Assistant climate entities)
@@ -1552,143 +1105,6 @@ class ICModelController(ICBaseController):
                         return True
 
         return False
-
-    # =========================================================================
-    # Chemistry Helpers (for Home Assistant sensor entities)
-    # =========================================================================
-
-    def get_chem_reading(self, chem_objnam: str, reading_type: str) -> float | int | None:
-        """Get a chemistry reading from a chemistry controller.
-
-        Args:
-            chem_objnam: Object name of the chemistry controller
-            reading_type: One of "pH", "ORP", "SALT", "ALK", "CYACID",
-                         "CALC", "QUALITY"
-
-        Returns:
-            Reading value, or None if unavailable
-
-        Example:
-            ph = controller.get_chem_reading("CHEM1", "pH")
-            salt = controller.get_chem_reading("CHEM1", "SALT")
-        """
-        obj = self._model[chem_objnam]
-        if not obj:
-            return None
-
-        attr_map = {
-            "pH": PHVAL_ATTR,
-            "ORP": ORPVAL_ATTR,
-            "SALT": SALT_ATTR,
-            "ALK": ALK_ATTR,
-            "CYACID": CYACID_ATTR,
-            "CALC": CALC_ATTR,
-            "QUALITY": QUALTY_ATTR,
-        }
-
-        attr = attr_map.get(reading_type.upper() if reading_type else "")
-        if not attr:
-            return None
-
-        value = obj[attr]
-        if value is None:
-            return None
-
-        try:
-            # pH values are typically decimal, others are integers
-            if reading_type.upper() == "PH":
-                return float(value)
-            return int(value)
-        except (ValueError, TypeError):
-            return None
-
-    def get_chem_alerts(self, chem_objnam: str) -> list[str]:
-        """Get active chemistry alerts for a controller.
-
-        Args:
-            chem_objnam: Object name of the chemistry controller
-
-        Returns:
-            List of active alert names (e.g., ["pH High", "ORP Low"])
-        """
-        obj = self._model[chem_objnam]
-        if not obj:
-            return []
-
-        alerts = []
-        alert_checks = [
-            (PHHI_ATTR, "pH High"),
-            (PHLO_ATTR, "pH Low"),
-            (ORPHI_ATTR, "ORP High"),
-            (ORPLO_ATTR, "ORP Low"),
-        ]
-
-        for attr, name in alert_checks:
-            if obj[attr] == STATUS_ON:
-                alerts.append(name)
-
-        return alerts
-
-    def has_chem_alert(self, chem_objnam: str) -> bool:
-        """Check if any chemistry alert is active.
-
-        Args:
-            chem_objnam: Object name of the chemistry controller
-
-        Returns:
-            True if any alert is active
-        """
-        return len(self.get_chem_alerts(chem_objnam)) > 0
-
-    # =========================================================================
-    # Sensor Helpers (for Home Assistant sensor entities)
-    # =========================================================================
-
-    def get_sensors_by_type(self, subtype: str) -> list[PoolObject]:
-        """Get sensors of a specific type.
-
-        Args:
-            subtype: Sensor subtype ("SOLAR", "POOL", "AIR")
-
-        Returns:
-            List of PoolObject matching the subtype
-        """
-        return self._model.get_by_type(SENSE_TYPE, subtype)
-
-    def get_solar_sensors(self) -> list[PoolObject]:
-        """Get all solar temperature sensors.
-
-        Returns:
-            List of PoolObject for solar sensors
-        """
-        return self.get_sensors_by_type("SOLAR")
-
-    def get_air_sensors(self) -> list[PoolObject]:
-        """Get all air temperature sensors.
-
-        Returns:
-            List of PoolObject for air sensors
-        """
-        return self.get_sensors_by_type("AIR")
-
-    def get_pool_temp_sensors(self) -> list[PoolObject]:
-        """Get all pool water temperature sensors.
-
-        Returns:
-            List of PoolObject for pool temp sensors
-        """
-        return self.get_sensors_by_type("POOL")
-
-    def get_sensor_reading(self, sensor_objnam: str) -> int | None:
-        """Get the current calibrated reading from a sensor.
-
-        Args:
-            sensor_objnam: Object name of the sensor
-
-        Returns:
-            Calibrated reading as integer, or None if unavailable
-        """
-        return self._get_attr_as_int(sensor_objnam, SOURCE_ATTR)
 
     # =========================================================================
     # Pump Helpers (for Home Assistant sensor/switch entities)
