@@ -18,6 +18,8 @@ from ..attributes import (
     HITMP_ATTR,
     LOTMP_ATTR,
     MODE_ATTR,
+    READY_ATTR,
+    STATUS_ON,
     HeaterType,
 )
 from ._base import _MixinBase
@@ -141,3 +143,23 @@ class _HeaterMixin(_MixinBase):
                         return True
 
         return False
+
+    def is_heater_ready(self, heater_objnam: str) -> bool:
+        """Check if a heater is ready to fire.
+
+        A heater that is enabled (STATUS=ON) may not be ready if it is in a
+        cool-down period, waiting for flow, or experiencing a fault. READY=ON
+        indicates the heater hardware is able to begin heating when demanded by
+        the body temperature setpoint.
+
+        Args:
+            heater_objnam: Object name of the heater (e.g., "H0001")
+
+        Returns:
+            True if the heater reports READY=ON, False otherwise (including when
+            the heater or the READY attribute is missing)
+        """
+        obj = self._model[heater_objnam]
+        if not obj:
+            return False
+        return bool(obj[READY_ATTR] == STATUS_ON)

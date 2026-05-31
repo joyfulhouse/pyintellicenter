@@ -7,17 +7,24 @@ state (used by Home Assistant climate/water-heater entities).
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from ..attributes import (
+    COOL_ATTR,
     HEATER_ATTR,
     HITMP_ATTR,
     HTMODE_ATTR,
     LOTMP_ATTR,
+    LSTTMP_ATTR,
     MODE_ATTR,
     NULL_OBJNAM,
     TEMP_ATTR,
     HeaterType,
 )
 from ._base import _MixinBase
+
+if TYPE_CHECKING:
+    from ..model import PoolObject
 
 
 class _BodyMixin(_MixinBase):
@@ -131,19 +138,47 @@ class _BodyMixin(_MixinBase):
         Returns:
             True if cooling is active
         """
-        body = self._model[body_objnam]
-        if not body:
-            return False
-
-        # Get the heater reference from the body
-        heater_objnam = body[HEATER_ATTR]
-        if not heater_objnam or heater_objnam == NULL_OBJNAM:
-            return False
-
-        # Look up the heater object
-        heater = self._model[heater_objnam]
+        heater = self.get_heater_for_body(body_objnam)
         if not heater:
             return False
 
         # Check if the heater's COOL attribute is ON
-        return bool(heater["COOL"] == "ON")
+        return bool(heater[COOL_ATTR] == "ON")
+
+    def get_body_last_temperature(self, body_objnam: str) -> int | None:
+        """Get the last recorded water temperature for a body of water.
+
+        Unlike :meth:`get_body_temperature`, which only reads a valid value
+        while the body circuit is active, ``LSTTMP`` holds the most recently
+        recorded temperature regardless of whether the body is currently on or
+        off, making it a more reliable temperature source.
+
+        Args:
+            body_objnam: Object name of the body (pool or spa)
+
+        Returns:
+            Last recorded temperature as integer, or None if unavailable
+        """
+        return self._get_attr_as_int(body_objnam, LSTTMP_ATTR)
+
+    def get_heater_for_body(self, body_objnam: str) -> PoolObject | None:
+        """Get the heater object currently assigned to a body of water.
+
+        Each body tracks its active heater via the ``HEATER`` attribute. This
+        resolves that reference to the actual :class:`PoolObject`.
+
+        Args:
+            body_objnam: Object name of the body (pool or spa)
+
+        Returns:
+            The assigned heater :class:`PoolObject`, or None when the body has
+            no heater assigned (the attribute is missing or set to the null
+            object id) or the body does not exist
+        """
+        body = self._model[body_objnam]
+        if not body:
+            return None
+        heater_objnam = body[HEATER_ATTR]
+        if not heater_objnam or heater_objnam == NULL_OBJNAM:
+            return None
+        return self._model[heater_objnam]

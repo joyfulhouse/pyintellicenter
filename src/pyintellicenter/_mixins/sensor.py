@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ..attributes import SENSE_TYPE, SOURCE_ATTR
+from ..attributes import CALIB_ATTR, PROBE_ATTR, SENSE_TYPE, SOURCE_ATTR
 from ._base import _MixinBase
 
 if TYPE_CHECKING:
@@ -63,3 +63,36 @@ class _SensorMixin(_MixinBase):
             Calibrated reading as integer, or None if unavailable
         """
         return self._get_attr_as_int(sensor_objnam, SOURCE_ATTR)
+
+    def get_sensor_probe_reading(self, sensor_objnam: str) -> int | None:
+        """Get the raw, uncalibrated probe reading from a sensor.
+
+        Each temperature sensor exposes two readings: SOURCE (the calibrated
+        value, after the CALIB offset is applied) and PROBE (the raw value
+        directly from the sensor hardware). Comparing the two reveals the
+        calibration offset currently in effect (SOURCE - PROBE == CALIB).
+
+        Args:
+            sensor_objnam: Object name of the sensor
+
+        Returns:
+            Raw uncalibrated probe reading as integer, or None if unavailable
+        """
+        return self._get_attr_as_int(sensor_objnam, PROBE_ATTR)
+
+    def get_sensor_calibration(self, sensor_objnam: str) -> int | None:
+        """Get the calibration offset currently applied to a sensor.
+
+        The CALIB attribute stores the offset (in the system's temperature
+        units) IntelliCenter adds to the raw PROBE reading to produce the
+        calibrated SOURCE reading: ``SOURCE = PROBE + CALIB``. A value of 0
+        means no calibration is applied.
+
+        Args:
+            sensor_objnam: Object name of the sensor
+
+        Returns:
+            Calibration offset as integer (positive, negative, or zero),
+            or None if unavailable
+        """
+        return self._get_attr_as_int(sensor_objnam, CALIB_ATTR)
