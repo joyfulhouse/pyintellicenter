@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
+    from ..controller import ICSystemInfo
     from ..model import PoolModel
 
 
@@ -24,6 +25,12 @@ class _ModelControllerProtocol(Protocol):
     """
 
     _model: PoolModel
+    _system_info: ICSystemInfo | None
+
+    @property
+    def system_info(self) -> ICSystemInfo | None:
+        """Return cached system information."""
+        ...
 
     def _get_attr_as_int(self, objnam: str, attr: str) -> int | None:
         """Return an attribute value coerced to ``int`` or ``None``."""
@@ -35,6 +42,10 @@ class _ModelControllerProtocol(Protocol):
 
     async def _queue_property_change(self, objnam: str, changes: dict[str, str]) -> dict[str, Any]:
         """Queue a coalesced property change and return the response."""
+        ...
+
+    async def send_cmd(self, cmd: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Send a command and return the response."""
         ...
 
 

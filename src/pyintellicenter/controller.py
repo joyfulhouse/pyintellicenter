@@ -19,12 +19,15 @@ from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
 from ._mixins import (
+    _BodyMixin,
     _ChemistryMixin,
     _CircuitGroupMixin,
     _CoverMixin,
     _LightMixin,
+    _PumpMixin,
     _ScheduleMixin,
     _SensorMixin,
+    _SystemMixin,
 )
 
 # Backward-compatible re-exports: these chemistry validation constants now live in
@@ -70,46 +73,173 @@ from ._mixins.chemistry import (
 from ._mixins.chemistry import (
     PH_STEP as PH_STEP,
 )
+
+# Backward-compatible re-exports of attribute/type constants. These names were all
+# importable from this module (pyintellicenter.controller.<NAME>) before the helper
+# methods that used them were extracted into ._mixins. The extraction moved their
+# only local uses out of controller.py, but the module namespace must stay stable
+# for any consumer importing them from here. Re-export with redundant aliases
+# (NAME as NAME) so the names are intentional public re-exports rather than unused
+# imports. (Names still used locally above are intentionally not repeated here.)
+# Guarded by tests/test_controller_namespace_compat.py.
 from .attributes import (
-    ASSIGN_ATTR,
+    ACT_ATTR as ACT_ATTR,
+)
+from .attributes import (
+    ALK_ATTR as ALK_ATTR,
+)
+from .attributes import (
+    ASSIGN_ATTR as ASSIGN_ATTR,
+)
+from .attributes import (
     BODY_ATTR,
-    BODY_TYPE,
-    CHEM_TYPE,
-    CIRCUIT_TYPE,
-    GPM_ATTR,
-    HEATER_ATTR,
     HEATER_TYPE,
     HITMP_ATTR,
-    HTMODE_ATTR,
     LOTMP_ATTR,
-    MAX_ATTR,
-    MAXF_ATTR,
-    MIN_ATTR,
-    MINF_ATTR,
     MODE_ATTR,
-    NULL_OBJNAM,
     OBJTYP_ATTR,
     PARENT_ATTR,
-    PMPCIRC_TYPE,
     PROPNAME_ATTR,
-    PUMP_STATUS_ON,
-    PUMP_TYPE,
-    PWR_ATTR,
-    RPM_ATTR,
-    SELECT_ATTR,
-    SENSE_TYPE,
     SNAME_ATTR,
-    SPEED_ATTR,
     STATUS_ATTR,
     STATUS_OFF,
     STATUS_ON,
     SUBTYP_ATTR,
     SYSTEM_TYPE,
-    TEMP_ATTR,
-    VACFLO_ATTR,
-    VALVE_TYPE,
     VER_ATTR,
     HeaterType,
+)
+from .attributes import (
+    BODY_TYPE as BODY_TYPE,
+)
+from .attributes import (
+    CALC_ATTR as CALC_ATTR,
+)
+from .attributes import (
+    CHEM_TYPE as CHEM_TYPE,
+)
+from .attributes import (
+    CIRCGRP_TYPE as CIRCGRP_TYPE,
+)
+from .attributes import (
+    CIRCUIT_ATTR as CIRCUIT_ATTR,
+)
+from .attributes import (
+    CIRCUIT_TYPE as CIRCUIT_TYPE,
+)
+from .attributes import (
+    CYACID_ATTR as CYACID_ATTR,
+)
+from .attributes import (
+    EXTINSTR_TYPE as EXTINSTR_TYPE,
+)
+from .attributes import (
+    GPM_ATTR as GPM_ATTR,
+)
+from .attributes import (
+    HEATER_ATTR as HEATER_ATTR,
+)
+from .attributes import (
+    HTMODE_ATTR as HTMODE_ATTR,
+)
+from .attributes import (
+    LIGHT_EFFECTS as LIGHT_EFFECTS,
+)
+from .attributes import (
+    MAX_ATTR as MAX_ATTR,
+)
+from .attributes import (
+    MAXF_ATTR as MAXF_ATTR,
+)
+from .attributes import (
+    MIN_ATTR as MIN_ATTR,
+)
+from .attributes import (
+    MINF_ATTR as MINF_ATTR,
+)
+from .attributes import (
+    NULL_OBJNAM as NULL_OBJNAM,
+)
+from .attributes import (
+    ORPHI_ATTR as ORPHI_ATTR,
+)
+from .attributes import (
+    ORPLO_ATTR as ORPLO_ATTR,
+)
+from .attributes import (
+    ORPSET_ATTR as ORPSET_ATTR,
+)
+from .attributes import (
+    ORPVAL_ATTR as ORPVAL_ATTR,
+)
+from .attributes import (
+    PHHI_ATTR as PHHI_ATTR,
+)
+from .attributes import (
+    PHLO_ATTR as PHLO_ATTR,
+)
+from .attributes import (
+    PHSET_ATTR as PHSET_ATTR,
+)
+from .attributes import (
+    PHVAL_ATTR as PHVAL_ATTR,
+)
+from .attributes import (
+    PMPCIRC_TYPE as PMPCIRC_TYPE,
+)
+from .attributes import (
+    PRIM_ATTR as PRIM_ATTR,
+)
+from .attributes import (
+    PUMP_STATUS_ON as PUMP_STATUS_ON,
+)
+from .attributes import (
+    PUMP_TYPE as PUMP_TYPE,
+)
+from .attributes import (
+    PWR_ATTR as PWR_ATTR,
+)
+from .attributes import (
+    QUALTY_ATTR as QUALTY_ATTR,
+)
+from .attributes import (
+    RPM_ATTR as RPM_ATTR,
+)
+from .attributes import (
+    SALT_ATTR as SALT_ATTR,
+)
+from .attributes import (
+    SCHED_TYPE as SCHED_TYPE,
+)
+from .attributes import (
+    SEC_ATTR as SEC_ATTR,
+)
+from .attributes import (
+    SELECT_ATTR as SELECT_ATTR,
+)
+from .attributes import (
+    SENSE_TYPE as SENSE_TYPE,
+)
+from .attributes import (
+    SOURCE_ATTR as SOURCE_ATTR,
+)
+from .attributes import (
+    SPEED_ATTR as SPEED_ATTR,
+)
+from .attributes import (
+    SUPER_ATTR as SUPER_ATTR,
+)
+from .attributes import (
+    TEMP_ATTR as TEMP_ATTR,
+)
+from .attributes import (
+    USE_ATTR as USE_ATTR,
+)
+from .attributes import (
+    VACFLO_ATTR as VACFLO_ATTR,
+)
+from .attributes import (
+    VALVE_TYPE as VALVE_TYPE,
 )
 from .connection import DEFAULT_TCP_PORT, DEFAULT_WEBSOCKET_PORT, ICConnection, TransportType
 from .exceptions import ICCommandError, ICConnectionError, ICResponseError, ICTimeoutError
@@ -492,6 +622,9 @@ class ICModelController(
     _ScheduleMixin,
     _CircuitGroupMixin,
     _LightMixin,
+    _PumpMixin,
+    _BodyMixin,
+    _SystemMixin,
     ICBaseController,
 ):
     """Controller that maintains a PoolModel of equipment state."""
@@ -840,225 +973,6 @@ class ICModelController(
                 return None
         return None
 
-    # =========================================================================
-    # Valve Helpers
-    # =========================================================================
-
-    def get_valve_assignment(self, valve_objnam: str) -> str | None:
-        """Get the assignment/role of a valve.
-
-        Valves can be assigned to different roles in the pool system:
-        - 'INTAKE': Draws water from a specific body (pool or spa)
-        - 'RETURN': Returns water to a specific body (pool or spa)
-        - 'NONE': Not assigned to intake/return (e.g., water feature valve)
-
-        Args:
-            valve_objnam: Object name of the valve
-
-        Returns:
-            Assignment string ('NONE', 'INTAKE', 'RETURN'), or None if unavailable
-        """
-        obj = self._model[valve_objnam]
-        if obj:
-            assign = obj[ASSIGN_ATTR]
-            return str(assign) if assign is not None else None
-        return None
-
-    # =========================================================================
-    # Vacation Mode Control
-    # =========================================================================
-
-    async def set_vacation_mode(self, enabled: bool) -> dict[str, Any]:
-        """Enable or disable vacation mode.
-
-        Vacation mode typically reduces pump runtime and adjusts
-        schedules to minimize energy usage while maintaining water quality.
-
-        Args:
-            enabled: True to enable vacation mode, False to disable
-
-        Returns:
-            Response dictionary
-
-        Example:
-            await controller.set_vacation_mode(True)
-        """
-        if not self._system_info:
-            raise ICCommandError("System info not available")
-
-        return await self._queue_property_change(
-            self._system_info.objnam, {VACFLO_ATTR: STATUS_ON if enabled else STATUS_OFF}
-        )
-
-    def is_vacation_mode(self) -> bool:
-        """Check if vacation mode is currently enabled.
-
-        Returns:
-            True if vacation mode is enabled
-        """
-        if self._system_info:
-            obj = self._model[self._system_info.objnam]
-            if obj:
-                return bool(obj[VACFLO_ATTR] == STATUS_ON)
-        return False
-
-    def get_bodies(self) -> list[PoolObject]:
-        """Get all body objects (pools and spas)."""
-        return self._model.get_by_type(BODY_TYPE)
-
-    def get_circuits(self) -> list[PoolObject]:
-        """Get all circuit objects."""
-        return self._model.get_by_type(CIRCUIT_TYPE)
-
-    def get_heaters(self) -> list[PoolObject]:
-        """Get all heater objects."""
-        return self._model.get_by_type(HEATER_TYPE)
-
-    def get_sensors(self) -> list[PoolObject]:
-        """Get all sensor objects."""
-        return self._model.get_by_type(SENSE_TYPE)
-
-    def get_pumps(self) -> list[PoolObject]:
-        """Get all pump objects."""
-        return self._model.get_by_type(PUMP_TYPE)
-
-    def get_chem_controllers(self) -> list[PoolObject]:
-        """Get all chemistry controller objects (IntelliChem, IntelliChlor)."""
-        return self._model.get_by_type(CHEM_TYPE)
-
-    def get_valves(self) -> list[PoolObject]:
-        """Get all valve objects."""
-        return self._model.get_by_type(VALVE_TYPE)
-
-    # =========================================================================
-    # Temperature/Body Helpers (for Home Assistant climate entities)
-    # =========================================================================
-
-    def get_temperature_unit(self) -> str:
-        """Get the temperature unit used by this system.
-
-        Returns:
-            "°C" for Celsius, "°F" for Fahrenheit
-        """
-        if self.system_info and self.system_info.uses_metric:
-            return "°C"
-        return "°F"
-
-    def get_body_temperature(self, body_objnam: str) -> int | None:
-        """Get the current water temperature for a body.
-
-        Args:
-            body_objnam: Object name of the body (pool or spa)
-
-        Returns:
-            Current temperature as integer, or None if unavailable
-        """
-        return self._get_attr_as_int(body_objnam, TEMP_ATTR)
-
-    def get_body_setpoint(self, body_objnam: str) -> int | None:
-        """Get the heating setpoint for a body.
-
-        This is the temperature the system will heat UP to.
-        Alias for get_body_heating_setpoint().
-
-        Args:
-            body_objnam: Object name of the body (pool or spa)
-
-        Returns:
-            Heating setpoint temperature as integer, or None if unavailable
-        """
-        return self._get_attr_as_int(body_objnam, LOTMP_ATTR)
-
-    def get_body_heating_setpoint(self, body_objnam: str) -> int | None:
-        """Get the heating setpoint for a body.
-
-        This is the temperature the system will heat UP to (LOTMP attribute).
-        For the cooling setpoint, use get_body_cooling_setpoint().
-
-        Args:
-            body_objnam: Object name of the body (pool or spa)
-
-        Returns:
-            Heating setpoint temperature as integer, or None if unavailable
-        """
-        return self._get_attr_as_int(body_objnam, LOTMP_ATTR)
-
-    def get_body_cooling_setpoint(self, body_objnam: str) -> int | None:
-        """Get the cooling setpoint for a body.
-
-        This is the temperature the system will cool DOWN to (HITMP attribute).
-        Only relevant for systems with heat pumps or chillers that support cooling.
-        The cooling setpoint must be higher than the heat setpoint.
-
-        Args:
-            body_objnam: Object name of the body (pool or spa)
-
-        Returns:
-            Cooling setpoint temperature as integer, or None if unavailable
-        """
-        return self._get_attr_as_int(body_objnam, HITMP_ATTR)
-
-    def get_body_heat_mode(self, body_objnam: str) -> HeaterType | None:
-        """Get the current heat mode for a body.
-
-        Args:
-            body_objnam: Object name of the body (pool or spa)
-
-        Returns:
-            HeaterType enum value, or None if unavailable
-        """
-        obj = self._model[body_objnam]
-        if obj and obj[MODE_ATTR]:
-            try:
-                return HeaterType(int(obj[MODE_ATTR]))
-            except (ValueError, TypeError):
-                return None
-        return None
-
-    def is_body_heating(self, body_objnam: str) -> bool:
-        """Check if a body is actively heating.
-
-        Args:
-            body_objnam: Object name of the body (pool or spa)
-
-        Returns:
-            True if heating is active
-        """
-        obj = self._model[body_objnam]
-        if obj:
-            htmode = obj[HTMODE_ATTR]
-            return htmode is not None and htmode != "0"
-        return False
-
-    def is_body_cooling(self, body_objnam: str) -> bool:
-        """Check if a body is actively cooling.
-
-        This checks the heater's COOL attribute to determine if the system
-        is currently in cooling mode. Only UltraTemp heat pumps support cooling.
-
-        Args:
-            body_objnam: Object name of the body (pool or spa)
-
-        Returns:
-            True if cooling is active
-        """
-        body = self._model[body_objnam]
-        if not body:
-            return False
-
-        # Get the heater reference from the body
-        heater_objnam = body[HEATER_ATTR]
-        if not heater_objnam or heater_objnam == NULL_OBJNAM:
-            return False
-
-        # Look up the heater object
-        heater = self._model[heater_objnam]
-        if not heater:
-            return False
-
-        # Check if the heater's COOL attribute is ON
-        return bool(heater["COOL"] == "ON")
-
     def body_supports_cooling(self, body_objnam: str) -> bool:
         """Check if a body has a heater that supports cooling.
 
@@ -1105,234 +1019,6 @@ class ICModelController(
                         return True
 
         return False
-
-    # =========================================================================
-    # Pump Helpers (for Home Assistant sensor/switch entities)
-    # =========================================================================
-
-    def is_pump_running(self, pump_objnam: str) -> bool:
-        """Check if a pump is currently running.
-
-        Note: Pumps use different status values than circuits.
-        "10" = running, "4" = stopped.
-
-        Args:
-            pump_objnam: Object name of the pump
-
-        Returns:
-            True if pump is running
-        """
-        obj = self._model[pump_objnam]
-        if obj:
-            return bool(obj[STATUS_ATTR] == PUMP_STATUS_ON)
-        return False
-
-    def get_pump_rpm(self, pump_objnam: str) -> int | None:
-        """Get current pump RPM.
-
-        Args:
-            pump_objnam: Object name of the pump
-
-        Returns:
-            Current RPM, or None if unavailable
-        """
-        return self._get_attr_as_int(pump_objnam, RPM_ATTR)
-
-    def get_pump_gpm(self, pump_objnam: str) -> int | None:
-        """Get current pump flow rate in gallons per minute.
-
-        Args:
-            pump_objnam: Object name of the pump
-
-        Returns:
-            Current GPM, or None if unavailable
-        """
-        return self._get_attr_as_int(pump_objnam, GPM_ATTR)
-
-    def get_pump_watts(self, pump_objnam: str) -> int | None:
-        """Get current pump power consumption in watts.
-
-        Args:
-            pump_objnam: Object name of the pump
-
-        Returns:
-            Current power in watts, or None if unavailable
-        """
-        return self._get_attr_as_int(pump_objnam, PWR_ATTR)
-
-    def get_pump_metrics(self, pump_objnam: str) -> dict[str, int | None]:
-        """Get all pump metrics in a single call.
-
-        Args:
-            pump_objnam: Object name of the pump
-
-        Returns:
-            Dict with keys: rpm, gpm, watts (values may be None)
-        """
-        return {
-            "rpm": self.get_pump_rpm(pump_objnam),
-            "gpm": self.get_pump_gpm(pump_objnam),
-            "watts": self.get_pump_watts(pump_objnam),
-        }
-
-    # =========================================================================
-    # Pump Circuit Helpers (for VSF pump speed/flow control)
-    # =========================================================================
-
-    def get_pump_circuits(self) -> list[PoolObject]:
-        """Get all pump circuit objects.
-
-        Pump circuits (PMPCIRC) represent per-circuit speed/flow settings
-        for variable speed pumps. Each PMPCIRC links a pump to a circuit
-        with a speed setpoint.
-
-        Returns:
-            List of PoolObject for pump circuits
-        """
-        return self._model.get_by_type(PMPCIRC_TYPE)
-
-    def get_pump_circuit_speed(self, pmpcirc_objnam: str) -> int | None:
-        """Get the speed for a pump circuit if valid for current mode.
-
-        VSF (Variable Speed/Flow) pumps use a unified SPEED attribute that holds
-        either RPM or GPM depending on the SELECT mode. When switching modes,
-        IntelliCenter may send SELECT and SPEED updates in separate NotifyList
-        messages, causing a brief period where the speed value is stale.
-
-        This method returns None if the speed value is outside the valid range
-        for the current mode, indicating the value is stale and should be shown
-        as "unavailable" until the real value arrives from IntelliCenter.
-
-        Example scenario this handles:
-        - Pump is at 80 GPM
-        - User switches mode to RPM
-        - SELECT update arrives first, SPEED still shows 80
-        - 80 is outside RPM range (450-3450), so return None
-        - Entity shows "unavailable" until real RPM value arrives
-
-        Args:
-            pmpcirc_objnam: Object name of the pump circuit (e.g., "p0101")
-
-        Returns:
-            Speed value if within valid range for current mode, None otherwise
-        """
-        pmpcirc = self._model[pmpcirc_objnam]
-        if not pmpcirc or pmpcirc.objtype != PMPCIRC_TYPE:
-            return None
-
-        speed = self._get_attr_as_int(pmpcirc_objnam, SPEED_ATTR)
-        if speed is None:
-            return None
-
-        # Get parent pump for limits
-        parent_objnam = pmpcirc[PARENT_ATTR]
-        parent = self._model[parent_objnam] if parent_objnam else None
-        if not parent:
-            return speed  # No parent pump, can't determine limits
-
-        # Determine limits based on current mode
-        mode = pmpcirc[SELECT_ATTR] or "RPM"
-        if mode == "GPM":
-            min_val = self._get_attr_as_int(parent_objnam, MINF_ATTR) or 15
-            max_val = self._get_attr_as_int(parent_objnam, MAXF_ATTR) or 140
-        else:
-            min_val = self._get_attr_as_int(parent_objnam, MIN_ATTR) or 450
-            max_val = self._get_attr_as_int(parent_objnam, MAX_ATTR) or 3450
-
-        # Return None if value is outside valid range (stale value from mode switch)
-        if speed < min_val or speed > max_val:
-            return None
-
-        return speed
-
-    async def refresh_pump_circuit_speed(self, pmpcirc_objnam: str) -> int | None:
-        """Request fresh SPEED value from IntelliCenter for a pump circuit.
-
-        Use this after changing the pump mode (SELECT attribute) to get the
-        actual SPEED value that IntelliCenter calculated for the new mode.
-
-        This also updates the internal model with the fresh value.
-
-        Args:
-            pmpcirc_objnam: Object name of the pump circuit (e.g., "p0101")
-
-        Returns:
-            Fresh speed value from IntelliCenter, or None if unavailable
-        """
-        try:
-            response = await self.send_cmd(
-                "GetParamList",
-                {
-                    "condition": "",
-                    "objectList": [{"objnam": pmpcirc_objnam, "keys": [SPEED_ATTR]}],
-                },
-            )
-        except (ICConnectionError, ICCommandError):
-            return None
-
-        if response and "objectList" in response:
-            for obj in response["objectList"]:
-                if obj.get("objnam") == pmpcirc_objnam:
-                    params = obj.get("params", {})
-                    speed_str = params.get(SPEED_ATTR)
-                    if speed_str is not None:
-                        # Update the model with fresh value
-                        pmpcirc = self._model[pmpcirc_objnam]
-                        if pmpcirc:
-                            pmpcirc.update({SPEED_ATTR: speed_str})
-                        try:
-                            return int(speed_str)
-                        except (ValueError, TypeError):
-                            pass
-        return None
-
-    def get_pump_circuit_mode(self, pmpcirc_objnam: str) -> str | None:
-        """Get the current mode (RPM or GPM) for a pump circuit.
-
-        Args:
-            pmpcirc_objnam: Object name of the pump circuit
-
-        Returns:
-            "RPM" or "GPM", or None if unavailable
-        """
-        pmpcirc = self._model[pmpcirc_objnam]
-        if not pmpcirc:
-            return None
-        mode = pmpcirc[SELECT_ATTR]
-        return str(mode) if mode else None
-
-    def get_pump_circuit_limits(self, pmpcirc_objnam: str) -> dict[str, dict[str, int | None]]:
-        """Get the speed/flow limits for a pump circuit from its parent pump.
-
-        Returns limits for both RPM and GPM modes, useful for UI controls
-        that need to know the valid range for each mode.
-
-        Args:
-            pmpcirc_objnam: Object name of the pump circuit
-
-        Returns:
-            Dict with 'rpm' and 'gpm' keys, each containing 'min' and 'max' values.
-            Values are None if the pump doesn't support that mode.
-        """
-        pmpcirc = self._model[pmpcirc_objnam]
-        if not pmpcirc:
-            return {"rpm": {"min": None, "max": None}, "gpm": {"min": None, "max": None}}
-
-        parent_objnam = pmpcirc[PARENT_ATTR]
-        parent = self._model[parent_objnam] if parent_objnam else None
-        if not parent:
-            return {"rpm": {"min": None, "max": None}, "gpm": {"min": None, "max": None}}
-
-        return {
-            "rpm": {
-                "min": self._get_attr_as_int(parent_objnam, MIN_ATTR),
-                "max": self._get_attr_as_int(parent_objnam, MAX_ATTR),
-            },
-            "gpm": {
-                "min": self._get_attr_as_int(parent_objnam, MINF_ATTR),
-                "max": self._get_attr_as_int(parent_objnam, MAXF_ATTR),
-            },
-        }
 
     # =========================================================================
     # Entity Discovery Helpers (for Home Assistant integration setup)
