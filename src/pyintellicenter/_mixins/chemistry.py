@@ -25,6 +25,7 @@ from ..attributes import (
     QUALTY_ATTR,
     SALT_ATTR,
     SEC_ATTR,
+    SINDEX_ATTR,
     STATUS_OFF,
     STATUS_ON,
     SUPER_ATTR,
@@ -395,3 +396,24 @@ class _ChemistryMixin(_MixinBase):
             True if any alert is active
         """
         return len(self.get_chem_alerts(chem_objnam)) > 0
+
+    def get_saturation_index(self, chem_objnam: str) -> float | None:
+        """Get the Saturation Index (water balance score) for a chem controller.
+
+        ``SINDEX`` is the controller-computed Langelier Saturation Index, a
+        water-balance score IntelliChem derives from pH, alkalinity, calcium
+        hardness, cyanuric acid, and temperature. This is a pass-through read
+        of that value, not a recalculation. Ideal range is -0.3 to +0.5;
+        positive values indicate scale-forming water, negative values indicate
+        corrosive water.
+
+        Only IntelliChem (SUBTYP=ICHEM) controllers report this value;
+        IntelliChlor controllers return None.
+
+        Args:
+            chem_objnam: Object name of the chemistry controller
+
+        Returns:
+            Saturation Index as a float, or None if unavailable
+        """
+        return self._get_attr_as_float(chem_objnam, SINDEX_ATTR)
