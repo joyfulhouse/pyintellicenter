@@ -346,9 +346,7 @@ class TestPoolModel:
         assert changed["CHM02"][SUBTYP_ATTR] == "ICHEM"
         assert added == {"CHM02"}
 
-    def test_pool_model_process_updates_new_object_without_added_set(
-        self, pool_model: PoolModel
-    ):
+    def test_pool_model_process_updates_new_object_without_added_set(self, pool_model: PoolModel):
         """Adding a new object works even when no added_objnams set is passed.
 
         The added_objnams parameter is optional and backward-compatible.

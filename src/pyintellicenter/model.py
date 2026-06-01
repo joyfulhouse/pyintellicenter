@@ -360,13 +360,12 @@ class PoolModel:
                 _LOGGER.debug("Skipping malformed update entry: %r", update)
                 continue
 
-            # A well-formed entry has a dict of params. Guard against a malformed
-            # params value (e.g. a string) so neither the in-place update nor the
-            # new-object construction below can raise on the protocol hot path.
-            if not isinstance(params, dict):
-                _LOGGER.debug(
-                    "Skipping update for %s: params is not a dict (%r)", objnam, params
-                )
+            # A well-formed entry has a string objnam and a dict of params. Guard
+            # against malformed values (a non-string objnam can't be a dict key
+            # and a non-dict params would break update/construction) so neither
+            # the lookup below nor the hot path can raise.
+            if not isinstance(objnam, str) or not isinstance(params, dict):
+                _LOGGER.debug("Skipping update with invalid objnam/params: %r", update)
                 continue
 
             pool_obj = self._objects.get(objnam)

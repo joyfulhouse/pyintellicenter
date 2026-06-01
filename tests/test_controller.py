@@ -583,23 +583,15 @@ class TestICModelController:
         await asyncio.gather(*controller._monitor_tasks)
 
         # A RequestParamList was sent that targets the new object.
-        request_param_calls = [
-            extra for cmd, extra in sent_commands if cmd == "RequestParamList"
-        ]
+        request_param_calls = [extra for cmd, extra in sent_commands if cmd == "RequestParamList"]
         assert request_param_calls
-        targeted = {
-            item["objnam"]
-            for extra in request_param_calls
-            for item in extra["objectList"]
-        }
+        targeted = {item["objnam"] for extra in request_param_calls for item in extra["objectList"]}
         assert "CHM02" in targeted
 
     @pytest.mark.asyncio
     async def test_request_monitoring_for_handles_errors(self, controller, model):
         """_request_monitoring_for swallows connection errors (background task)."""
-        model.add_object(
-            "CHM02", {"OBJTYP": "CHEM", "SUBTYP": "ICHEM", "SNAME": "IntelliChem 2"}
-        )
+        model.add_object("CHM02", {"OBJTYP": "CHEM", "SUBTYP": "ICHEM", "SNAME": "IntelliChem 2"})
         controller.send_cmd = AsyncMock(side_effect=ICConnectionError("boom"))
 
         # Must not raise despite the failing send_cmd.
@@ -611,6 +603,48 @@ class TestICModelController:
         controller.send_cmd = AsyncMock()
         await controller._request_monitoring_for({"DOES_NOT_EXIST"})
         controller.send_cmd.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_request_monitoring_for_handles_malformed_response(self, controller, model):
+        """A response missing/!list objectList is skipped, not crashed."""
+        model.add_object("CHM02", {"OBJTYP": "CHEM", "SUBTYP": "ICHEM", "SNAME": "IntelliChem 2"})
+
+        # Missing objectList entirely.
+        controller.send_cmd = AsyncMock(return_value={"response": "200"})
+        await controller._request_monitoring_for({"CHM02"})  # must not raise
+
+        # objectList present but not a list.
+        controller.send_cmd = AsyncMock(return_value={"objectList": "nope"})
+        await controller._request_monitoring_for({"CHM02"})  # must not raise
+
+    @pytest.mark.asyncio
+    async def test_request_monitoring_for_respects_batch_limit(self, controller, monkeypatch):
+        """No single RequestParamList batch exceeds MAX_ATTRIBUTES_PER_QUERY keys."""
+        from pyintellicenter.controller import MAX_ATTRIBUTES_PER_QUERY
+
+        # Craft tracked queries whose combined key count far exceeds the limit
+        # (5 objects x 20 keys = 100 > 50), forcing a split into batches.
+        objnams = {f"OBJ{i}" for i in range(5)}
+        crafted = [{"objnam": f"OBJ{i}", "keys": ["K"] * 20} for i in range(5)]
+        monkeypatch.setattr(controller._model, "attributes_to_track", lambda: crafted)
+
+        batches: list[list[dict]] = []
+
+        async def fake_send_cmd(cmd, extra=None):
+            if cmd == "RequestParamList":
+                batches.append(extra["objectList"])
+            return {"objectList": []}
+
+        controller.send_cmd = AsyncMock(side_effect=fake_send_cmd)
+        await controller._request_monitoring_for(objnams)
+
+        assert len(batches) > 1, "expected the oversized query to split into batches"
+        for batch in batches:
+            total_keys = sum(len(item["keys"]) for item in batch)
+            assert total_keys <= MAX_ATTRIBUTES_PER_QUERY
+        # Every object is still covered exactly once across the batches.
+        covered = [item["objnam"] for batch in batches for item in batch]
+        assert sorted(covered) == sorted(objnams)
 
     @pytest.mark.asyncio
     async def test_set_circuit_state(self, controller):

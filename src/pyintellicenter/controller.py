@@ -777,20 +777,33 @@ class ICModelController(
                 )
             else:
                 task = loop.create_task(self._request_monitoring_for(added_objnams))
-                # Retain a reference so the task is not garbage-collected, and
-                # drop it once done to avoid unbounded growth.
+                # Retain a reference so the task is not garbage-collected; the
+                # done callback drops it and logs any unexpected failure.
                 self._monitor_tasks.add(task)
-                task.add_done_callback(self._monitor_tasks.discard)
+                task.add_done_callback(self._on_monitor_task_done)
 
         return updates
+
+    def _on_monitor_task_done(self, task: asyncio.Task[None]) -> None:
+        """Discard a finished monitor task and surface any unexpected error.
+
+        Expected connection errors are handled inside the task; this catches
+        anything else (a bug, or a callback raising) so it is logged rather than
+        silently swallowed by asyncio.
+        """
+        self._monitor_tasks.discard(task)
+        if not task.cancelled():
+            exc = task.exception()
+            if exc is not None:
+                _LOGGER.warning("Monitor request for new objects failed: %s", exc)
 
     async def _request_monitoring_for(self, objnams: set[str]) -> None:
         """Request attribute monitoring for the given (newly-added) objects.
 
         Builds the same per-object {objnam, keys} query that start() uses, from
         the model's attribute map, and sends it in batches bounded by
-        MAX_ATTRIBUTES_PER_QUERY. Errors are logged and swallowed: this runs in a
-        background task off the notification hot path and must not raise.
+        MAX_ATTRIBUTES_PER_QUERY. Connection errors are logged and swallowed:
+        this runs in a background task off the notification hot path.
         """
         # Reuse the model's tracking query, filtered to the new objects so we only
         # (re-)subscribe what is needed.
@@ -802,19 +815,36 @@ class ICModelController(
         num_attributes = 0
         try:
             for items in queries:
-                batch.append(items)
-                num_attributes += len(items["keys"])
-                if num_attributes >= MAX_ATTRIBUTES_PER_QUERY:
-                    res = await self.send_cmd("RequestParamList", {"objectList": batch})
-                    self._apply_updates(res["objectList"])
+                keys_len = len(items["keys"])
+                # Flush the current batch before it would exceed the limit (a
+                # single object with more keys than the limit is still sent alone).
+                if batch and num_attributes + keys_len > MAX_ATTRIBUTES_PER_QUERY:
+                    await self._send_monitor_batch(batch)
                     batch = []
                     num_attributes = 0
+                batch.append(items)
+                num_attributes += keys_len
 
             if batch:
-                res = await self.send_cmd("RequestParamList", {"objectList": batch})
-                self._apply_updates(res["objectList"])
+                await self._send_monitor_batch(batch)
         except (ICConnectionError, ICCommandError, ICTimeoutError, OSError) as err:
             _LOGGER.warning("Failed to request monitoring for new objects %s: %s", objnams, err)
+
+    async def _send_monitor_batch(self, batch: list[dict[str, Any]]) -> None:
+        """Send one RequestParamList batch and apply the response.
+
+        Validates the response shape so a malformed reply is logged and skipped
+        rather than crashing the background monitor task.
+        """
+        res = await self.send_cmd("RequestParamList", {"objectList": batch})
+        object_list = res.get("objectList")
+        if not isinstance(object_list, list):
+            _LOGGER.warning(
+                "RequestParamList returned no usable objectList for monitor request: %r",
+                res,
+            )
+            return
+        self._apply_updates(object_list)
 
     # --------------------------------------------------------------------------
     # Request coalescing for convenience methods
