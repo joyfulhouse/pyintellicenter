@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Add the missing `SAMMOD` ("SAm") IntelliBrite light show to `LIGHT_EFFECTS`. When a
+  light's `USE` attribute reported `SAMMOD`, it was absent from the effect map, so
+  downstream consumers (e.g. the Home Assistant integration) resolved the effect to
+  `None`. Verified `SAMMOD` as the IntelliCenter `USE` show code against multiple
+  independent IntelliCenter implementations (intellicenter#47).
+
 ## [0.1.16] - 2026-05-31
 
 ### Added
