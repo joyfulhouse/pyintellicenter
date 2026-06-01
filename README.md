@@ -17,7 +17,7 @@ Python library for communicating with Pentair IntelliCenter pool control systems
 - **Type Annotations**: Full type hints for IDE support and static analysis
 - **Robust Connection Handling**: Automatic reconnection with exponential backoff
 - **Circuit Breaker Pattern**: Prevents connection storms during outages
-- **Home Assistant Ready**: Convenience helpers for integration development
+- **Home Assistant Ready**: Convenience helpers for integration development, including read-only accessors for temperature, chemistry, sensors, heaters, and schedules
 
 ## Installation
 
@@ -244,16 +244,22 @@ hardware = await controller.get_hardware_definition()  # Full equipment hierarch
 # Temperature helpers
 unit = controller.get_temperature_unit()  # "F" or "C"
 temp = controller.get_body_temperature("B1101")
+last_temp = controller.get_body_last_temperature("B1101")  # Last recorded temp (valid even when body is off)
 heat_setpoint = controller.get_body_heating_setpoint("B1101")  # Heat to this temp
 cool_setpoint = controller.get_body_cooling_setpoint("B1101")  # Cool to this temp
 heat_mode = controller.get_body_heat_mode("B1101")
 is_heating = controller.is_body_heating("B1101")
+
+# Heater helpers
+heater = controller.get_heater_for_body("B1101")  # Body's assigned heater PoolObject (None if unassigned)
+heater_ready = controller.is_heater_ready("H0001")  # Heater READY=ON (able to fire)
 
 # Chemistry helpers
 ph = controller.get_chem_reading("C0001", "PH")
 orp = controller.get_chem_reading("C0001", "ORP")
 salt = controller.get_chem_reading("C0001", "SALT")
 alerts = controller.get_chem_alerts("C0001")
+sindex = controller.get_saturation_index("C0001")  # Controller-computed Langelier Saturation Index (IntelliChem only)
 
 # Chemistry setpoint control (IntelliChem)
 await controller.set_ph_setpoint("CHEM1", 7.4)
@@ -284,12 +290,22 @@ metrics = controller.get_pump_metrics("P0001")  # {"rpm": ..., "gpm": ..., "watt
 # Sensor helpers
 air_sensors = controller.get_air_sensors()
 solar_sensors = controller.get_solar_sensors()
-reading = controller.get_sensor_reading("S0001")
+reading = controller.get_sensor_reading("S0001")  # Calibrated reading (SOURCE)
+probe = controller.get_sensor_probe_reading("S0001")  # Raw uncalibrated probe reading (PROBE)
+calibration = controller.get_sensor_calibration("S0001")  # Calibration offset (CALIB)
 
 # Light helpers
 effect = controller.get_light_effect("C0003")
 effect_name = controller.get_light_effect_name("C0003")
 available = controller.get_available_light_effects("C0003")
+
+# Schedule helpers
+schedules = controller.get_schedules()
+enabled = controller.is_schedule_enabled("SCH01")  # STATUS=ON (will run at scheduled time)
+circuit = controller.get_schedule_circuit("SCH01")  # objnam of controlled circuit, or None
+start = controller.get_schedule_start_time("SCH01")  # "HH,MM,SS" 24-hour, or None
+stop = controller.get_schedule_stop_time("SCH01")  # "HH,MM,SS" 24-hour, or None
+days = controller.get_schedule_days("SCH01")  # e.g. "MTWRFAU" (M=Mon..U=Sun), or None
 
 # Update callback
 def on_update(controller, changes):
