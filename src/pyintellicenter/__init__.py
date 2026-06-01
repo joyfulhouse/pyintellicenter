@@ -107,6 +107,7 @@ from .attributes import (
     SEC_ATTR,
     SELECT_ATTR,
     SENSE_TYPE,
+    SERVICE_ATTR,
     SHOMNU_ATTR,
     SINDEX_ATTR,
     SMTSRT_ATTR,
@@ -184,7 +185,7 @@ try:
 except ImportError:
     _DISCOVERY_AVAILABLE = False
 
-__version__ = "0.1.17"
+__version__ = "0.1.18"
 
 __all__ = [
     # Version
@@ -310,6 +311,7 @@ __all__ = [
     "SALT_ATTR",
     "SEC_ATTR",
     "SELECT_ATTR",
+    "SERVICE_ATTR",
     "SHOMNU_ATTR",
     "SINDEX_ATTR",
     "SMTSRT_ATTR",
