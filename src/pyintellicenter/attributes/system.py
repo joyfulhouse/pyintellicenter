@@ -12,6 +12,7 @@ from .constants import (
     PORT_ATTR,
     PROPNAME_ATTR,
     READY_ATTR,
+    SERVICE_ATTR,
     SHOMNU_ATTR,
     SNAME_ATTR,
     SOURCE_ATTR,
@@ -50,7 +51,7 @@ SYSTEM_ATTRIBUTES = {
     PORT_ATTR,  # (int) WebSocket port (e.g., 6680)
     PROPNAME_ATTR,  # name of the property
     READY_ATTR,  # (ON/OFF) System ready state
-    "SERVICE",  # 'AUTO' for automatic
+    SERVICE_ATTR,  # system operating mode: 'AUTO' (automatic); also Service/Timeout
     SNAME_ATTR,  # a crazy looking string I assume to be unique to this system
     "START",  # almost looks like a date but no idea
     "STATE",  # Pool State

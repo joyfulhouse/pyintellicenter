@@ -144,6 +144,7 @@ RPM_ATTR = "RPM"
 SALT_ATTR = "SALT"
 SEC_ATTR = "SEC"
 SELECT_ATTR = "SELECT"
+SERVICE_ATTR = "SERVICE"  # system operating mode: 'AUTO' (automatic); also Service/Timeout
 SETTMP_ATTR = "SETTMP"
 SHOMNU_ATTR = "SHOMNU"
 SINDEX_ATTR = "SINDEX"
