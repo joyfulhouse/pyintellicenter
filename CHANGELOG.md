@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.16] - 2026-05-31
+
+### Added
+
+- Read-only convenience helpers on `ICModelController` (via the domain mixins):
+  - `get_saturation_index()` — surfaces the controller-computed Langelier Saturation Index (`SINDEX`).
+  - `is_heater_ready()` — whether a heater reports `READY=ON`.
+  - `get_sensor_probe_reading()` / `get_sensor_calibration()` — sensor `PROBE` / `CALIB` values.
+  - `get_body_last_temperature()` — a body's last recorded temperature (`LSTTMP`).
+  - `get_heater_for_body()` — resolves a body's assigned heater to its `PoolObject` (null-safe).
+  - `is_schedule_enabled()`, `get_schedule_circuit()`, `get_schedule_start_time()`, `get_schedule_stop_time()`, `get_schedule_days()` — schedule read helpers.
+- New attribute constants `SINDEX_ATTR`, `DAY_ATTR`, and `COOL_ATTR`, exported from the package.
+
+### Changed
+
+- `is_body_cooling()` now reuses `get_heater_for_body()` instead of duplicating the body→heater resolution.
+
 ## [0.1.15] - 2026-02-26
 
 ### Fixed
