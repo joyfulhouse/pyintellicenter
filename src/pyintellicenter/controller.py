@@ -671,6 +671,10 @@ class ICModelController(
         self._pending_requests: list[_PendingRequest] = []
         self._coalesce_lock = asyncio.Lock()
 
+        # Background tasks that request monitoring for objects added at runtime.
+        # Held in a set so they are not garbage-collected before completing.
+        self._monitor_tasks: set[asyncio.Task[None]] = set()
+
     def __repr__(self) -> str:
         return (
             f"ICModelController(host={self._host!r}, port={self._port}, "
@@ -739,18 +743,78 @@ class ICModelController(
                 _LOGGER.exception("Error processing NotifyList: %s", err)
 
     def _apply_updates(self, changes_as_list: list[ObjectEntry]) -> dict[str, dict[str, Any]]:
-        """Apply updates to the model."""
-        updates = self._model.process_updates(changes_as_list)
+        """Apply updates to the model.
+
+        A NotifyList may introduce a brand-new object (e.g. equipment installed
+        while the connection is live). process_updates() adds such objects to the
+        model and reports their objnams via ``added_objnams``; we then schedule a
+        RequestParamList so IntelliCenter starts pushing their monitored
+        attributes (a newly-added object is not monitored otherwise).
+        """
+        added_objnams: set[str] = set()
+        updates = self._model.process_updates(changes_as_list, added_objnams)
 
         # Update ICSystemInfo if changed
         if self._system_info and self._system_info.objnam in updates:
             self._system_info.update(updates[self._system_info.objnam])
 
-        # Notify callback
+        # Notify callback (newly-added objects are included in updates, so the
+        # existing callback path surfaces them to consumers).
         if updates and self._updated_callback:
             self._updated_callback(self, updates)
 
+        # Start monitoring any newly-added objects. This issues a network request,
+        # so it runs as a background task; _on_notification is a synchronous
+        # callback. If no event loop is running (e.g. direct synchronous calls in
+        # tests) we skip scheduling rather than crash.
+        if added_objnams:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                _LOGGER.debug(
+                    "No running loop; skipping monitor request for new objects %s",
+                    added_objnams,
+                )
+            else:
+                task = loop.create_task(self._request_monitoring_for(added_objnams))
+                # Retain a reference so the task is not garbage-collected, and
+                # drop it once done to avoid unbounded growth.
+                self._monitor_tasks.add(task)
+                task.add_done_callback(self._monitor_tasks.discard)
+
         return updates
+
+    async def _request_monitoring_for(self, objnams: set[str]) -> None:
+        """Request attribute monitoring for the given (newly-added) objects.
+
+        Builds the same per-object {objnam, keys} query that start() uses, from
+        the model's attribute map, and sends it in batches bounded by
+        MAX_ATTRIBUTES_PER_QUERY. Errors are logged and swallowed: this runs in a
+        background task off the notification hot path and must not raise.
+        """
+        # Reuse the model's tracking query, filtered to the new objects so we only
+        # (re-)subscribe what is needed.
+        queries = [q for q in self._model.attributes_to_track() if q["objnam"] in objnams]
+        if not queries:
+            return
+
+        batch: list[dict[str, Any]] = []
+        num_attributes = 0
+        try:
+            for items in queries:
+                batch.append(items)
+                num_attributes += len(items["keys"])
+                if num_attributes >= MAX_ATTRIBUTES_PER_QUERY:
+                    res = await self.send_cmd("RequestParamList", {"objectList": batch})
+                    self._apply_updates(res["objectList"])
+                    batch = []
+                    num_attributes = 0
+
+            if batch:
+                res = await self.send_cmd("RequestParamList", {"objectList": batch})
+                self._apply_updates(res["objectList"])
+        except (ICConnectionError, ICCommandError, ICTimeoutError, OSError) as err:
+            _LOGGER.warning("Failed to request monitoring for new objects %s: %s", objnams, err)
 
     # --------------------------------------------------------------------------
     # Request coalescing for convenience methods

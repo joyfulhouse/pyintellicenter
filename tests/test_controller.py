@@ -490,6 +490,128 @@ class TestICModelController:
         assert callback_called
         assert "CIRCUIT1" in received_updates
 
+    def test_on_notification_adds_new_object_and_fires_callback(self, controller, model):
+        """A NotifyList for a brand-new object adds it and fires the callback.
+
+        Covers the zero-restart dynamic-object path (issue #42): an object not
+        already in the model arrives via NotifyList with OBJTYP and is added,
+        then surfaced through the existing updated callback. Called synchronously
+        (no running loop) so the monitor re-request is skipped gracefully.
+        """
+        received_updates = {}
+
+        def update_callback(ctrl, updates):
+            received_updates.update(updates)
+
+        controller.set_updated_callback(update_callback)
+
+        assert model["CHM02"] is None
+
+        msg = {
+            "command": "NotifyList",
+            "objectList": [
+                {
+                    "objnam": "CHM02",
+                    "params": {
+                        "OBJTYP": "CHEM",
+                        "SUBTYP": "ICHEM",
+                        "SNAME": "IntelliChem 2",
+                        "STATUS": "ON",
+                    },
+                }
+            ],
+        }
+        # No event loop running here; must not raise.
+        controller._on_notification(msg)
+
+        # Object added to the model and surfaced to the callback.
+        new_obj = model["CHM02"]
+        assert new_obj is not None
+        assert new_obj.objtype == "CHEM"
+        assert "CHM02" in received_updates
+        assert received_updates["CHM02"]["STATUS"] == "ON"
+
+    def test_on_notification_unknown_object_without_objtyp_no_crash(self, controller, model):
+        """A NotifyList for an unknown objnam lacking OBJTYP is ignored safely."""
+        callback_calls = []
+        controller.set_updated_callback(lambda ctrl, updates: callback_calls.append(updates))
+
+        msg = {
+            "command": "NotifyList",
+            "objectList": [{"objnam": "MYSTERY", "params": {"STATUS": "ON"}}],
+        }
+        controller._on_notification(msg)
+
+        assert model["MYSTERY"] is None
+        # Nothing changed, so the callback should not fire.
+        assert callback_calls == []
+
+    @pytest.mark.asyncio
+    async def test_new_object_triggers_monitoring_request(self, controller, model):
+        """A new object arriving via NotifyList triggers a RequestParamList.
+
+        IntelliCenter does not push attributes for an object that was not part
+        of the initial monitoring request, so the controller must (re-)subscribe
+        the newly-added object. Runs inside an event loop so the background
+        monitor task is scheduled.
+        """
+        sent_commands = []
+
+        async def fake_send_cmd(cmd, extra=None):
+            sent_commands.append((cmd, extra))
+            return {"response": "200", "objectList": []}
+
+        controller.send_cmd = AsyncMock(side_effect=fake_send_cmd)
+
+        msg = {
+            "command": "NotifyList",
+            "objectList": [
+                {
+                    "objnam": "CHM02",
+                    "params": {
+                        "OBJTYP": "CHEM",
+                        "SUBTYP": "ICHEM",
+                        "SNAME": "IntelliChem 2",
+                    },
+                }
+            ],
+        }
+        controller._on_notification(msg)
+
+        # The monitor request runs as a background task; let it run.
+        assert controller._monitor_tasks
+        await asyncio.gather(*controller._monitor_tasks)
+
+        # A RequestParamList was sent that targets the new object.
+        request_param_calls = [
+            extra for cmd, extra in sent_commands if cmd == "RequestParamList"
+        ]
+        assert request_param_calls
+        targeted = {
+            item["objnam"]
+            for extra in request_param_calls
+            for item in extra["objectList"]
+        }
+        assert "CHM02" in targeted
+
+    @pytest.mark.asyncio
+    async def test_request_monitoring_for_handles_errors(self, controller, model):
+        """_request_monitoring_for swallows connection errors (background task)."""
+        model.add_object(
+            "CHM02", {"OBJTYP": "CHEM", "SUBTYP": "ICHEM", "SNAME": "IntelliChem 2"}
+        )
+        controller.send_cmd = AsyncMock(side_effect=ICConnectionError("boom"))
+
+        # Must not raise despite the failing send_cmd.
+        await controller._request_monitoring_for({"CHM02"})
+
+    @pytest.mark.asyncio
+    async def test_request_monitoring_for_no_matching_objects(self, controller):
+        """_request_monitoring_for is a no-op when nothing matches."""
+        controller.send_cmd = AsyncMock()
+        await controller._request_monitoring_for({"DOES_NOT_EXIST"})
+        controller.send_cmd.assert_not_called()
+
     @pytest.mark.asyncio
     async def test_set_circuit_state(self, controller):
         """Test set_circuit_state convenience method."""
