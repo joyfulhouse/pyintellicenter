@@ -28,7 +28,8 @@ def pool_object_light() -> PoolObject:
             SUBTYP_ATTR: "INTELLI",
             SNAME_ATTR: "Pool Light",
             STATUS_ATTR: "OFF",
-            "USE": "SAM",
+            # SAMMOD is the IntelliCenter USE code for the "SAm" light show.
+            "USE": "SAMMOD",
         },
     )
 
