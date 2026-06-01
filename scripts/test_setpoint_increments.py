@@ -6,10 +6,7 @@ import os
 
 from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
-
-from pyintellicenter import ICModelController, PoolModel
+from pyintellicenter import ICError, ICModelController, PoolModel
 from pyintellicenter.attributes import (
     ORPSET_ATTR,
     PHSET_ATTR,
@@ -17,6 +14,9 @@ from pyintellicenter.attributes import (
     SEC_ATTR,
     SUBTYP_ATTR,
 )
+
+# Load environment variables
+load_dotenv()
 
 
 async def main():
@@ -52,7 +52,8 @@ async def main():
         # and try some test increments
         # Detect by presence of PHSET/ORPSET or name containing "IntelliChem"
         intellichem = next(
-            (c for c in chem_controllers if c[PHSET_ATTR] is not None or "chem" in c.sname.lower()), None
+            (c for c in chem_controllers if c[PHSET_ATTR] is not None or "chem" in c.sname.lower()),
+            None,
         )
 
         if intellichem:
@@ -87,7 +88,7 @@ async def main():
                             new_ph = controller.get_ph_setpoint(objnam)
                             accepted = abs(new_ph - test_ph) < 0.001 if new_ph else False
                             print(f"  Sent: {test_ph}, Got: {new_ph} (accepted: {accepted})")
-                        except Exception as e:
+                        except ICError as e:
                             print(f"  Error: {e}")
 
                         # Restore original
@@ -113,7 +114,7 @@ async def main():
                                 f"  Result: {new_orp} (accepted: {accepted}, "
                                 f"actual change: {actual_change})"
                             )
-                        except Exception as e:
+                        except ICError as e:
                             print(f"  Error: {e}")
 
                         # Restore original
@@ -122,7 +123,8 @@ async def main():
 
         # Check IntelliChlor (detect by presence of PRIM or name containing "chlor")
         intellichlor = next(
-            (c for c in chem_controllers if c[PRIM_ATTR] is not None or "chlor" in c.sname.lower()), None
+            (c for c in chem_controllers if c[PRIM_ATTR] is not None or "chlor" in c.sname.lower()),
+            None,
         )
 
         if intellichlor:
@@ -153,7 +155,7 @@ async def main():
                             f"  Result: {new_prim}% (accepted: {accepted}, "
                             f"actual change: {actual_change})"
                         )
-                    except Exception as e:
+                    except ICError as e:
                         print(f"  Error: {e}")
 
                     # Restore original

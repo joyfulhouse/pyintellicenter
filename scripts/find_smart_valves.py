@@ -31,11 +31,30 @@ async def main():
             "GetParamList",
             {
                 "condition": "OBJTYP=BODY",
-                "objectList": [{"objnam": "INCR", "keys": [
-                    "OBJTYP", "SUBTYP", "SNAME", "STATUS", "MODE", "VALVE",
-                    "INTAKE", "RETURN", "SPILLWAY", "DRAIN", "SHARE",
-                    "HEATER", "HTSRC", "HTMODE", "TEMP", "LOTMP", "HITMP",
-                ]}],
+                "objectList": [
+                    {
+                        "objnam": "INCR",
+                        "keys": [
+                            "OBJTYP",
+                            "SUBTYP",
+                            "SNAME",
+                            "STATUS",
+                            "MODE",
+                            "VALVE",
+                            "INTAKE",
+                            "RETURN",
+                            "SPILLWAY",
+                            "DRAIN",
+                            "SHARE",
+                            "HEATER",
+                            "HTSRC",
+                            "HTMODE",
+                            "TEMP",
+                            "LOTMP",
+                            "HITMP",
+                        ],
+                    }
+                ],
             },
         )
         for obj in response.get("objectList", []):
@@ -54,10 +73,22 @@ async def main():
                 "GetParamList",
                 {
                     "condition": f"OBJTYP={objtype}",
-                    "objectList": [{"objnam": "INCR", "keys": [
-                        "OBJTYP", "SUBTYP", "SNAME", "STATUS", "MODE",
-                        "VALVE", "ASSIGN", "CIRCUIT", "PARENT",
-                    ]}],
+                    "objectList": [
+                        {
+                            "objnam": "INCR",
+                            "keys": [
+                                "OBJTYP",
+                                "SUBTYP",
+                                "SNAME",
+                                "STATUS",
+                                "MODE",
+                                "VALVE",
+                                "ASSIGN",
+                                "CIRCUIT",
+                                "PARENT",
+                            ],
+                        }
+                    ],
                 },
             )
             for obj in response.get("objectList", []):
@@ -81,7 +112,12 @@ async def main():
         def search_for_valves(obj, path=""):
             if isinstance(obj, dict):
                 for k, v in obj.items():
-                    if "valve" in k.lower() or "intake" in k.lower() or "return" in k.lower() or "spill" in k.lower():
+                    if (
+                        "valve" in k.lower()
+                        or "intake" in k.lower()
+                        or "return" in k.lower()
+                        or "spill" in k.lower()
+                    ):
                         print(f"{path}.{k} = {v!r}")
                     search_for_valves(v, f"{path}.{k}")
             elif isinstance(obj, list):
@@ -98,9 +134,19 @@ async def main():
             "GetParamList",
             {
                 "condition": "OBJTYP=CIRCGRP",
-                "objectList": [{"objnam": "INCR", "keys": [
-                    "OBJTYP", "SUBTYP", "SNAME", "STATUS", "CIRCUIT", "USE",
-                ]}],
+                "objectList": [
+                    {
+                        "objnam": "INCR",
+                        "keys": [
+                            "OBJTYP",
+                            "SUBTYP",
+                            "SNAME",
+                            "STATUS",
+                            "CIRCUIT",
+                            "USE",
+                        ],
+                    }
+                ],
             },
         )
         for obj in response.get("objectList", []):

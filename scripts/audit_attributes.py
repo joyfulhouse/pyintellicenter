@@ -90,8 +90,10 @@ async def main():
                 print(f"\n{objtype} ({len(objects)} objects): ✓ All attributes tracked")
 
         print("\n" + "=" * 70)
-        print(f"SUMMARY: {total_missing} untracked attributes with values, "
-              f"{total_extra} tracked but not seen")
+        print(
+            f"SUMMARY: {total_missing} untracked attributes with values, "
+            f"{total_extra} tracked but not seen"
+        )
         print("=" * 70)
 
         # Also show raw count of what we're tracking

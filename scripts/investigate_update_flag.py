@@ -25,8 +25,18 @@ async def main():
 
         # Check UPDATE attribute across all object types
         object_types = [
-            "BODY", "CIRCUIT", "PUMP", "HEATER", "CHEM", "SENSE",
-            "SCHED", "VALVE", "CIRCGRP", "SYSTEM", "SYSTIM", "MODULE"
+            "BODY",
+            "CIRCUIT",
+            "PUMP",
+            "HEATER",
+            "CHEM",
+            "SENSE",
+            "SCHED",
+            "VALVE",
+            "CIRCGRP",
+            "SYSTEM",
+            "SYSTIM",
+            "MODULE",
         ]
 
         print("=" * 70)
@@ -38,7 +48,9 @@ async def main():
                 "GetParamList",
                 {
                     "condition": f"OBJTYP={objtype}",
-                    "objectList": [{"objnam": "INCR", "keys": ["SNAME", "UPDATE", "VER", "STATUS"]}],
+                    "objectList": [
+                        {"objnam": "INCR", "keys": ["SNAME", "UPDATE", "VER", "STATUS"]}
+                    ],
                 },
             )
 
@@ -50,7 +62,9 @@ async def main():
                     sname = params.get("SNAME", objnam)
                     ver = params.get("VER", "")
                     status = params.get("STATUS", "")
-                    print(f"{objtype}.{objnam} ({sname}): UPDATE={update_val}, VER={ver}, STATUS={status}")
+                    print(
+                        f"{objtype}.{objnam} ({sname}): UPDATE={update_val}, VER={ver}, STATUS={status}"
+                    )
 
         # Also check SYSTEM object more thoroughly
         print("\n" + "=" * 70)
@@ -60,13 +74,26 @@ async def main():
         response = await controller.send_cmd(
             "GetParamList",
             {
-                "objectList": [{
-                    "objnam": controller.system_info.objnam,
-                    "keys": [
-                        "UPDATE", "VER", "AVAIL", "ACT", "ACT1", "ACT2", "ACT3", "ACT4",
-                        "STATUS", "MODE", "ENABLE", "SERVICE", "PROPNAME"
-                    ]
-                }],
+                "objectList": [
+                    {
+                        "objnam": controller.system_info.objnam,
+                        "keys": [
+                            "UPDATE",
+                            "VER",
+                            "AVAIL",
+                            "ACT",
+                            "ACT1",
+                            "ACT2",
+                            "ACT3",
+                            "ACT4",
+                            "STATUS",
+                            "MODE",
+                            "ENABLE",
+                            "SERVICE",
+                            "PROPNAME",
+                        ],
+                    }
+                ],
             },
         )
 
