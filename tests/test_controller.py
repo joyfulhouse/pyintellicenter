@@ -1284,6 +1284,24 @@ class TestICModelController:
         """Test get_light_effect returns None when object doesn't exist."""
         assert controller.get_light_effect("NONEXISTENT") is None
 
+    def test_sam_light_show_effect_is_known(self, controller):
+        """Regression test for intellicenter#47: the SAm light show must map.
+
+        IntelliCenter reports the SAm light show as USE=SAMMOD. It was missing
+        from LIGHT_EFFECTS, so consumers resolved the effect name to None.
+        """
+        effects = controller.get_available_light_effects()
+        assert "SAMMOD" in effects
+        assert effects["SAMMOD"] == "SAm"
+
+    def test_get_light_effect_name_resolves_sam(self, controller, model):
+        """A light reporting USE=SAMMOD resolves to the SAm effect name."""
+        model.add_object(
+            "C001",
+            {"OBJTYP": "CIRCUIT", "SUBTYP": "INTELLI", "SNAME": "Light", "USE": "SAMMOD"},
+        )
+        assert controller.get_light_effect_name("C001") == "SAm"
+
 
 class TestRequestCoalescing:
     """Test request coalescing behavior in ICModelController."""

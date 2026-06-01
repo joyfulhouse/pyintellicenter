@@ -19,13 +19,17 @@ COLOR_EFFECT_SUBTYPES = frozenset(["INTELLI", "MAGIC2", "GLOW"])
 
 # Mapping of IntelliCenter color effect codes to human-readable names
 # Used with the USE attribute on lights with COLOR_EFFECT_SUBTYPES
+# Covers the IntelliBrite light shows followed by the fixed colors.
 LIGHT_EFFECTS: dict[str, str] = {
+    # Light shows
+    "SAMMOD": "SAm",
     "PARTY": "Party Mode",
     "CARIB": "Caribbean",
     "SSET": "Sunset",
     "ROMAN": "Romance",
     "AMERCA": "American",
     "ROYAL": "Royal",
+    # Fixed colors
     "WHITER": "White",
     "REDR": "Red",
     "BLUER": "Blue",
