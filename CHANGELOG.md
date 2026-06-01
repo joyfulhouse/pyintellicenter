@@ -5,7 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.17] - 2026-06-01
+
+### Added
+
+- **Zero-restart dynamic object detection** (issue #42): when IntelliCenter pushes a
+  `NotifyList` for a brand-new object (e.g. a freshly-installed 2nd IntelliChem) that is
+  not yet in the model, `PoolModel.process_updates()` now adds it instead of silently
+  dropping the update — provided the entry carries enough to construct it (`OBJTYP`, and a
+  type tracked by the attribute map). Newly-added objects are surfaced through the normal
+  `updates` dict so existing `on_updated` consumers react to them, and
+  `ICModelController` re-requests attribute monitoring (`RequestParamList`) for them so
+  IntelliCenter starts pushing their state — all without a reconnect or restart.
+  `process_updates()` gains an optional `added_objnams` out-parameter (backward
+  compatible) for callers that want to distinguish additions from updates. Malformed or
+  partial `NotifyList` entries are handled defensively and never crash the hot path.
+  Reported by @bhamiltoncx.
 
 ### Fixed
 

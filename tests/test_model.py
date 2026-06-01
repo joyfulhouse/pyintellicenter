@@ -289,7 +289,11 @@ class TestPoolModel:
         assert changed == {}
 
     def test_pool_model_process_updates_unknown_object(self, pool_model: PoolModel):
-        """Test processing updates for non-existent object."""
+        """Test processing updates for non-existent object without OBJTYP.
+
+        A NotifyList entry for an unknown objnam that lacks enough information
+        to construct the object (no OBJTYP) is ignored safely.
+        """
         updates = [
             {
                 "objnam": "UNKNOWN",
@@ -297,9 +301,129 @@ class TestPoolModel:
             },
         ]
 
-        changed = pool_model.process_updates(updates)
+        added: set[str] = set()
+        changed = pool_model.process_updates(updates, added)
 
         assert changed == {}
+        assert added == set()
+        assert pool_model["UNKNOWN"] is None
+        assert pool_model.num_objects == 4  # unchanged
+
+    def test_pool_model_process_updates_adds_new_object(self, pool_model: PoolModel):
+        """A NotifyList for a brand-new object (with OBJTYP) adds it to the model.
+
+        Simulates a freshly-installed 2nd IntelliChem appearing via NotifyList
+        without a reconnect (issue #42).
+        """
+        original_count = pool_model.num_objects
+        updates = [
+            {
+                "objnam": "CHM02",
+                "params": {
+                    OBJTYP_ATTR: "CHEM",
+                    SUBTYP_ATTR: "ICHEM",
+                    SNAME_ATTR: "IntelliChem 2",
+                    STATUS_ATTR: "ON",
+                },
+            },
+        ]
+
+        added: set[str] = set()
+        changed = pool_model.process_updates(updates, added)
+
+        # Object is now in the model.
+        new_obj = pool_model["CHM02"]
+        assert new_obj is not None
+        assert new_obj.objtype == "CHEM"
+        assert new_obj.subtype == "ICHEM"
+        assert new_obj.sname == "IntelliChem 2"
+        assert pool_model.num_objects == original_count + 1
+
+        # It is surfaced as a change and reported as newly added.
+        assert "CHM02" in changed
+        assert changed["CHM02"][STATUS_ATTR] == "ON"
+        assert changed["CHM02"][OBJTYP_ATTR] == "CHEM"
+        assert changed["CHM02"][SUBTYP_ATTR] == "ICHEM"
+        assert added == {"CHM02"}
+
+    def test_pool_model_process_updates_new_object_without_added_set(self, pool_model: PoolModel):
+        """Adding a new object works even when no added_objnams set is passed.
+
+        The added_objnams parameter is optional and backward-compatible.
+        """
+        updates = [
+            {
+                "objnam": "CHM02",
+                "params": {OBJTYP_ATTR: "CHEM", SUBTYP_ATTR: "ICHEM"},
+            },
+        ]
+
+        changed = pool_model.process_updates(updates)
+
+        assert pool_model["CHM02"] is not None
+        assert "CHM02" in changed
+
+    def test_pool_model_process_updates_new_object_untracked_type(self):
+        """A new object whose type is not tracked is not added or surfaced."""
+        model = PoolModel(attribute_map={CIRCUIT_TYPE: {STATUS_ATTR}})
+        updates = [
+            {
+                "objnam": "PUMP9",
+                "params": {OBJTYP_ATTR: PUMP_TYPE, STATUS_ATTR: "10"},
+            },
+        ]
+
+        added: set[str] = set()
+        changed = model.process_updates(updates, added)
+
+        assert changed == {}
+        assert added == set()
+        assert model["PUMP9"] is None
+        assert model.num_objects == 0
+
+    def test_pool_model_process_updates_mixed_new_and_existing(self, pool_model: PoolModel):
+        """A single NotifyList can update an existing object and add a new one."""
+        updates = [
+            {"objnam": "LIGHT1", "params": {STATUS_ATTR: "ON"}},
+            {
+                "objnam": "CHM02",
+                "params": {OBJTYP_ATTR: "CHEM", SUBTYP_ATTR: "ICHEM"},
+            },
+        ]
+
+        added: set[str] = set()
+        changed = pool_model.process_updates(updates, added)
+
+        assert pool_model["LIGHT1"].status == "ON"
+        assert pool_model["CHM02"] is not None
+        assert "LIGHT1" in changed
+        assert "CHM02" in changed
+        assert added == {"CHM02"}
+
+    def test_pool_model_process_updates_malformed_entries_safe(self, pool_model: PoolModel):
+        """Malformed NotifyList entries never crash and don't corrupt the model."""
+        original_count = pool_model.num_objects
+        # Deliberately malformed entries (wrong shape/type) to exercise the
+        # protocol hot-path robustness. Typed as list[Any] because these
+        # intentionally violate the ObjectEntry contract.
+        updates: list[Any] = [
+            {"params": {STATUS_ATTR: "ON"}},  # missing 'objnam'
+            {"objnam": "LIGHT1"},  # missing 'params'
+            "not-a-dict",  # wrong type entirely
+            {"objnam": "NEWBAD", "params": "garbage"},  # params not a dict
+            {"objnam": "LIGHT1", "params": {STATUS_ATTR: "ON"}},  # valid
+        ]
+
+        added: set[str] = set()
+        # Must not raise.
+        changed = pool_model.process_updates(updates, added)
+
+        # The one valid entry still applied; model not corrupted.
+        assert pool_model["LIGHT1"].status == "ON"
+        assert "LIGHT1" in changed
+        assert added == set()
+        assert pool_model["NEWBAD"] is None
+        assert pool_model.num_objects == original_count
 
     def test_pool_model_attributes_to_track(self, pool_model: PoolModel):
         """Test generating attribute tracking queries."""

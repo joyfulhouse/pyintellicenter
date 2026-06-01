@@ -322,21 +322,76 @@ class PoolModel:
                 query.append({"objnam": pool_obj.objnam, "keys": list(attributes)})
         return query
 
-    def process_updates(self, updates: list[ObjectEntry]) -> dict[str, dict[str, Any]]:
+    def process_updates(
+        self,
+        updates: list[ObjectEntry],
+        added_objnams: set[str] | None = None,
+    ) -> dict[str, dict[str, Any]]:
         """Update the state of the objects in the model.
 
+        Existing objects are updated in place. A NotifyList may also reference an
+        object that is not yet in the model (e.g. equipment installed while the
+        connection is live, without a reconnect). When such an entry carries
+        enough information to construct the object (its params include OBJTYP and
+        its type is tracked by the attribute map) it is added to the model so the
+        new equipment is surfaced without requiring a restart. Entries that are
+        unknown and lack enough information to be constructed are ignored.
+
         Args:
-            updates: List of updates with 'objnam' and 'params' keys
+            updates: List of updates with 'objnam' and 'params' keys.
+            added_objnams: Optional set, populated with the objnams of any objects
+                that were newly added to the model by this call. Callers can use it
+                to react to new equipment (e.g. re-request attribute monitoring).
 
         Returns:
-            Dictionary mapping objnam to their changed attributes
+            Dictionary mapping objnam to their changed attributes. For a newly
+            added object the value is the object's full set of attributes, so the
+            same callback path that fires for updates also fires for additions.
         """
         updated: dict[str, dict[str, Any]] = {}
         for update in updates:
-            objnam = update["objnam"]
+            # Defensive: a malformed NotifyList entry may be missing 'objnam' or
+            # 'params'. This is a protocol hot path, so never let one bad entry
+            # crash processing of the rest.
+            try:
+                objnam = update["objnam"]
+                params = update["params"]
+            except (KeyError, TypeError):
+                _LOGGER.debug("Skipping malformed update entry: %r", update)
+                continue
+
+            # A well-formed entry has a string objnam and a dict of params. Guard
+            # against malformed values (a non-string objnam can't be a dict key
+            # and a non-dict params would break update/construction) so neither
+            # the lookup below nor the hot path can raise.
+            if not isinstance(objnam, str) or not isinstance(params, dict):
+                _LOGGER.debug("Skipping update with invalid objnam/params: %r", update)
+                continue
+
             pool_obj = self._objects.get(objnam)
             if pool_obj is not None:
-                changed = pool_obj.update(update["params"])
+                changed = pool_obj.update(params)
                 if changed:
                     updated[objnam] = changed
+                continue
+
+            # Unknown objnam: try to add it as a new object. add_object validates
+            # the required OBJTYP attribute and the type-tracking attribute map,
+            # returning None (without storing) when there is not enough
+            # information or the type is not tracked. A non-None result for a
+            # previously-absent objnam means it was added to the model. Pass a
+            # copy because PoolObject consumes the dict (it pops OBJTYP/SUBTYP).
+            new_obj = self.add_object(objnam, dict(params))
+            if new_obj is not None:
+                # Surface the new object's full attribute set through the normal
+                # updates dict so existing callback consumers react to it.
+                # OBJTYP/SUBTYP are stored separately on the object (popped from
+                # properties), so add them back for a coherent change payload.
+                changed = dict(new_obj.properties)
+                changed[OBJTYP_ATTR] = new_obj.objtype
+                if new_obj.subtype is not None:
+                    changed[SUBTYP_ATTR] = new_obj.subtype
+                updated[objnam] = changed
+                if added_objnams is not None:
+                    added_objnams.add(objnam)
         return updated
