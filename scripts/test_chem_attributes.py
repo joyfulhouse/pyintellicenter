@@ -34,24 +34,71 @@ async def main():
         # CHR01 = IntelliChlor, CHM01 = IntelliChem
         potential_keys = [
             # Standard chem attributes
-            "OBJTYP", "SUBTYP", "SNAME", "HNAME", "PARENT", "BODY", "LISTORD",
+            "OBJTYP",
+            "SUBTYP",
+            "SNAME",
+            "HNAME",
+            "PARENT",
+            "BODY",
+            "LISTORD",
             # pH related
-            "PHVAL", "PHSET", "PHHI", "PHLO", "PHTNK",
-            "PHCAL", "PHADJ", "PHOFS", "PHOFF", "PHCALIB",
+            "PHVAL",
+            "PHSET",
+            "PHHI",
+            "PHLO",
+            "PHTNK",
+            "PHCAL",
+            "PHADJ",
+            "PHOFS",
+            "PHOFF",
+            "PHCALIB",
             # ORP related
-            "ORPVAL", "ORPSET", "ORPHI", "ORPLO", "ORPTNK",
-            "ORPCAL", "ORPADJ", "ORPOFS", "ORPOFF", "ORPCALIB",
+            "ORPVAL",
+            "ORPSET",
+            "ORPHI",
+            "ORPLO",
+            "ORPTNK",
+            "ORPCAL",
+            "ORPADJ",
+            "ORPOFS",
+            "ORPOFF",
+            "ORPCALIB",
             # Chlorinator
-            "PRIM", "SEC", "SALT", "SUPER", "TIMOUT",
+            "PRIM",
+            "SEC",
+            "SALT",
+            "SUPER",
+            "TIMOUT",
             # Chemistry
-            "ALK", "CALC", "CYACID", "QUALTY", "SINDEX",
+            "ALK",
+            "CALC",
+            "CYACID",
+            "QUALTY",
+            "SINDEX",
             # Calibration/offset variations
-            "CALIB", "CAL", "OFFSET", "OFS", "ADJ", "BIAS", "TRIM",
-            "PHCAL1", "PHCAL2", "ORPCAL1", "ORPCAL2",
+            "CALIB",
+            "CAL",
+            "OFFSET",
+            "OFS",
+            "ADJ",
+            "BIAS",
+            "TRIM",
+            "PHCAL1",
+            "PHCAL2",
+            "ORPCAL1",
+            "ORPCAL2",
             # Other
-            "STATUS", "MODE", "CHLOR", "COMUART", "SHARE",
+            "STATUS",
+            "MODE",
+            "CHLOR",
+            "COMUART",
+            "SHARE",
             # All params
-            "ACT", "AVAIL", "ENABLE", "VER", "STATIC",
+            "ACT",
+            "AVAIL",
+            "ENABLE",
+            "VER",
+            "STATIC",
         ]
 
         response = await controller.send_cmd(
@@ -88,8 +135,7 @@ async def main():
             for key, value in params.items():
                 key_lower = key.lower()
                 if any(
-                    term in key_lower
-                    for term in ["calib", "offset", "cal", "adj", "bias", "trim"]
+                    term in key_lower for term in ["calib", "offset", "cal", "adj", "bias", "trim"]
                 ):
                     print(f"  {objnam}.{key}: {value}")
 
