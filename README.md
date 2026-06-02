@@ -4,6 +4,8 @@
 [![Python Versions](https://img.shields.io/pypi/pyversions/pyintellicenter.svg)](https://pypi.org/project/pyintellicenter/)
 [![Tests](https://github.com/joyfulhouse/pyintellicenter/actions/workflows/test.yml/badge.svg)](https://github.com/joyfulhouse/pyintellicenter/actions/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![GitHub Sponsors](https://img.shields.io/badge/Sponsor-GitHub-EA4AAA.svg?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/btli)
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-support-FF5E5B.svg?logo=ko-fi&logoColor=white)](https://ko-fi.com/bryanli)
 
 Python library for communicating with Pentair IntelliCenter pool control systems over local network.
 
@@ -565,6 +567,12 @@ uv run mypy src/pyintellicenter
 # Full validation
 uv run ruff check --fix . && uv run ruff format . && uv run mypy src/pyintellicenter && uv run pytest tests/
 ```
+
+## Support Development
+
+This library powers the [Home Assistant IntelliCenter integration](https://github.com/joyfulhouse/intellicenter) and is maintained in my spare time, with real hardware and tooling costs behind every release. If it's useful to you, consider sponsoring the project or leaving a tip — it's genuinely appreciated.
+
+[![GitHub Sponsors](https://img.shields.io/badge/Sponsor-GitHub-EA4AAA.svg?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/btli) [![Ko-fi](https://img.shields.io/badge/Ko--fi-support-FF5E5B.svg?logo=ko-fi&logoColor=white)](https://ko-fi.com/bryanli)
 
 ## License
 
