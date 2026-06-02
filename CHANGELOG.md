@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.19] - 2026-06-01
+
+### Fixed
+
+- **Typing: `ICModelController` no longer appears abstract to downstream
+  type-checkers** (issue #35). The domain mixins reached their host-class members
+  through a `TYPE_CHECKING`-only `typing.Protocol` whose empty-bodied members are
+  *implicitly abstract*. Because that protocol preceded the concrete
+  `ICBaseController` in `ICModelController`'s MRO, `mypy` in consumers resolved
+  `system_info` / `send_cmd` / `_system_info` to the abstract protocol and rejected
+  `ICModelController(...)` with `[abstract]` — even though the runtime class is
+  fully concrete. The mixins now inherit a non-abstract `TYPE_CHECKING`-only stub
+  base (`_MixinBase`) instead, so downstream projects can type-check fully against
+  the library's public API and no longer need a `follow_imports = skip` boundary
+  for `pyintellicenter.*`. Runtime behavior is unchanged (`_MixinBase` is plain
+  `object` at runtime, so `ICModelController`'s MRO is identical). A regression
+  test type-checks a consumer that instantiates `ICModelController`.
+
+## [0.1.18] - 2026-06-01
+
+### Added
+
+- Promote the SYSTEM object's `SERVICE` attribute (operating mode: `AUTO` /
+  `SERVICE` / `TIMEOUT`) to a named, exported constant `SERVICE_ATTR`, matching
+  `MODE_ATTR` / `VACFLO_ATTR` / `VER_ATTR` (#36).
+
 ## [0.1.17] - 2026-06-01
 
 ### Added
@@ -480,7 +506,10 @@ First stable release of pyintellicenter.
 - `orjson` for fast JSON serialization
 - Python 3.11+ required
 
-[Unreleased]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.11...HEAD
+[Unreleased]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.19...HEAD
+[0.1.19]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.18...v0.1.19
+[0.1.18]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.17...v0.1.18
+[0.1.17]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.16...v0.1.17
 [0.1.11]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.10...v0.1.11
 [0.1.10]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.8...v0.1.9
