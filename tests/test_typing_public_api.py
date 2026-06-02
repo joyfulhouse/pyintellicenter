@@ -30,6 +30,12 @@ import pytest
 # mypy is a dev/test dependency; skip cleanly if a runtime-only env lacks it.
 pytest.importorskip("mypy")
 
+# Precondition: this guards the #35 contract only when ``pyintellicenter`` is
+# importable by mypy (installed, with its ``py.typed`` marker) so mypy follows the
+# consumer's import into the real package -- true in dev/CI where it is installed
+# editable. Run against an uninstalled checkout, mypy would fail with "cannot find
+# module" instead of "[abstract]": still a failure, but not the one this guards.
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 _CONSUMER_SOURCE = textwrap.dedent(
