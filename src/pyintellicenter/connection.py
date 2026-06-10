@@ -27,6 +27,7 @@ import logging
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 import orjson
+from websockets.exceptions import WebSocketException
 
 from .exceptions import ICConnectionError, ICResponseError, ICTimeoutError
 
@@ -44,6 +45,7 @@ DEFAULT_TCP_PORT = 6681
 DEFAULT_WEBSOCKET_PORT = 6680
 RESPONSE_TIMEOUT = 30.0  # seconds to wait for a response
 KEEPALIVE_INTERVAL = 90.0  # seconds between keepalive requests
+KEEPALIVE_TIMEOUT = 10.0  # seconds to wait for a keepalive response
 CONNECTION_TIMEOUT = 10.0  # seconds to wait for initial connection
 MAX_BUFFER_SIZE = 1024 * 1024  # 1MB max buffer to prevent DoS
 DEFAULT_NOTIFICATION_QUEUE_SIZE = 100  # max queued notifications
@@ -404,6 +406,9 @@ class ICWebSocketTransport(ICRequestMixin, ICNotificationMixin):
         self._ws: Any = None  # websockets.WebSocketClientProtocol
         self._connected = False
 
+        # Ensures the disconnect path runs at most once per connection
+        self._disconnect_handled = False
+
         # Reader task for incoming messages
         self._reader_task: asyncio.Task[None] | None = None
 
@@ -431,6 +436,7 @@ class ICWebSocketTransport(ICRequestMixin, ICNotificationMixin):
                 timeout=CONNECTION_TIMEOUT,
             )
             self._connected = True
+            self._disconnect_handled = False
             self._message_id = 0
             _LOGGER.debug("WebSocket connected to IntelliCenter at %s:%s", host, port)
 
@@ -449,7 +455,20 @@ class ICWebSocketTransport(ICRequestMixin, ICNotificationMixin):
             raise ICConnectionError(f"WebSocket connection failed: {err}") from err
 
     async def _reader_loop(self) -> None:
-        """Read messages from WebSocket and dispatch them."""
+        """Read messages from WebSocket and dispatch them.
+
+        The websockets iterator ends in one of three ways, and all but
+        cancellation mean the connection is no longer being serviced:
+
+        - the server closes cleanly: iteration ends without an exception
+        - the link dies: ``ConnectionClosed`` (a ``WebSocketException``,
+          *not* an ``OSError``/``ConnectionError``) or an OS-level error
+        - the task is cancelled by a deliberate ``close()``/``aclose()``
+
+        The first two must run the disconnect path so the disconnect
+        callback fires and reconnection logic can take over.
+        """
+        exc: Exception | None = None
         try:
             async for message in self._ws:
                 data = message if isinstance(message, bytes) else message.encode()
@@ -462,14 +481,24 @@ class ICWebSocketTransport(ICRequestMixin, ICNotificationMixin):
 
                 self._dispatch_message(msg)
 
+            _LOGGER.debug("WebSocket closed by server")
+
         except asyncio.CancelledError:
+            # Deliberate close()/aclose(): not a link failure.
             _LOGGER.debug("WebSocket reader cancelled")
-        except (OSError, ConnectionError) as err:
+            return
+        except (WebSocketException, OSError, ConnectionError) as err:
             _LOGGER.debug("WebSocket reader error: %s", err)
-            self._handle_disconnect(err)
+            exc = err
+
+        self._handle_disconnect(exc)
 
     def _handle_disconnect(self, exc: Exception | None) -> None:
-        """Handle disconnection."""
+        """Handle disconnection, firing the disconnect callback exactly once."""
+        if self._disconnect_handled:
+            return
+        self._disconnect_handled = True
+
         self._connected = False
         self._ws = None
 
@@ -524,6 +553,12 @@ class ICWebSocketTransport(ICRequestMixin, ICNotificationMixin):
         except TimeoutError as err:
             _LOGGER.error("Request %s timed out after %ss", command, request_timeout)
             raise ICTimeoutError(f"Request {command} timed out after {request_timeout}s") from err
+
+        except (WebSocketException, OSError, ConnectionError) as err:
+            # ws.send() raises ConnectionClosed (a WebSocketException) on a
+            # dead socket; surface it as the library's connection error.
+            _LOGGER.error("Request %s failed - connection lost: %s", command, err)
+            raise ICConnectionError(f"Connection lost during request {command}: {err}") from err
 
         finally:
             self._clear_pending_request()
@@ -629,6 +664,10 @@ class ICConnection:
         # Keepalive task
         self._keepalive_task: asyncio.Task[None] | None = None
 
+        # Ensures the disconnect callback fires at most once per connection
+        # (the keepalive teardown and the transport's own notification can race)
+        self._disconnect_dispatched = False
+
     def __repr__(self) -> str:
         """Return a detailed string representation for debugging."""
         return (
@@ -685,8 +724,31 @@ class ICConnection:
             self._keepalive_task.cancel()
             self._keepalive_task = None
 
+        self._dispatch_disconnect(exc)
+
+    def _dispatch_disconnect(self, exc: Exception | None) -> None:
+        """Invoke the user disconnect callback at most once per connection."""
+        if self._disconnect_dispatched:
+            return
+        self._disconnect_dispatched = True
+
         if self._disconnect_callback:
             self._disconnect_callback(exc)
+
+    def _abort_connection(self, exc: Exception | None) -> None:
+        """Tear down a connection whose link is dead and run the disconnect path.
+
+        Used when a failure is detected outside the transport's own machinery
+        (e.g. a keepalive timeout on a half-open connection). Detaches the
+        transport's disconnect callback first so the transport's own teardown
+        (e.g. TCP connection_lost after close()) cannot fire it again later.
+        """
+        protocol, self._protocol = self._protocol, None
+        if protocol is not None:
+            protocol._disconnect_callback = None
+            protocol.close()
+
+        self._dispatch_disconnect(exc)
 
     async def connect(self) -> None:
         """Establish connection to IntelliCenter.
@@ -703,6 +765,9 @@ class ICConnection:
             await self._connect_websocket()
         else:
             await self._connect_tcp()
+
+        # Fresh connection - its disconnect may dispatch (again)
+        self._disconnect_dispatched = False
 
         # Start keepalive task
         self._keepalive_task = asyncio.create_task(self._keepalive_loop())
@@ -803,28 +868,45 @@ class ICConnection:
             )
 
     async def _keepalive_loop(self) -> None:
-        """Send periodic keepalive requests to maintain connection health."""
+        """Send periodic keepalive requests to maintain connection health.
+
+        A keepalive failing with a timeout or connection error means the
+        link is dead even though the transport still looks "connected"
+        (half-open connection or unresponsive server). Detection alone is
+        not enough: the connection must be torn down so the disconnect
+        callback fires and reconnection logic can take over - otherwise it
+        stays frozen forever.
+
+        Note: send_request raises ICTimeoutError (an ICError, not a
+        TimeoutError) on timeout, so both are handled explicitly here.
+        """
         try:
             while self.connected:
                 await asyncio.sleep(self._keepalive_interval)
 
                 if not self.connected:
-                    break
+                    return
 
                 try:
                     _LOGGER.debug("Sending keepalive request")
                     await self.send_request(
                         "GetParamList",
-                        request_timeout=10.0,
+                        request_timeout=KEEPALIVE_TIMEOUT,
                         condition="OBJTYP=SYSTEM",
                         objectList=[{"objnam": "INCR", "keys": ["MODE"]}],
                     )
-                except TimeoutError:
-                    _LOGGER.warning("Keepalive timeout - connection may be dead")
+                except (ICTimeoutError, TimeoutError) as err:
+                    _LOGGER.warning("Keepalive timeout - dropping dead connection")
+                    self._abort_connection(err)
                     break
-                except ICConnectionError as err:
-                    _LOGGER.warning("Keepalive failed: %s", err)
+                except (ICConnectionError, OSError, ConnectionError) as err:
+                    _LOGGER.warning("Keepalive failed: %s - dropping connection", err)
+                    self._abort_connection(err)
                     break
+                except ICResponseError as err:
+                    # The panel answered - the link is alive - but rejected
+                    # the request; keep the connection and keep probing.
+                    _LOGGER.warning("Keepalive request rejected: %s", err)
 
         except asyncio.CancelledError:
             _LOGGER.debug("Keepalive task cancelled")
