@@ -46,6 +46,7 @@ DEFAULT_WEBSOCKET_PORT = 6680
 RESPONSE_TIMEOUT = 30.0  # seconds to wait for a response
 KEEPALIVE_INTERVAL = 90.0  # seconds between keepalive requests
 KEEPALIVE_TIMEOUT = 10.0  # seconds to wait for a keepalive response
+KEEPALIVE_MAX_FAILURES = 3  # consecutive missed keepalives before the link is dead
 CONNECTION_TIMEOUT = 10.0  # seconds to wait for initial connection
 MAX_BUFFER_SIZE = 1024 * 1024  # 1MB max buffer to prevent DoS
 DEFAULT_NOTIFICATION_QUEUE_SIZE = 100  # max queued notifications
@@ -879,7 +880,14 @@ class ICConnection:
 
         Note: send_request raises ICTimeoutError (an ICError, not a
         TimeoutError) on timeout, so both are handled explicitly here.
+
+        A single missed response does not prove death (the panel can be busy
+        servicing another client); the link is declared dead after
+        ``KEEPALIVE_MAX_FAILURES`` consecutive timeouts - the documented
+        design. A connection error, by contrast, is definitive and tears the
+        connection down immediately.
         """
+        failures = 0
         try:
             while self.connected:
                 await asyncio.sleep(self._keepalive_interval)
@@ -895,10 +903,21 @@ class ICConnection:
                         condition="OBJTYP=SYSTEM",
                         objectList=[{"objnam": "INCR", "keys": ["MODE"]}],
                     )
+                    failures = 0
                 except (ICTimeoutError, TimeoutError) as err:
-                    _LOGGER.warning("Keepalive timeout - dropping dead connection")
-                    self._abort_connection(err)
-                    break
+                    failures += 1
+                    _LOGGER.warning(
+                        "Keepalive timeout (%d/%d) - connection may be dead",
+                        failures,
+                        KEEPALIVE_MAX_FAILURES,
+                    )
+                    if failures >= KEEPALIVE_MAX_FAILURES:
+                        _LOGGER.warning(
+                            "Dropping dead connection after %d consecutive keepalive timeouts",
+                            failures,
+                        )
+                        self._abort_connection(err)
+                        break
                 except (ICConnectionError, OSError, ConnectionError) as err:
                     _LOGGER.warning("Keepalive failed: %s - dropping connection", err)
                     self._abort_connection(err)
@@ -906,6 +925,7 @@ class ICConnection:
                 except ICResponseError as err:
                     # The panel answered - the link is alive - but rejected
                     # the request; keep the connection and keep probing.
+                    failures = 0
                     _LOGGER.warning("Keepalive request rejected: %s", err)
 
         except asyncio.CancelledError:
