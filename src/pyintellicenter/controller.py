@@ -1260,7 +1260,13 @@ class ICConnectionHandler:
                 self._starter_task = None
                 return
 
-            except (TimeoutError, OSError, ICConnectionError, ICCommandError) as err:
+            except (
+                ICTimeoutError,
+                TimeoutError,
+                OSError,
+                ICConnectionError,
+                ICCommandError,
+            ) as err:
                 self._failure_count += 1
                 self._last_failure_time = time.monotonic()
                 self._controller._metrics.reconnect_attempts += 1
@@ -1290,8 +1296,10 @@ class ICConnectionHandler:
             self._delayed_disconnect(controller, exc)
         )
 
-        # Start reconnection
-        self._starter_task = asyncio.create_task(self._starter(self._time_between_reconnects))
+        # Start reconnection - unless one is already in flight (multiple
+        # disconnect paths can fire for the same dead connection)
+        if not self._starter_task or self._starter_task.done():
+            self._starter_task = asyncio.create_task(self._starter(self._time_between_reconnects))
 
     async def _delayed_disconnect(
         self, controller: ICBaseController, exc: Exception | None

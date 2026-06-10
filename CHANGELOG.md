@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Dead-link detection: silent connection freezes now trigger the disconnect
+  path and reconnection.** Three connection-layer gaps could leave a controller
+  "connected" with frozen state indefinitely (field evidence: 22 hours of
+  stale-but-available Home Assistant entities until a manual restart):
+  - `ICWebSocketTransport._reader_loop` only caught `OSError`/`ConnectionError`,
+    but the websockets library raises `ConnectionClosed` — a
+    `WebSocketException`, *not* an `OSError` — on abnormal closes, so the
+    reader task died without running the disconnect path. A clean server-side
+    close ends the iteration with no exception at all and likewise never ran
+    the disconnect path. Both now invoke `_handle_disconnect` (exactly once;
+    cancellation by a deliberate `close()`/`aclose()` still does not).
+  - `ICConnection._keepalive_loop` caught `TimeoutError`, but `send_request`
+    raises `ICTimeoutError`, which is an `ICError`, not a `TimeoutError` — so a
+    keepalive timeout killed the keepalive task with an unretrieved exception
+    ("Task exception was never retrieved" in consumer logs).
+  - Even when the keepalive loop did catch a failure it only logged and
+    exited — detection without recovery. A failed keepalive now tears down the
+    dead connection and fires the disconnect callback (at most once per
+    connection, even if the transport's own teardown races it) so
+    `ICConnectionHandler`'s reconnect logic takes over. An `ICResponseError`
+    to a keepalive proves the link is alive, so probing continues instead
+    (previously it killed the keepalive task too).
+  - `ICConnectionHandler._starter` — the reconnect retry loop itself — had the
+    same class confusion: it caught `TimeoutError` but not `ICTimeoutError`,
+    so a request-level timeout during a reconnect attempt ended reconnection
+    permanently. It now retries.
+  - WebSocket `send_request` now translates send failures on a dead socket
+    (`ConnectionClosed` from `ws.send()`) into `ICConnectionError` instead of
+    leaking websockets exceptions to callers.
+  - `ICConnectionHandler._on_disconnect` no longer spawns a second concurrent
+    reconnect loop when multiple disconnect paths fire for the same dead
+    connection.
+  - The TCP transport needed no reader-side change (asyncio guarantees
+    `connection_lost`); it shares the fixed keepalive loop.
+
 ## [0.1.19] - 2026-06-01
 
 ### Fixed
