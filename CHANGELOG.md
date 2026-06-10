@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.20] - 2026-06-10
+
 ### Fixed
 
 - **Dead-link detection: silent connection freezes now trigger the disconnect
@@ -43,6 +45,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     connection.
   - The TCP transport needed no reader-side change (asyncio guarantees
     `connection_lost`); it shares the fixed keepalive loop.
+
+- **Connection lifecycle hardening** (companion fixes to the dead-link work
+  above):
+  - `ICBaseController.start()` now disconnects the connection it replaces
+    (previously the old socket and its keepalive task leaked), and disconnect
+    callbacks are identity-checked so a replaced connection's late death
+    cannot masquerade as - or tear down - the live connection.
+  - `ICConnectionHandler._starter` re-checks `_stopped` after its backoff
+    sleeps so a reconnect racing `stop()` cannot open a connection nothing
+    will ever close, and a starter only clears its *own* task reference.
+  - The keepalive now declares the link dead after `KEEPALIVE_MAX_FAILURES`
+    (3) *consecutive* missed responses - the documented design - instead of
+    the first miss; a success (or an error response, which proves the link is
+    alive) resets the count, while a connection error still tears down
+    immediately.
 
 ## [0.1.19] - 2026-06-01
 

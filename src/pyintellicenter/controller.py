@@ -482,16 +482,33 @@ class ICBaseController:
             ICConnectionError: If connection fails
             ICCommandError: If system info request fails
         """
+        # Tear down any previous connection before replacing it: overwriting
+        # the reference leaks the old socket and its keepalive task, and a late
+        # disconnect event from it would masquerade as the live connection's.
+        if self._connection:
+            with contextlib.suppress(Exception):
+                await self._connection.disconnect()
+            self._connection = None
+
         # Create connection
-        self._connection = ICConnection(
+        connection = ICConnection(
             self._host,
             self._port,
             keepalive_interval=self._keepalive_interval,
             transport=self._transport,
         )
 
-        # Set disconnect callback
-        self._connection.set_disconnect_callback(self._on_disconnect)
+        # Set disconnect callback. The identity check ignores events from a
+        # connection this controller has since replaced - a stale socket dying
+        # must not tear down (or trigger reconnection of) the live one.
+        def _on_connection_disconnect(exc: Exception | None) -> None:
+            if self._connection is connection:
+                self._on_disconnect(exc)
+            else:
+                _LOGGER.debug("Ignoring disconnect from a replaced connection")
+
+        connection.set_disconnect_callback(_on_connection_disconnect)
+        self._connection = connection
 
         # Connect
         await self._connection.connect()
@@ -1176,7 +1193,8 @@ class ICConnectionHandler:
                         self.on_started(self._controller)
                         self._first_time = False
                     self._is_connected = True
-                    self._starter_task = None
+                    if self._starter_task is asyncio.current_task():
+                        self._starter_task = None
                 except (ICTimeoutError, OSError, ICConnectionError, ICCommandError) as err:
                     first_attempt_error = err
                 finally:
@@ -1240,6 +1258,12 @@ class ICConnectionHandler:
                     await asyncio.sleep(initial_delay)
                     initial_delay = 0
 
+                # Re-check after the sleeps above: stop() may have run while we
+                # waited, and opening a fresh connection past that point would
+                # leave a socket nothing ever closes.
+                if self._stopped:
+                    return
+
                 await self._controller.start()
 
                 # Success - reset circuit breaker
@@ -1257,7 +1281,10 @@ class ICConnectionHandler:
                     self.on_reconnected(self._controller)
 
                 self._is_connected = True
-                self._starter_task = None
+                # Only clear the reference if it points at THIS task; clearing
+                # someone else's reference would let stop() miss it.
+                if self._starter_task is asyncio.current_task():
+                    self._starter_task = None
                 return
 
             except (
