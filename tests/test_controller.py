@@ -1079,7 +1079,7 @@ class TestICModelController:
 
     @pytest.mark.asyncio
     async def test_set_cover_state(self, controller, model):
-        """Test set_cover_state convenience method."""
+        """Test set_cover_state drives POSIT (position), not STATUS (enabled)."""
         controller._connection = MagicMock()
         controller._connection.connected = True
         controller._connection.send_request = AsyncMock(
@@ -1088,14 +1088,20 @@ class TestICModelController:
 
         model.add_object(
             "CVR01",
-            {"OBJTYP": "EXTINSTR", "SUBTYP": "COVER", "SNAME": "Pool Cover", "STATUS": "OFF"},
+            {
+                "OBJTYP": "EXTINSTR",
+                "SUBTYP": "COVER",
+                "SNAME": "Pool Cover",
+                "STATUS": "ON",
+                "POSIT": "OFF",
+            },
         )
 
         await controller.set_cover_state("CVR01", True)
 
         call_args = controller._connection.send_request.call_args
         assert call_args[1]["objectList"][0]["objnam"] == "CVR01"
-        assert call_args[1]["objectList"][0]["params"]["STATUS"] == "ON"
+        assert call_args[1]["objectList"][0]["params"]["POSIT"] == "ON"
 
     @pytest.mark.asyncio
     async def test_set_cover_state_off(self, controller, model):
@@ -1108,28 +1114,78 @@ class TestICModelController:
 
         model.add_object(
             "CVR01",
-            {"OBJTYP": "EXTINSTR", "SUBTYP": "COVER", "SNAME": "Pool Cover", "STATUS": "ON"},
+            {
+                "OBJTYP": "EXTINSTR",
+                "SUBTYP": "COVER",
+                "SNAME": "Pool Cover",
+                "STATUS": "ON",
+                "POSIT": "ON",
+            },
         )
 
         await controller.set_cover_state("CVR01", False)
 
         call_args = controller._connection.send_request.call_args
-        assert call_args[1]["objectList"][0]["params"]["STATUS"] == "OFF"
+        assert call_args[1]["objectList"][0]["params"]["POSIT"] == "OFF"
 
     def test_is_cover_on(self, controller, model):
-        """Test is_cover_on helper method."""
+        """Test is_cover_on reads POSIT, independent of STATUS (enabled)."""
         model.add_object(
             "CVR01",
-            {"OBJTYP": "EXTINSTR", "SUBTYP": "COVER", "SNAME": "Pool Cover", "STATUS": "ON"},
+            {
+                "OBJTYP": "EXTINSTR",
+                "SUBTYP": "COVER",
+                "SNAME": "Pool Cover",
+                "STATUS": "ON",
+                "POSIT": "ON",
+            },
         )
         model.add_object(
             "CVR02",
-            {"OBJTYP": "EXTINSTR", "SUBTYP": "COVER", "SNAME": "Spa Cover", "STATUS": "OFF"},
+            {
+                "OBJTYP": "EXTINSTR",
+                "SUBTYP": "COVER",
+                "SNAME": "Spa Cover",
+                "STATUS": "ON",
+                "POSIT": "OFF",
+            },
         )
 
         assert controller.is_cover_on("CVR01") is True
         assert controller.is_cover_on("CVR02") is False
         assert controller.is_cover_on("NONEXISTENT") is False
+
+    def test_is_cover_enabled(self, controller, model):
+        """Test is_cover_enabled reads STATUS, independent of POSIT (position).
+
+        Confirmed against real panel traffic: toggling "Cover Enabled" in
+        Settings > Covers sends a SETPARAMLIST writing STATUS and never
+        touches POSIT.
+        """
+        model.add_object(
+            "CVR01",
+            {
+                "OBJTYP": "EXTINSTR",
+                "SUBTYP": "COVER",
+                "SNAME": "Pool Cover",
+                "STATUS": "ON",
+                "POSIT": "OFF",
+            },
+        )
+        model.add_object(
+            "CVR02",
+            {
+                "OBJTYP": "EXTINSTR",
+                "SUBTYP": "COVER",
+                "SNAME": "Spa Cover",
+                "STATUS": "OFF",
+                "POSIT": "OFF",
+            },
+        )
+
+        assert controller.is_cover_enabled("CVR01") is True
+        assert controller.is_cover_enabled("CVR02") is False
+        assert controller.is_cover_enabled("NONEXISTENT") is False
 
     @pytest.mark.asyncio
     async def test_set_vacation_mode(self, controller, model):

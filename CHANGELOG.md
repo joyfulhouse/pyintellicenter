@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Cover position and enabled state were conflated on the same attribute.**
+  `_CoverMixin.set_cover_state()`/`is_cover_on()` read and wrote `STATUS`,
+  documented as the cover's on/off state. Captured traffic from the panel's
+  own web UI shows `STATUS` is actually the "Cover Enabled" flag in
+  Settings > Covers - toggling it sends a `SETPARAMLIST` writing `STATUS`
+  and never touches position. The real position attribute is `POSIT`, which
+  pyintellicenter didn't track at all. `set_cover_state()`/`is_cover_on()`
+  now drive `POSIT`; the new `is_cover_enabled()` reads `STATUS` for the
+  enabled flag. Added `POSIT_ATTR` to `EXTINSTR_ATTRIBUTES` and the public
+  API. Consumers previously calling `set_cover_state()` expecting to
+  open/close a cover were actually toggling whether the panel considers the
+  cover enabled at all.
+
 ## [0.1.20] - 2026-06-10
 
 ### Fixed
