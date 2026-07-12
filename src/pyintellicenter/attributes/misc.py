@@ -11,6 +11,7 @@ from .constants import (
     LISTORD_ATTR,
     NORMAL_ATTR,
     PARENT_ATTR,
+    POSIT_ATTR,
     READY_ATTR,
     SHOMNU_ATTR,
     SNAME_ATTR,
@@ -27,10 +28,11 @@ EXTINSTR_ATTRIBUTES = {
     LISTORD_ATTR,  # (int) used to order in UI
     NORMAL_ATTR,  # (ON/OFF) 'ON' for Cover State Normally On
     PARENT_ATTR,  # (objnam)
+    POSIT_ATTR,  # (ON/OFF) current cover position, combine with NORMAL for open/closed
     READY_ATTR,  # (ON/OFF) ???
     SNAME_ATTR,  # (str) friendly name
     STATIC_ATTR,  # (ON/OFF) 'OFF'
-    STATUS_ATTR,  # (ON/OFF) 'ON' if cover enabled
+    STATUS_ATTR,  # (ON/OFF) 'ON' if cover enabled in Settings > Covers - NOT position
     SUBTYP_ATTR,  # only seen 'COVER'
 }
 
