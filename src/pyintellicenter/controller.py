@@ -1056,6 +1056,12 @@ class ICModelController(
         queue up and will be sent in the next batch.
         """
         async with self._coalesce_lock:
+            # Another flush may already have detached and completed this
+            # caller's request while it waited for the coalescing lock. Such a
+            # caller must observe its own future next; it cannot detach or send
+            # work admitted by a later caller.
+            if not any(request is owner_request for request in self._pending_requests):
+                return
             if not self._pending_changes:
                 return
 

@@ -1798,6 +1798,49 @@ class TestMutationLifecycle:
         assert controller._pending_changes == {}
         assert controller._pending_requests == []
 
+    @pytest.mark.asyncio
+    async def test_completed_peer_never_flushes_a_later_callers_batch(self, controller):
+        """A request detached by an earlier flush cannot own unrelated work."""
+        first_send_started = asyncio.Event()
+        release_first_send = asyncio.Event()
+        second_send_started = asyncio.Event()
+        release_second_send = asyncio.Event()
+        call_count = 0
+
+        async def scripted_send(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                first_send_started.set()
+                await release_first_send.wait()
+                raise ICConnectionError("first batch failed")
+            second_send_started.set()
+            await release_second_send.wait()
+            return {"response": "200"}
+
+        controller._connection.send_request = scripted_send
+        await controller._coalesce_lock.acquire()
+        first_owner = asyncio.create_task(controller.set_circuit_state("C001", True))
+        completed_peer = asyncio.create_task(controller.set_circuit_state("C002", True))
+        await asyncio.sleep(0)
+        controller._coalesce_lock.release()
+        await first_send_started.wait()
+
+        later_caller = asyncio.create_task(controller.set_circuit_state("C003", True))
+        await asyncio.sleep(0)
+        release_first_send.set()
+
+        with pytest.raises(ICConnectionError, match="first batch failed"):
+            await first_owner
+        await second_send_started.wait()
+        assert completed_peer.done() is True
+        with pytest.raises(ICConnectionError, match="first batch failed"):
+            await completed_peer
+
+        release_second_send.set()
+        assert await later_caller == {"response": "200"}
+        assert call_count == 2
+
 
 class TestRequestCoalescing:
     """Test request coalescing behavior in ICModelController."""
