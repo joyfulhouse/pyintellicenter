@@ -1045,9 +1045,12 @@ class ICModelController(
 
         if not request.future.done():
             request.future.cancel()
-        if request.future.cancelled():
-            with contextlib.suppress(asyncio.CancelledError):
-                request.future.exception()
+        # Cancellation can arrive after another flush detached this request and
+        # completed its future with either a result or an exception. Always
+        # retrieve the terminal state so a caller-level CancelledError cannot
+        # orphan a completed exception warning.
+        with contextlib.suppress(asyncio.CancelledError):
+            request.future.exception()
 
     async def _flush_pending_changes(self, owner_request: _PendingRequest) -> None:
         """Flush all pending changes in a single batch request.
@@ -1094,9 +1097,8 @@ class ICModelController(
                 # CancelledError; peers receive one stable uncertainty failure.
                 if not owner_request.future.done():
                     owner_request.future.cancel()
-                if owner_request.future.cancelled():
-                    with contextlib.suppress(asyncio.CancelledError):
-                        owner_request.future.exception()
+                with contextlib.suppress(asyncio.CancelledError):
+                    owner_request.future.exception()
                 uncertainty = ICError(
                     "Coalesced mutation delivery is unknown after flush cancellation"
                 )

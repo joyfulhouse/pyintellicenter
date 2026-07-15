@@ -1841,6 +1841,27 @@ class TestMutationLifecycle:
         assert await later_caller == {"response": "200"}
         assert call_count == 2
 
+    @pytest.mark.asyncio
+    async def test_cancelled_detached_caller_consumes_completed_exception(self, controller):
+        """Caller cancellation retrieves an already-completed detached failure."""
+        await controller._coalesce_lock.acquire()
+        caller = asyncio.create_task(controller.set_circuit_state("C001", True))
+        await asyncio.sleep(0)
+        request = controller._pending_requests[0]
+
+        # Model the atomic state immediately after another flush detached this
+        # caller, then completed its future before the lock waiter resumed.
+        controller._pending_requests = []
+        controller._pending_changes = {}
+        request.future.set_exception(ICError("detached batch failed"))
+
+        caller.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+        assert request.future.done() is True
+        assert request.future._log_traceback is False
+        controller._coalesce_lock.release()
+
 
 class TestRequestCoalescing:
     """Test request coalescing behavior in ICModelController."""
