@@ -96,10 +96,11 @@ entities = controller.get_all_entities()
 #           "circuit_groups": [...], "color_light_groups": [...], ...}
 
 # Circuit group helpers
-groups              = controller.get_circuit_groups()
-circuits_in_group   = controller.get_circuits_in_group("CG001")
-has_color           = controller.circuit_group_has_color_lights("CG001")
-color_groups        = controller.get_color_light_groups()
+# Parent CIRCUIT objects are groups; CIRCGRP objects are membership rows.
+groups = controller.get_circuit_groups()
+rows = controller.get_circuit_group_members(groups[0].objnam)
+children = controller.get_circuits_in_group(groups[0].objnam)
+color_groups = controller.get_color_light_groups()
 
 # Hardware discovery queries
 config   = await controller.get_configuration()       # Bodies and circuits
@@ -174,6 +175,12 @@ def on_update(controller, changes):
 controller.set_updated_callback(on_update)
 await controller.stop()
 ```
+
+For compatibility, a legacy standalone `CIRCGRP` object with a direct
+space-separated `CIRCUIT` list can still be passed to
+`get_circuits_in_group()`. It is not returned by `get_circuit_groups()` or
+`get_color_light_groups()`; only parent `CIRCUIT` objects are enumerated as
+groups.
 
 ## ICConnectionHandler
 

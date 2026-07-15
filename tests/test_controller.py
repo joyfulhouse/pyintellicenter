@@ -1336,15 +1336,20 @@ class TestICModelController:
         assert controller._system_info.prop_name == "New Pool"
 
     def test_get_circuit_groups(self, controller, model):
-        """Test get_circuit_groups returns all circuit group objects."""
-        model.add_object("CG001", {"OBJTYP": "CIRCGRP", "SNAME": "Light Group 1"})
-        model.add_object("CG002", {"OBJTYP": "CIRCGRP", "SNAME": "Light Group 2"})
+        """Test get_circuit_groups returns parent circuits, not member rows."""
+        model.add_object(
+            "CG001", {"OBJTYP": "CIRCUIT", "SUBTYP": "LITSHO", "SNAME": "Light Group 1"}
+        )
+        model.add_object(
+            "CG002", {"OBJTYP": "CIRCUIT", "SUBTYP": "CIRCGRP", "SNAME": "Light Group 2"}
+        )
+        model.add_object("ROW001", {"OBJTYP": "CIRCGRP", "PARENT": "CG001", "CIRCUIT": "C001"})
         model.add_object("C001", {"OBJTYP": "CIRCUIT", "SUBTYP": "INTELLI", "SNAME": "Light"})
 
         groups = controller.get_circuit_groups()
 
         assert len(groups) == 2
-        assert all(obj.objtype == "CIRCGRP" for obj in groups)
+        assert all(obj.objtype == "CIRCUIT" for obj in groups)
 
     def test_get_circuits_in_group(self, controller, model):
         """Test get_circuits_in_group returns circuits belonging to a group."""
@@ -1422,16 +1427,18 @@ class TestICModelController:
         # Create circuits
         model.add_object("C001", {"OBJTYP": "CIRCUIT", "SUBTYP": "INTELLI", "SNAME": "Pool Light"})
         model.add_object("C002", {"OBJTYP": "CIRCUIT", "SUBTYP": "LIGHT", "SNAME": "Deck Light"})
-        # Create circuit groups
+        # Create circuit-group parents and membership rows
         model.add_object(
             "CG001",
-            {"OBJTYP": "CIRCGRP", "SNAME": "Color Group", "CIRCUIT": "C001"},
+            {"OBJTYP": "CIRCUIT", "SUBTYP": "LITSHO", "SNAME": "Color Group"},
         )
         model.add_object(
             "CG002",
-            {"OBJTYP": "CIRCGRP", "SNAME": "Non-Color Group", "CIRCUIT": "C002"},
+            {"OBJTYP": "CIRCUIT", "SUBTYP": "LITSHO", "SNAME": "Non-Color Group"},
         )
-        model.add_object("CG003", {"OBJTYP": "CIRCGRP", "SNAME": "Empty Group"})
+        model.add_object("CG003", {"OBJTYP": "CIRCUIT", "SUBTYP": "LITSHO", "SNAME": "Empty Group"})
+        model.add_object("ROW001", {"OBJTYP": "CIRCGRP", "PARENT": "CG001", "CIRCUIT": "C001"})
+        model.add_object("ROW002", {"OBJTYP": "CIRCGRP", "PARENT": "CG002", "CIRCUIT": "C002"})
 
         color_groups = controller.get_color_light_groups()
 
@@ -1442,11 +1449,12 @@ class TestICModelController:
         """Test get_all_entities includes circuit_groups and color_light_groups."""
         # Create color light
         model.add_object("C001", {"OBJTYP": "CIRCUIT", "SUBTYP": "INTELLI", "SNAME": "Pool Light"})
-        # Create circuit group with color light
+        # Create circuit-group parent with a color-light membership row
         model.add_object(
             "CG001",
-            {"OBJTYP": "CIRCGRP", "SNAME": "Color Group", "CIRCUIT": "C001"},
+            {"OBJTYP": "CIRCUIT", "SUBTYP": "LITSHO", "SNAME": "Color Group"},
         )
+        model.add_object("ROW001", {"OBJTYP": "CIRCGRP", "PARENT": "CG001", "CIRCUIT": "C001"})
 
         entities = controller.get_all_entities()
 
