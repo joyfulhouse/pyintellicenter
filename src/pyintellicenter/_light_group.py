@@ -6,7 +6,7 @@ import asyncio
 import contextlib
 import copy
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from .exceptions import (
     ICCommandError,
@@ -379,7 +379,7 @@ def validate_initial_projection(
     statuses = tuple(circuits[name].status for name in target_names)
     if statuses not in {("ON", "ON", "ON"), ("OFF", "OFF", "OFF")}:
         raise ICError("Color Sync requires a canonical uniform target prestate")
-    return statuses[0]  # type: ignore[return-value]
+    return cast('Literal["ON", "OFF"]', statuses[0])
 
 
 def validate_final_projection(
