@@ -2061,10 +2061,12 @@ async def test_disconnect_wakes_onset_terminal_and_observation_waits(
     captured = _capture_tracker(monkeypatch)
     task = asyncio.create_task(controller.run_light_group_sync("GROUP"))
     await _eventually(
-        lambda: bool(captured)
-        and captured[0].acknowledged
-        and (edge == "none" or captured[0].onset_seen)
-        and (edge != "terminal" or captured[0].terminal_event.is_set())
+        lambda: (
+            bool(captured)
+            and captured[0].acknowledged
+            and (edge == "none" or captured[0].onset_seen)
+            and (edge != "terminal" or captured[0].terminal_event.is_set())
+        )
     )
     old = connection.closed
     connection.close_generation()
