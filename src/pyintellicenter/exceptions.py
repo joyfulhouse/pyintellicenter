@@ -6,6 +6,16 @@ making it easier to catch and handle specific error types.
 
 from __future__ import annotations
 
+from typing import Literal
+
+type _LightGroupPhase = Literal[
+    "acknowledgement",
+    "onset",
+    "terminal",
+    "observation",
+    "final_projection",
+]
+
 
 class ICError(Exception):
     """Base exception for all pyintellicenter errors.
@@ -13,6 +23,60 @@ class ICError(Exception):
     All exceptions raised by this library inherit from this class,
     making it easy to catch any library-specific error.
     """
+
+
+class ICLightGroupError(ICError):
+    """A Color Sync failure after transport dispatch began."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        phase: _LightGroupPhase,
+        response_received: bool,
+        acknowledged: bool,
+        onset_seen: bool,
+    ) -> None:
+        self._phase = phase
+        self._response_received = response_received
+        self._acknowledged = acknowledged
+        self._onset_seen = onset_seen
+        super().__init__(message)
+
+    @property
+    def phase(self) -> _LightGroupPhase:
+        """Return the lifecycle phase that failed."""
+        return self._phase
+
+    @property
+    def dispatch_started(self) -> bool:
+        """Return whether transport write/send initiation occurred."""
+        return True
+
+    @property
+    def response_received(self) -> bool:
+        """Return whether a correlated controller response arrived."""
+        return self._response_received
+
+    @property
+    def acknowledged(self) -> bool:
+        """Return whether the controller positively acknowledged the action."""
+        return self._acknowledged
+
+    @property
+    def onset_seen(self) -> bool:
+        """Return whether a qualifying post-send-watermark onset was observed."""
+        return self._onset_seen
+
+    def __repr__(self) -> str:
+        return (
+            "ICLightGroupError("
+            f"phase={self.phase!r}, "
+            f"dispatch_started={self.dispatch_started!r}, "
+            f"response_received={self.response_received!r}, "
+            f"acknowledged={self.acknowledged!r}, "
+            f"onset_seen={self.onset_seen!r})"
+        )
 
 
 class ICConnectionError(ICError):

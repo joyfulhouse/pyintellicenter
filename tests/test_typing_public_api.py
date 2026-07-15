@@ -43,11 +43,20 @@ _CONSUMER_SOURCE = textwrap.dedent(
     \"\"\"Downstream-style consumer; must type-check without [abstract] errors.\"\"\"
     from __future__ import annotations
 
-    from pyintellicenter import ICModelController, PoolModel
+    from typing import Any
+
+    from pyintellicenter import ICLightGroupError, ICModelController, PoolModel
 
 
     def make_controller() -> ICModelController:
         return ICModelController("192.168.1.100", PoolModel())
+
+
+    async def run_sync(controller: ICModelController) -> dict[str, Any]:
+        try:
+            return await controller.run_light_group_sync("GROUP")
+        except ICLightGroupError:
+            raise
     """
 )
 

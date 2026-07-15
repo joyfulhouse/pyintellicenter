@@ -6,7 +6,7 @@ contain color-capable lights can have light effects applied to the whole group.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ..attributes import (
     CIRCGRP_TYPE,
@@ -53,6 +53,12 @@ class _CircuitGroupMixin(_MixinBase):
             List of circuit-group parent objects
         """
         return [obj for obj in self._model if _is_group_parent(obj)]
+
+    async def run_light_group_sync(self, group_objnam: str) -> dict[str, Any]:
+        """Run the evidence-bounded Color Sync action for one light group."""
+        from .._light_group import run_light_group_sync
+
+        return await run_light_group_sync(self, group_objnam)
 
     def get_circuit_group_members(self, parent_objnam: str) -> list[PoolObject]:
         """Get the ordered membership rows for a circuit-group parent.
