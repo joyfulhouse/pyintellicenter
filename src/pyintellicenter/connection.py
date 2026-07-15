@@ -24,6 +24,7 @@ import asyncio
 import contextlib
 import inspect
 import logging
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 import orjson
@@ -35,7 +36,10 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     # Callback types
+    AfterWriteCallback = Callable[[int], None]
+    BeforeWriteCallback = Callable[[int, float], None]
     NotificationCallback = Callable[[dict[str, Any]], None | Awaitable[None]]
+    NotificationObserver = Callable[[int, dict[str, Any]], None]
     DisconnectCallback = Callable[[Exception | None], None]
 
 _LOGGER = logging.getLogger(__name__)
@@ -55,6 +59,14 @@ DEFAULT_NOTIFICATION_QUEUE_SIZE = 100  # max queued notifications
 DEFAULT_PORT = DEFAULT_TCP_PORT
 
 
+@dataclass(slots=True)
+class _NotificationObserverState:
+    """Connection-owned sequence and additive raw notification observers."""
+
+    sequence: int = 0
+    observers: list[NotificationObserver] = field(default_factory=list)
+
+
 @runtime_checkable
 class ICTransportProtocol(Protocol):
     """Protocol defining the transport interface.
@@ -72,6 +84,9 @@ class ICTransportProtocol(Protocol):
         self,
         command: str,
         request_timeout: float = RESPONSE_TIMEOUT,
+        *,
+        _before_write_callback: BeforeWriteCallback | None = None,
+        _after_write_callback: AfterWriteCallback | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
         """Send a request and await response."""
@@ -144,11 +159,13 @@ class ICNotificationMixin:
     _notification_queue_size: int
     _notification_queue: asyncio.Queue[dict[str, Any]] | None
     _consumer_task: asyncio.Task[None] | None
+    _notification_observer_state: _NotificationObserverState
 
     def _init_notification_mixin(
         self,
         notification_callback: NotificationCallback | None,
         notification_queue_size: int,
+        notification_observer_state: _NotificationObserverState | None,
     ) -> None:
         """Initialize notification handling state."""
         self._notification_callback = notification_callback
@@ -158,6 +175,11 @@ class ICNotificationMixin:
         self._notification_queue_size = notification_queue_size
         self._notification_queue = None
         self._consumer_task = None
+        self._notification_observer_state = (
+            notification_observer_state
+            if notification_observer_state is not None
+            else _NotificationObserverState()
+        )
 
     def _start_notification_consumer(self) -> None:
         """Start the notification consumer task if not already running."""
@@ -193,6 +215,14 @@ class ICNotificationMixin:
 
     def _handle_notification(self, msg: dict[str, Any]) -> None:
         """Handle a NotifyList notification by queuing for processing."""
+        state = self._notification_observer_state
+        sequence = state.sequence = state.sequence + 1
+        for observer in tuple(state.observers):
+            try:
+                observer(sequence, msg)
+            except Exception:
+                _LOGGER.exception("Error in notification observer")
+
         if not self._notification_callback or self._notification_queue is None:
             return
 
@@ -253,6 +283,7 @@ class ICProtocol(ICRequestMixin, ICNotificationMixin, asyncio.Protocol):
         disconnect_callback: DisconnectCallback | None = None,
         *,
         notification_queue_size: int = DEFAULT_NOTIFICATION_QUEUE_SIZE,
+        notification_observer_state: _NotificationObserverState | None = None,
     ) -> None:
         """Initialize the protocol.
 
@@ -262,7 +293,11 @@ class ICProtocol(ICRequestMixin, ICNotificationMixin, asyncio.Protocol):
             notification_queue_size: Max queued notifications (default: 100)
         """
         self._init_request_mixin()
-        self._init_notification_mixin(notification_callback, notification_queue_size)
+        self._init_notification_mixin(
+            notification_callback,
+            notification_queue_size,
+            notification_observer_state,
+        )
         self._disconnect_callback = disconnect_callback
 
         # Transport (set by connection_made)
@@ -334,6 +369,9 @@ class ICProtocol(ICRequestMixin, ICNotificationMixin, asyncio.Protocol):
         self,
         command: str,
         request_timeout: float = RESPONSE_TIMEOUT,
+        *,
+        _before_write_callback: BeforeWriteCallback | None = None,
+        _after_write_callback: AfterWriteCallback | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
         """Send a request and await response via Future."""
@@ -353,7 +391,14 @@ class ICProtocol(ICRequestMixin, ICNotificationMixin, asyncio.Protocol):
 
         try:
             packet = orjson.dumps(request) + b"\r\n"
+            if _before_write_callback is not None:
+                _before_write_callback(
+                    self._notification_observer_state.sequence,
+                    asyncio.get_running_loop().time(),
+                )
             self._transport.write(packet)
+            if _after_write_callback is not None:
+                _after_write_callback(self._notification_observer_state.sequence)
             _LOGGER.debug("Sent TCP request: %s (ID: %s)", command, msg_id)
 
             async with asyncio.timeout(request_timeout):
@@ -392,6 +437,7 @@ class ICWebSocketTransport(ICRequestMixin, ICNotificationMixin):
         disconnect_callback: DisconnectCallback | None = None,
         *,
         notification_queue_size: int = DEFAULT_NOTIFICATION_QUEUE_SIZE,
+        notification_observer_state: _NotificationObserverState | None = None,
     ) -> None:
         """Initialize the WebSocket transport.
 
@@ -401,7 +447,11 @@ class ICWebSocketTransport(ICRequestMixin, ICNotificationMixin):
             notification_queue_size: Max queued notifications (default: 100)
         """
         self._init_request_mixin()
-        self._init_notification_mixin(notification_callback, notification_queue_size)
+        self._init_notification_mixin(
+            notification_callback,
+            notification_queue_size,
+            notification_observer_state,
+        )
         self._disconnect_callback = disconnect_callback
 
         self._ws: Any = None  # websockets.WebSocketClientProtocol
@@ -518,6 +568,9 @@ class ICWebSocketTransport(ICRequestMixin, ICNotificationMixin):
         self,
         command: str,
         request_timeout: float = RESPONSE_TIMEOUT,
+        *,
+        _before_write_callback: BeforeWriteCallback | None = None,
+        _after_write_callback: AfterWriteCallback | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
         """Send a request and await response."""
@@ -538,7 +591,14 @@ class ICWebSocketTransport(ICRequestMixin, ICNotificationMixin):
         try:
             # Send as text with \r\n terminator (same framing as TCP)
             packet = orjson.dumps(request).decode() + "\r\n"
+            if _before_write_callback is not None:
+                _before_write_callback(
+                    self._notification_observer_state.sequence,
+                    asyncio.get_running_loop().time(),
+                )
             await self._ws.send(packet)
+            if _after_write_callback is not None:
+                _after_write_callback(self._notification_observer_state.sequence)
             _LOGGER.debug("Sent WebSocket request: %s (ID: %s)", command, msg_id)
 
             async with asyncio.timeout(request_timeout):
@@ -658,9 +718,16 @@ class ICConnection:
         # Callbacks
         self._notification_callback: NotificationCallback | None = None
         self._disconnect_callback: DisconnectCallback | None = None
+        self._notification_observer_state = _NotificationObserverState()
+
+        # One-shot lifecycle signal for the current connection generation
+        self._closed_future: asyncio.Future[None] | None = None
 
         # Flow control: one request at a time
         self._request_lock = asyncio.Lock()
+
+        # Connection lifecycle: one generation attempt at a time
+        self._connect_lock = asyncio.Lock()
 
         # Keepalive task
         self._keepalive_task: asyncio.Task[None] | None = None
@@ -711,6 +778,27 @@ class ICConnection:
             if callback and self._protocol.connected and self._protocol._notification_queue is None:
                 self._protocol._start_notification_consumer()
 
+    def add_notification_observer(
+        self,
+        observer: NotificationObserver,
+    ) -> Callable[[], None]:
+        """Add an enqueue-time notification observer and return its remover."""
+        state = self._notification_observer_state
+        state.observers.append(observer)
+        removed = False
+
+        def remove() -> None:
+            nonlocal removed
+            if removed:
+                return
+            removed = True
+            for index, candidate in enumerate(state.observers):
+                if candidate is observer:
+                    del state.observers[index]
+                    break
+
+        return remove
+
     def set_disconnect_callback(self, callback: DisconnectCallback | None) -> None:
         """Set callback for disconnection events.
 
@@ -721,6 +809,25 @@ class ICConnection:
 
     def _on_disconnect(self, exc: Exception | None) -> None:
         """Internal disconnect handler that wraps user callback."""
+        closed_future = self._closed_future
+        if closed_future is not None:
+            self._on_generation_disconnect(closed_future, exc)
+            return
+        self._handle_current_disconnect(exc)
+
+    def _on_generation_disconnect(
+        self,
+        closed_future: asyncio.Future[None],
+        exc: Exception | None,
+    ) -> None:
+        """Handle a transport close only for the generation that emitted it."""
+        self._complete_closed_future(closed_future)
+        if closed_future is not self._closed_future:
+            return
+        self._handle_current_disconnect(exc)
+
+    def _handle_current_disconnect(self, exc: Exception | None) -> None:
+        """Cancel current lifecycle work and dispatch an unexpected close."""
         if self._keepalive_task and not self._keepalive_task.done():
             self._keepalive_task.cancel()
             self._keepalive_task = None
@@ -744,6 +851,7 @@ class ICConnection:
         transport's disconnect callback first so the transport's own teardown
         (e.g. TCP connection_lost after close()) cannot fire it again later.
         """
+        self._complete_closed_future()
         protocol, self._protocol = self._protocol, None
         if protocol is not None:
             protocol._disconnect_callback = None
@@ -759,13 +867,40 @@ class ICConnection:
         Raises:
             ICConnectionError: If connection fails or times out.
         """
+        async with self._connect_lock:
+            await self._connect_locked()
+
+    async def _connect_locked(self) -> None:
+        """Establish one serialized connection generation."""
         if self.connected:
             return
 
-        if self._transport_type == "websocket":
-            await self._connect_websocket()
-        else:
-            await self._connect_tcp()
+        closed_future = asyncio.get_running_loop().create_future()
+        self._closed_future = closed_future
+
+        def on_disconnect(exc: Exception | None) -> None:
+            self._on_generation_disconnect(closed_future, exc)
+
+        try:
+            if self._transport_type == "websocket":
+                await self._connect_websocket(on_disconnect)
+            else:
+                await self._connect_tcp(on_disconnect)
+
+            if self._closed_future is not closed_future:
+                raise ICConnectionError("Connection generation changed during setup")
+            if closed_future.done() or not self.connected:
+                protocol, self._protocol = self._protocol, None
+                if protocol is not None:
+                    protocol._disconnect_callback = None
+                    protocol.close()
+                raise ICConnectionError("Connection closed during setup")
+        except asyncio.CancelledError:
+            self._complete_closed_future(closed_future)
+            raise
+        except Exception:
+            self._complete_closed_future(closed_future)
+            raise
 
         # Fresh connection - its disconnect may dispatch (again)
         self._disconnect_dispatched = False
@@ -773,7 +908,7 @@ class ICConnection:
         # Start keepalive task
         self._keepalive_task = asyncio.create_task(self._keepalive_loop())
 
-    async def _connect_tcp(self) -> None:
+    async def _connect_tcp(self, disconnect_callback: DisconnectCallback) -> None:
         """Establish TCP connection."""
         try:
             loop = asyncio.get_running_loop()
@@ -782,8 +917,9 @@ class ICConnection:
                 _, protocol = await loop.create_connection(
                     lambda: ICProtocol(
                         notification_callback=self._notification_callback,
-                        disconnect_callback=self._on_disconnect,
+                        disconnect_callback=disconnect_callback,
                         notification_queue_size=self._notification_queue_size,
+                        notification_observer_state=self._notification_observer_state,
                     ),
                     self._host,
                     self._port,
@@ -801,12 +937,13 @@ class ICConnection:
                 f"Failed to connect to {self._host}:{self._port}: {err}"
             ) from err
 
-    async def _connect_websocket(self) -> None:
+    async def _connect_websocket(self, disconnect_callback: DisconnectCallback) -> None:
         """Establish WebSocket connection."""
         transport = ICWebSocketTransport(
             notification_callback=self._notification_callback,
-            disconnect_callback=self._on_disconnect,
+            disconnect_callback=disconnect_callback,
             notification_queue_size=self._notification_queue_size,
+            notification_observer_state=self._notification_observer_state,
         )
         await transport.connect(self._host, self._port)
         self._protocol = transport
@@ -814,17 +951,37 @@ class ICConnection:
 
     async def disconnect(self) -> None:
         """Close the connection gracefully."""
+        self._complete_closed_future()
+        protocol, self._protocol = self._protocol, None
+        if protocol is not None:
+            protocol._disconnect_callback = None
+
         if self._keepalive_task and not self._keepalive_task.done():
             self._keepalive_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._keepalive_task
             self._keepalive_task = None
 
-        if self._protocol:
-            self._protocol.close()
-            self._protocol = None
+        if protocol is not None:
+            protocol.close()
 
         _LOGGER.debug("Disconnected from IC")
+
+    def _complete_closed_future(
+        self,
+        future: asyncio.Future[None] | None = None,
+    ) -> None:
+        """Complete a generation's close signal once."""
+        future = future if future is not None else self._closed_future
+        if future is not None and not future.done():
+            future.set_result(None)
+
+    def _capture_closed_future(self) -> asyncio.Future[None]:
+        """Return the one-shot close future for the current live generation."""
+        future = self._closed_future
+        if future is None or not self.connected:
+            raise ICConnectionError("Connection is not live")
+        return future
 
     async def __aenter__(self) -> ICConnection:
         """Async context manager entry."""
@@ -839,6 +996,9 @@ class ICConnection:
         self,
         command: str,
         request_timeout: float | None = None,
+        *,
+        _before_write_callback: BeforeWriteCallback | None = None,
+        _after_write_callback: AfterWriteCallback | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
         """Send a request and wait for the response.
@@ -865,7 +1025,11 @@ class ICConnection:
 
         async with self._request_lock:
             return await self._protocol.send_request(
-                command, request_timeout=effective_timeout, **kwargs
+                command,
+                request_timeout=effective_timeout,
+                _before_write_callback=_before_write_callback,
+                _after_write_callback=_after_write_callback,
+                **kwargs,
             )
 
     async def _keepalive_loop(self) -> None:
