@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add dedicated TCP and WebSocket Color Sync for evidence-supported light-group
+  parents. Completion requires sender-side `SYNC` onset and terminal edges on
+  the sending connection, a full post-terminal observation interval, and an
+  authoritative final read. `ICLightGroupError` exposes phase-aware delivery and
+  completion certainty.
+
+### Changed
+
+- Restrict the state-changing Color Sync envelope to the exact raw firmware token
+  `1.064`, exactly two distinct resolved `GLOW` children, and a uniform all-off
+  or all-on prestate. The action never retries or sends a recovery command;
+  later case-insensitive `SetParamList` writers through the same controller fail
+  immediately while the lifecycle owns mutation isolation. Every projected
+  circuit, membership-row, group-flag, and system invariant is monitored through
+  a mandatory 60-second post-terminal interval and final same-connection read.
+- Color Set, Color Swim, and light-group member-position writes remain
+  intentionally unimplemented because captures did not establish safe contracts.
+
+### Fixed
+
+- Model real light groups as their controllable parent `CIRCUIT` objects and
+  `CIRCGRP` objects as ordered membership rows. `get_circuit_groups()` now
+  returns group parents; `get_circuit_group_members()` exposes rows, and direct
+  standalone-row resolution remains only as a legacy compatibility path.
+
 ## [0.1.21] - 2026-07-12
 
 ### Fixed

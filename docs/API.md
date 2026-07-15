@@ -47,7 +47,7 @@ conn.set_disconnect_callback(lambda exc: print(f"Disconnected: {exc}"))
 Controller that maintains equipment state in a PoolModel.
 
 ```python
-from pyintellicenter import ICModelController, PoolModel
+from pyintellicenter import ICError, ICLightGroupError, ICModelController, PoolModel
 
 model = PoolModel()
 controller = ICModelController(
@@ -101,6 +101,26 @@ groups = controller.get_circuit_groups()
 rows = controller.get_circuit_group_members(groups[0].objnam)
 children = controller.get_circuits_in_group(groups[0].objnam)
 color_groups = controller.get_color_light_groups()
+
+# Verified Color Sync for an evidence-supported light-group parent.
+try:
+    await controller.run_light_group_sync(groups[0].objnam)
+except ValueError:
+    # Cached firmware or topology is outside the supported action envelope.
+    raise
+except ICLightGroupError as err:
+    if err.acknowledged or err.onset_seen:
+        # The action was acknowledged or visibly started, but completion was
+        # not proven. Inspect the physical lights before any deliberate retry.
+        raise
+    if err.dispatch_started and not err.response_received:
+        # Dispatch began, but whether the controller received it is unknown.
+        raise
+    # The controller returned an explicit rejection or malformed response.
+    raise
+except ICError:
+    # Subscription or fresh state/preflight failed before dispatch began.
+    raise
 
 # Hardware discovery queries
 config   = await controller.get_configuration()       # Bodies and circuits
@@ -181,6 +201,30 @@ space-separated `CIRCUIT` list can still be passed to
 `get_circuits_in_group()`. It is not returned by `get_circuit_groups()` or
 `get_color_light_groups()`; only parent `CIRCUIT` objects are enumerated as
 groups.
+
+`run_light_group_sync()` is deliberately narrower than the read helpers. It is
+available only when fresh and cached state both report the exact raw firmware
+token `1.064`, the parent is `CIRCUIT/LITSHO`, membership resolves to exactly two
+distinct `CIRCUIT/GLOW` children, and the parent plus both children are uniformly
+all off or all on. Color Set, Color Swim, and member-position writes are not
+implemented.
+
+The call is blocking and commonly occupies roughly 96–97 seconds plus request
+latency on the observed firmware: a one-second subscription settle, roughly
+35–36 seconds to the physical terminal edge, a full 60-second post-terminal
+observation, and a final same-connection read. It never retries or sends an
+automatic recovery command. During that complete interval, later object-changing
+calls through the same controller fail immediately with `ICError`; read-only
+commands and model notifications continue. Physical-panel writes and writes made
+through a separate raw `ICConnection` are outside that isolation boundary and
+make Sync incomplete if they alter the monitored safety projection.
+
+`ICLightGroupError` is used only after transport dispatch begins and exposes five
+read-only certainty attributes: `phase`, `dispatch_started`, `response_received`,
+`acknowledged`, and `onset_seen`. Its phase is one of `acknowledgement`, `onset`,
+`terminal`, `observation`, or `final_projection`. Any error with
+`dispatch_started=True` requires physical inspection before a deliberate retry,
+even when the controller never returned an acknowledgement.
 
 ## ICConnectionHandler
 
