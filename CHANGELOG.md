@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.22] - 2026-07-15
+
 ### Added
 
 - Add dedicated TCP and WebSocket Color Sync for evidence-supported light-group
