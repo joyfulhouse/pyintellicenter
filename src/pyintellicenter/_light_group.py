@@ -110,6 +110,11 @@ class LightGroupProjection:
     rows: tuple[_RowProjection, ...]
 
 
+def _is_sentinel(value: Any, key: str) -> bool:
+    """Return whether a mandatory raw value is missing or a protocol sentinel."""
+    return not isinstance(value, str) or not value or value == key or value == "00000"
+
+
 def _normalize_optional(key: str, value: Any = None, *, present: bool = True) -> str | None:
     if not present or value is None or value == key or value == "00000":
         return None
@@ -120,8 +125,9 @@ def _normalize_optional(key: str, value: Any = None, *, present: bool = True) ->
 
 def _real_value(params: dict[str, Any], key: str) -> str:
     value = params.get(key)
-    if not isinstance(value, str) or not value or value == key or value == "00000":
+    if _is_sentinel(value, key):
         raise ICError(f"Missing or malformed mandatory {key}")
+    assert isinstance(value, str)
     return value
 
 
@@ -511,6 +517,7 @@ class LightGroupSyncTracker:
         self.terminal_event = asyncio.Event()
         self.failure: ICError | None = None
         self.baseline: LightGroupProjection | None = None
+        self._baseline_values: dict[str, dict[str, str | None]] | None = None
         self.prebaseline: list[tuple[int, dict[str, Any]]] = []
         self.dynamic_types = dict(topology.inventory)
         self.pre_send_sequence: int | None = None
@@ -538,6 +545,7 @@ class LightGroupSyncTracker:
 
     def set_prewrite_baseline(self, projection: LightGroupProjection) -> None:
         self.baseline = projection
+        self._baseline_values = _projection_values(projection)
         self.initial_status = validate_initial_projection(projection, self.topology)
         if self.initial_status == "ON":
             self.turned_on.update((self.topology.target_objnam, *self.topology.target_children))
@@ -596,12 +604,7 @@ class LightGroupSyncTracker:
         known_type = self.dynamic_types.get(objnam)
         announced_type_present = "OBJTYP" in params
         announced_type = params.get("OBJTYP")
-        if announced_type_present and (
-            not isinstance(announced_type, str)
-            or not announced_type
-            or announced_type == "OBJTYP"
-            or announced_type == "00000"
-        ):
+        if announced_type_present and _is_sentinel(announced_type, "OBJTYP"):
             raise ICError("Malformed Color Sync notification object type")
         if known_type is None:
             if announced_type in RELEVANT_TYPES or (
@@ -623,8 +626,8 @@ class LightGroupSyncTracker:
             raise ICError("Color Sync notification changed object type")
 
         if compare_baseline:
-            assert self.baseline is not None
-            expected = _projection_values(self.baseline)[objnam]
+            assert self._baseline_values is not None
+            expected = self._baseline_values[objnam]
             expected_keys = set(expected)
         elif known_type == "SYSTEM":
             expected = None
@@ -645,12 +648,7 @@ class LightGroupSyncTracker:
             if optional:
                 value = _normalize_optional(key, raw_value)
             else:
-                if (
-                    not isinstance(raw_value, str)
-                    or not raw_value
-                    or raw_value == key
-                    or raw_value == "00000"
-                ):
+                if _is_sentinel(raw_value, key):
                     raise ICError(f"Malformed mandatory notification {key}")
                 value = raw_value
 
