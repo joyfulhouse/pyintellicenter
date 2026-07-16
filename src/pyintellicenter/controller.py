@@ -253,10 +253,11 @@ from .attributes import (
     HeaterType as HeaterType,
 )
 from .connection import DEFAULT_TCP_PORT, DEFAULT_WEBSOCKET_PORT, ICConnection, TransportType
-from .exceptions import ICCommandError, ICConnectionError, ICResponseError, ICTimeoutError
+from .exceptions import ICCommandError, ICConnectionError, ICError, ICResponseError, ICTimeoutError
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import AsyncIterator, Callable
+    from contextlib import AbstractAsyncContextManager
 
     from .model import PoolModel, PoolObject
     from .types import ObjectEntry
@@ -297,6 +298,7 @@ class _PendingRequest:
     with the latest value winning.
     """
 
+    changes: dict[str, dict[str, str]]
     future: asyncio.Future[dict[str, Any]] = field(default_factory=asyncio.Future)
 
 
@@ -438,6 +440,15 @@ class ICBaseController:
         # Metrics
         self._metrics = ICConnectionMetrics()
 
+        # Object writes share one controller-wide mutation lifecycle. Color Sync
+        # marks its long-running lifecycle pending before waiting for older
+        # admitted writers, then authorizes its captured-connection requests with
+        # one unforgeable identity token.
+        self._mutation_lock = asyncio.Lock()
+        self._mutation_owner: asyncio.Task[Any] | None = None
+        self._light_group_mutation_pending = False
+        self._light_group_mutation_lease: object | None = None
+
     def __repr__(self) -> str:
         return (
             f"ICBaseController(host={self._host!r}, port={self._port}, "
@@ -554,16 +565,118 @@ class ICBaseController:
         Returns:
             Response dictionary
 
+        Mutation boundary:
+            Case-insensitive ``SetParamList`` is the controller's supported
+            object-writer command. Once Color Sync marks its mutation lifecycle
+            pending, later same-controller object writes fail immediately and
+            must be retried deliberately; they are never queued for replay after
+            Sync. Read-only commands continue. Undocumented vendor writers and a
+            separately constructed raw ``ICConnection`` are outside this
+            controller boundary.
+
         Raises:
             ICConnectionError: If not connected
             ICCommandError: If command fails
         """
-        if not self._connection or not self._connection.connected:
-            raise ICConnectionError("Not connected")
+        is_object_writer = cmd.casefold() == "setparamlist"
+        if is_object_writer and self._light_group_mutation_pending:
+            raise ICError("Color Sync mutation lifecycle is in progress")
+
+        async def _send_on_current_connection() -> dict[str, Any]:
+            connection = self._connection
+            if connection is None or not connection.connected:
+                raise ICConnectionError("Not connected")
+
+            with _RequestContext(self._metrics):
+                try:
+                    return await connection.send_request(cmd, **(extra or {}))
+                except ICResponseError as err:
+                    raise ICCommandError(err.code) from err
+
+        if not is_object_writer:
+            return await _send_on_current_connection()
+
+        async with self._mutation_lifecycle():
+            return await _send_on_current_connection()
+
+    def _mutation_lifecycle(self) -> AbstractAsyncContextManager[None]:
+        """Serialize an ordinary object writer and record its owning task."""
+
+        @contextlib.asynccontextmanager
+        async def _lifecycle() -> AsyncIterator[None]:
+            await self._mutation_lock.acquire()
+            self._mutation_owner = asyncio.current_task()
+            try:
+                yield
+            finally:
+                self._mutation_owner = None
+                self._mutation_lock.release()
+
+        return _lifecycle()
+
+    def _light_group_mutation_lifecycle(self) -> AbstractAsyncContextManager[object]:
+        """Own the exclusive Color Sync lifecycle and yield its opaque lease."""
+
+        @contextlib.asynccontextmanager
+        async def _lifecycle() -> AsyncIterator[object]:
+            if self._light_group_mutation_pending:
+                raise ICError("Color Sync mutation lifecycle is in progress")
+
+            # No await may occur between admission and this mark: later public and
+            # coalesced writers must observe the lifecycle immediately.
+            self._light_group_mutation_pending = True
+            acquired = False
+            try:
+                await self._mutation_lock.acquire()
+                acquired = True
+                self._mutation_owner = asyncio.current_task()
+                lease = object()
+                self._light_group_mutation_lease = lease
+                yield lease
+            finally:
+                if acquired:
+                    # Callers must cancel and await delegated children before
+                    # leaving this context. Invalidate authorization before
+                    # releasing the lifecycle to a later writer.
+                    self._light_group_mutation_lease = None
+                    self._mutation_owner = None
+                    self._mutation_lock.release()
+                self._light_group_mutation_pending = False
+
+        return _lifecycle()
+
+    async def _send_cmd_on_connection_unlocked(
+        self,
+        connection: ICConnection,
+        cmd: str,
+        extra: dict[str, Any] | None = None,
+        *,
+        _mutation_lease: object,
+        request_timeout: float | None = None,
+        _before_write_callback: Callable[[int, float], None] | None = None,
+        _after_write_callback: Callable[[int], None] | None = None,
+    ) -> dict[str, Any]:
+        """Send on the captured connection under the active opaque Sync lease."""
+        if (
+            not self._light_group_mutation_pending
+            or not self._mutation_lock.locked()
+            or self._mutation_owner is None
+            or self._light_group_mutation_lease is None
+            or self._light_group_mutation_lease is not _mutation_lease
+        ):
+            raise ICError("Invalid or inactive Color Sync mutation lease")
+        if self._connection is not connection or not connection.connected:
+            raise ICConnectionError("Connection changed or is not connected")
 
         with _RequestContext(self._metrics):
             try:
-                return await self._connection.send_request(cmd, **(extra or {}))
+                return await connection.send_request(
+                    cmd,
+                    request_timeout=request_timeout,
+                    _before_write_callback=_before_write_callback,
+                    _after_write_callback=_after_write_callback,
+                    **(extra or {}),
+                )
             except ICResponseError as err:
                 raise ICCommandError(err.code) from err
 
@@ -888,29 +1001,70 @@ class ICModelController(
         Returns:
             Response dictionary from the batched request
         """
-        # Create a future for this request
-        request = _PendingRequest()
+        if self._light_group_mutation_pending:
+            raise ICError("Color Sync mutation lifecycle is in progress")
+
+        owned_changes = {objnam: dict(changes)}
+        request = _PendingRequest(owned_changes)
 
         # Merge changes into pending (latest value wins for same objnam+attr)
         if objnam not in self._pending_changes:
             self._pending_changes[objnam] = {}
-        self._pending_changes[objnam].update(changes)
+        self._pending_changes[objnam].update(owned_changes[objnam])
 
         # Track this request so it gets notified when batch completes
         self._pending_requests.append(request)
 
         # Try to flush - if lock is held, we wait and our changes get batched
-        await self._flush_pending_changes()
+        try:
+            await self._flush_pending_changes(request)
+            return await request.future
+        except asyncio.CancelledError:
+            self._remove_pending_request(request)
+            raise
 
-        return await request.future
+    def _rebuild_pending_changes(self) -> None:
+        """Rebuild latest-wins aggregation from requests still awaiting detach."""
+        rebuilt: dict[str, dict[str, str]] = {}
+        for request in self._pending_requests:
+            for objnam, attrs in request.changes.items():
+                rebuilt.setdefault(objnam, {}).update(attrs)
+        self._pending_changes = rebuilt
 
-    async def _flush_pending_changes(self) -> None:
+    def _remove_pending_request(self, request: _PendingRequest) -> None:
+        """Remove one not-yet-detached request without leaving a live future."""
+        removed = False
+        for index, pending in enumerate(self._pending_requests):
+            if pending is request:
+                self._pending_requests.pop(index)
+                removed = True
+                break
+
+        if removed:
+            self._rebuild_pending_changes()
+
+        if not request.future.done():
+            request.future.cancel()
+        # Cancellation can arrive after another flush detached this request and
+        # completed its future with either a result or an exception. Always
+        # retrieve the terminal state so a caller-level CancelledError cannot
+        # orphan a completed exception warning.
+        with contextlib.suppress(asyncio.CancelledError):
+            request.future.exception()
+
+    async def _flush_pending_changes(self, owner_request: _PendingRequest) -> None:
         """Flush all pending changes in a single batch request.
 
         Only one flush runs at a time. While one is in progress, new requests
         queue up and will be sent in the next batch.
         """
         async with self._coalesce_lock:
+            # Another flush may already have detached and completed this
+            # caller's request while it waited for the coalescing lock. Such a
+            # caller must observe its own future next; it cannot detach or send
+            # work admitted by a later caller.
+            if not any(request is owner_request for request in self._pending_requests):
+                return
             if not self._pending_changes:
                 return
 
@@ -937,7 +1091,22 @@ class ICModelController(
                 for req in requests:
                     if not req.future.done():
                         req.future.set_result(response)
-            except (ICConnectionError, ICCommandError, ICTimeoutError, OSError) as e:
+            except asyncio.CancelledError:
+                # The transport may already have accepted this batch. Never
+                # requeue or retry it. The cancelled initiating caller keeps its
+                # CancelledError; peers receive one stable uncertainty failure.
+                if not owner_request.future.done():
+                    owner_request.future.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    owner_request.future.exception()
+                uncertainty = ICError(
+                    "Coalesced mutation delivery is unknown after flush cancellation"
+                )
+                for req in requests:
+                    if req is not owner_request and not req.future.done():
+                        req.future.set_exception(uncertainty)
+                raise
+            except (ICError, OSError) as e:
                 # Propagate error to all waiters
                 for req in requests:
                     if not req.future.done():
@@ -997,17 +1166,25 @@ class ICModelController(
         Returns:
             Response dictionary from the batched request
         """
-        request = _PendingRequest()
+        if self._light_group_mutation_pending:
+            raise ICError("Color Sync mutation lifecycle is in progress")
+
+        owned_changes = {objnam: dict(attrs) for objnam, attrs in changes.items()}
+        request = _PendingRequest(owned_changes)
 
         # Merge all changes into pending
-        for objnam, attrs in changes.items():
+        for objnam, attrs in owned_changes.items():
             if objnam not in self._pending_changes:
                 self._pending_changes[objnam] = {}
             self._pending_changes[objnam].update(attrs)
 
         self._pending_requests.append(request)
-        await self._flush_pending_changes()
-        return await request.future
+        try:
+            await self._flush_pending_changes(request)
+            return await request.future
+        except asyncio.CancelledError:
+            self._remove_pending_request(request)
+            raise
 
     def _get_attr_as_int(self, objnam: str, attr: str) -> int | None:
         """Get an attribute value as an integer, or None if unavailable."""

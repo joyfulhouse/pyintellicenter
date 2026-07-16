@@ -66,6 +66,57 @@ await controller.set_chlorinator_output("CHEM1", 50)
 await controller.set_vacation_mode(True)
 ```
 
+### Verified light-group Color Sync
+
+The dedicated Color Sync action is evidence-scoped rather than a generic light
+group command. The controller must report the exact raw firmware token `1.064`,
+the addressed object must be a real `CIRCUIT/LITSHO` parent with exactly two
+distinct resolved `CIRCUIT/GLOW` children, and the parent plus children must be
+uniformly all off or all on. Color Set, Color Swim, and member-position writes
+are not implemented.
+
+```python
+from pyintellicenter import ICError, ICLightGroupError
+
+groups = controller.get_circuit_groups()
+rows = controller.get_circuit_group_members(groups[0].objnam)
+children = controller.get_circuits_in_group(groups[0].objnam)
+
+try:
+    acknowledgement = await controller.run_light_group_sync(groups[0].objnam)
+except ValueError:
+    # Cached firmware or topology is outside the supported action envelope.
+    raise
+except ICLightGroupError as err:
+    if err.acknowledged or err.onset_seen:
+        # The action was acknowledged or visibly started but did not prove
+        # completion. Inspect the physical lights before any retry.
+        raise
+    if err.dispatch_started and not err.response_received:
+        # Delivery is uncertain; inspect the physical lights before any retry.
+        raise
+    # An explicit rejection or malformed response was received after dispatch.
+    raise
+except ICError:
+    # A subscription, connection, or fresh state/preflight gate failed before dispatch.
+    raise
+```
+
+The successful return value is the complete correlated transport
+acknowledgement. The call commonly occupies roughly 96–97 seconds plus request
+latency on the observed firmware: one second for subscription settling, roughly
+35–36 seconds for the physical Sync lifecycle, a mandatory 60-second
+post-terminal observation, and a final read on the same connection. There is no
+automatic retry or recovery write.
+
+While the call owns the controller mutation lifecycle, later object-changing
+calls through that controller fail immediately with `ICError`; read-only commands
+and model updates continue. A physical-panel change or write through a separate
+raw `ICConnection` is outside this boundary and causes failure if it changes the
+monitored projection. `ICLightGroupError` exposes `phase`, `dispatch_started`,
+`response_received`, `acknowledged`, and `onset_seen`. Any failure with
+`dispatch_started=True` requires physical inspection before a deliberate retry.
+
 ### Subscribing to state changes
 
 ```python
@@ -95,6 +146,7 @@ from pyintellicenter import (
     ICResponseError,    # Bad response from IntelliCenter
     ICCommandError,     # Command execution error
     ICTimeoutError,     # Request timeout
+    ICLightGroupError,  # Color Sync failed after dispatch began
 )
 
 try:

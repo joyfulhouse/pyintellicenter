@@ -1336,15 +1336,20 @@ class TestICModelController:
         assert controller._system_info.prop_name == "New Pool"
 
     def test_get_circuit_groups(self, controller, model):
-        """Test get_circuit_groups returns all circuit group objects."""
-        model.add_object("CG001", {"OBJTYP": "CIRCGRP", "SNAME": "Light Group 1"})
-        model.add_object("CG002", {"OBJTYP": "CIRCGRP", "SNAME": "Light Group 2"})
+        """Test get_circuit_groups returns parent circuits, not member rows."""
+        model.add_object(
+            "CG001", {"OBJTYP": "CIRCUIT", "SUBTYP": "LITSHO", "SNAME": "Light Group 1"}
+        )
+        model.add_object(
+            "CG002", {"OBJTYP": "CIRCUIT", "SUBTYP": "CIRCGRP", "SNAME": "Light Group 2"}
+        )
+        model.add_object("ROW001", {"OBJTYP": "CIRCGRP", "PARENT": "CG001", "CIRCUIT": "C001"})
         model.add_object("C001", {"OBJTYP": "CIRCUIT", "SUBTYP": "INTELLI", "SNAME": "Light"})
 
         groups = controller.get_circuit_groups()
 
         assert len(groups) == 2
-        assert all(obj.objtype == "CIRCGRP" for obj in groups)
+        assert all(obj.objtype == "CIRCUIT" for obj in groups)
 
     def test_get_circuits_in_group(self, controller, model):
         """Test get_circuits_in_group returns circuits belonging to a group."""
@@ -1422,16 +1427,18 @@ class TestICModelController:
         # Create circuits
         model.add_object("C001", {"OBJTYP": "CIRCUIT", "SUBTYP": "INTELLI", "SNAME": "Pool Light"})
         model.add_object("C002", {"OBJTYP": "CIRCUIT", "SUBTYP": "LIGHT", "SNAME": "Deck Light"})
-        # Create circuit groups
+        # Create circuit-group parents and membership rows
         model.add_object(
             "CG001",
-            {"OBJTYP": "CIRCGRP", "SNAME": "Color Group", "CIRCUIT": "C001"},
+            {"OBJTYP": "CIRCUIT", "SUBTYP": "LITSHO", "SNAME": "Color Group"},
         )
         model.add_object(
             "CG002",
-            {"OBJTYP": "CIRCGRP", "SNAME": "Non-Color Group", "CIRCUIT": "C002"},
+            {"OBJTYP": "CIRCUIT", "SUBTYP": "LITSHO", "SNAME": "Non-Color Group"},
         )
-        model.add_object("CG003", {"OBJTYP": "CIRCGRP", "SNAME": "Empty Group"})
+        model.add_object("CG003", {"OBJTYP": "CIRCUIT", "SUBTYP": "LITSHO", "SNAME": "Empty Group"})
+        model.add_object("ROW001", {"OBJTYP": "CIRCGRP", "PARENT": "CG001", "CIRCUIT": "C001"})
+        model.add_object("ROW002", {"OBJTYP": "CIRCGRP", "PARENT": "CG002", "CIRCUIT": "C002"})
 
         color_groups = controller.get_color_light_groups()
 
@@ -1442,11 +1449,12 @@ class TestICModelController:
         """Test get_all_entities includes circuit_groups and color_light_groups."""
         # Create color light
         model.add_object("C001", {"OBJTYP": "CIRCUIT", "SUBTYP": "INTELLI", "SNAME": "Pool Light"})
-        # Create circuit group with color light
+        # Create circuit-group parent with a color-light membership row
         model.add_object(
             "CG001",
-            {"OBJTYP": "CIRCGRP", "SNAME": "Color Group", "CIRCUIT": "C001"},
+            {"OBJTYP": "CIRCUIT", "SUBTYP": "LITSHO", "SNAME": "Color Group"},
         )
+        model.add_object("ROW001", {"OBJTYP": "CIRCGRP", "PARENT": "CG001", "CIRCUIT": "C001"})
 
         entities = controller.get_all_entities()
 
@@ -1513,6 +1521,346 @@ class TestICModelController:
             {"OBJTYP": "CIRCUIT", "SUBTYP": "INTELLI", "SNAME": "Light", "USE": "SAMMOD"},
         )
         assert controller.get_light_effect_name("C001") == "SAm"
+
+
+class TestMutationLifecycle:
+    """Test exclusive controller mutation lifecycle behavior."""
+
+    @pytest.fixture
+    def controller(self):
+        """Create a connected controller with a deterministic transport fake."""
+        ctrl = ICModelController("192.168.1.100", PoolModel(), 6681)
+        ctrl._connection = MagicMock()
+        ctrl._connection.connected = True
+        ctrl._connection.send_request = AsyncMock(return_value={"response": "200"})
+        return ctrl
+
+    @pytest.mark.asyncio
+    async def test_sync_pending_rejects_all_writer_spellings_but_allows_reads(self, controller):
+        """Later object writers fail fast while read-only requests stay live."""
+        async with controller._light_group_mutation_lifecycle():
+            for command in (
+                "SETPARAMLIST",
+                "SetParamList",
+                "setparamlist",
+                "sEtPaRaMlIsT",
+            ):
+                with pytest.raises(ICError, match="Color Sync mutation lifecycle"):
+                    await controller.send_cmd(command, {"objectList": []})
+
+            with pytest.raises(ICError, match="Color Sync mutation lifecycle"):
+                await controller.request_changes("C001", {"STATUS": "ON"})
+
+            with pytest.raises(ICError, match="Color Sync mutation lifecycle"):
+                async with controller._light_group_mutation_lifecycle():
+                    pytest.fail("a second Sync must never acquire the lifecycle")
+
+            assert await controller.send_cmd("GetParamList") == {"response": "200"}
+
+        controller._connection.send_request.assert_awaited_once_with("GetParamList")
+
+    @pytest.mark.asyncio
+    async def test_sync_marks_pending_before_draining_an_already_started_writer(self, controller):
+        """A writer owning the lifecycle drains, while a later writer is rejected."""
+        writer_started = asyncio.Event()
+        release_writer = asyncio.Event()
+        sync_owned = asyncio.Event()
+
+        async def slow_send(*args, **kwargs):
+            writer_started.set()
+            await release_writer.wait()
+            return {"response": "200"}
+
+        controller._connection.send_request = slow_send
+        first_writer = asyncio.create_task(controller.send_cmd("SetParamList", {"objectList": []}))
+        await writer_started.wait()
+
+        async def own_sync_lifecycle():
+            async with controller._light_group_mutation_lifecycle():
+                sync_owned.set()
+
+        sync_task = asyncio.create_task(own_sync_lifecycle())
+        await asyncio.sleep(0)
+        assert controller._light_group_mutation_pending is True
+        assert sync_owned.is_set() is False
+
+        with pytest.raises(ICError, match="Color Sync mutation lifecycle"):
+            await controller.send_cmd("SETPARAMLIST", {"objectList": []})
+
+        release_writer.set()
+        await first_writer
+        await sync_task
+        assert sync_owned.is_set() is True
+        assert controller._light_group_mutation_pending is False
+
+    @pytest.mark.asyncio
+    async def test_sync_wait_cancellation_clears_pending(self, controller):
+        """Cancellation while waiting for an older writer restores admission."""
+
+        async def wait_for_sync_lifecycle():
+            async with controller._light_group_mutation_lifecycle():
+                pytest.fail("cancelled waiter must not acquire the lifecycle")
+
+        async with controller._mutation_lifecycle():
+            waiter = asyncio.create_task(wait_for_sync_lifecycle())
+            await asyncio.sleep(0)
+            assert controller._light_group_mutation_pending is True
+            waiter.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await waiter
+            assert controller._light_group_mutation_pending is False
+
+    @pytest.mark.asyncio
+    async def test_sync_owner_cancellation_releases_every_lifecycle_field(self, controller):
+        """Cancellation after ownership invalidates the lease before unlock."""
+        owned = asyncio.Event()
+
+        async def hold_sync_lifecycle():
+            async with controller._light_group_mutation_lifecycle():
+                owned.set()
+                await asyncio.Event().wait()
+
+        task = asyncio.create_task(hold_sync_lifecycle())
+        await owned.wait()
+        assert controller._mutation_lock.locked() is True
+        assert controller._mutation_owner is task
+        assert controller._light_group_mutation_lease is not None
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert controller._mutation_lock.locked() is False
+        assert controller._mutation_owner is None
+        assert controller._light_group_mutation_lease is None
+        assert controller._light_group_mutation_pending is False
+
+    @pytest.mark.asyncio
+    async def test_exact_lease_authorizes_one_delegated_request(self, controller):
+        """Only the current opaque lease can use the captured-connection primitive."""
+        connection = controller._connection
+        before = MagicMock()
+        after = MagicMock()
+
+        async with controller._light_group_mutation_lifecycle() as lease:
+            result = await asyncio.create_task(
+                controller._send_cmd_on_connection_unlocked(
+                    connection,
+                    "SetParamList",
+                    {"objectList": []},
+                    _mutation_lease=lease,
+                    request_timeout=60.0,
+                    _before_write_callback=before,
+                    _after_write_callback=after,
+                )
+            )
+            assert result == {"response": "200"}
+
+            with pytest.raises(ICError, match="lease"):
+                await controller._send_cmd_on_connection_unlocked(
+                    connection,
+                    "SetParamList",
+                    _mutation_lease=object(),
+                )
+
+        with pytest.raises(ICError, match="lease"):
+            await controller._send_cmd_on_connection_unlocked(
+                connection,
+                "SetParamList",
+                _mutation_lease=lease,
+            )
+
+        connection.send_request.assert_awaited_once_with(
+            "SetParamList",
+            request_timeout=60.0,
+            _before_write_callback=before,
+            _after_write_callback=after,
+            objectList=[],
+        )
+
+    @pytest.mark.asyncio
+    async def test_unlocked_request_rejects_replaced_connection(self, controller):
+        """The private primitive never falls through to a replacement connection."""
+        old_connection = controller._connection
+
+        async with controller._light_group_mutation_lifecycle() as lease:
+            replacement = MagicMock()
+            replacement.connected = True
+            replacement.send_request = AsyncMock(return_value={"response": "200"})
+            controller._connection = replacement
+
+            with pytest.raises(ICConnectionError, match="changed"):
+                await controller._send_cmd_on_connection_unlocked(
+                    old_connection,
+                    "GetParamList",
+                    _mutation_lease=lease,
+                )
+
+        old_connection.send_request.assert_not_awaited()
+        replacement.send_request.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_queue_helpers_fail_before_touching_coalescing_state(self, controller):
+        """Busy checks run synchronously before either coalescing helper queues."""
+        await controller._coalesce_lock.acquire()
+        controller._light_group_mutation_pending = True
+        try:
+            with pytest.raises(ICError, match="Color Sync mutation lifecycle"):
+                await controller._queue_property_change("C001", {"STATUS": "ON"})
+            with pytest.raises(ICError, match="Color Sync mutation lifecycle"):
+                await controller._queue_batch_changes({"C002": {"STATUS": "ON"}})
+            assert controller._pending_changes == {}
+            assert controller._pending_requests == []
+        finally:
+            controller._light_group_mutation_pending = False
+            controller._coalesce_lock.release()
+
+    @pytest.mark.asyncio
+    async def test_busy_flush_completes_every_detached_waiter(self, controller):
+        """A busy ICError is fanned out without orphaning coalesced futures."""
+        await controller._coalesce_lock.acquire()
+        first = asyncio.create_task(controller.set_circuit_state("C001", True))
+        second = asyncio.create_task(controller.set_circuit_state("C002", True))
+        await asyncio.sleep(0)
+        controller._light_group_mutation_pending = True
+        controller._coalesce_lock.release()
+
+        results = await asyncio.gather(first, second, return_exceptions=True)
+        assert all(isinstance(result, ICError) for result in results)
+        assert results[0] is results[1]
+        assert controller._pending_changes == {}
+        assert controller._pending_requests == []
+        controller._connection.send_request.assert_not_awaited()
+        controller._light_group_mutation_pending = False
+
+    @pytest.mark.asyncio
+    async def test_pre_detach_cancellation_rebuilds_latest_wins_batch(self, controller):
+        """Removing a queued override restores the surviving admitted value."""
+        await controller._coalesce_lock.acquire()
+        first = asyncio.create_task(controller.set_circuit_state("C001", True))
+        await asyncio.sleep(0)
+        cancelled = asyncio.create_task(controller.set_circuit_state("C001", False))
+        await asyncio.sleep(0)
+
+        cancelled.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled
+        assert controller._pending_changes == {"C001": {"STATUS": "ON"}}
+        assert len(controller._pending_requests) == 1
+
+        controller._coalesce_lock.release()
+        await first
+        sent = controller._connection.send_request.await_args.kwargs["objectList"]
+        assert sent == [{"objnam": "C001", "params": {"STATUS": "ON"}}]
+
+    @pytest.mark.asyncio
+    async def test_pre_detach_cancellation_removes_distinct_object(self, controller):
+        """A cancelled distinct-object request cannot leak into a later batch."""
+        await controller._coalesce_lock.acquire()
+        survivor = asyncio.create_task(controller.set_circuit_state("C001", True))
+        await asyncio.sleep(0)
+        cancelled = asyncio.create_task(controller.set_circuit_state("C002", True))
+        await asyncio.sleep(0)
+
+        cancelled.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled
+        assert controller._pending_changes == {"C001": {"STATUS": "ON"}}
+
+        controller._coalesce_lock.release()
+        await survivor
+        sent = controller._connection.send_request.await_args.kwargs["objectList"]
+        assert sent == [{"objnam": "C001", "params": {"STATUS": "ON"}}]
+
+    @pytest.mark.asyncio
+    async def test_detached_flush_owner_cancellation_marks_peers_uncertain(self, controller):
+        """A possibly dispatched batch is never requeued after owner cancellation."""
+        send_started = asyncio.Event()
+
+        async def suspended_send(*args, **kwargs):
+            send_started.set()
+            await asyncio.Event().wait()
+
+        controller._connection.send_request = suspended_send
+        await controller._coalesce_lock.acquire()
+        owner = asyncio.create_task(controller.set_circuit_state("C001", True))
+        peer = asyncio.create_task(controller.set_circuit_state("C002", True))
+        await asyncio.sleep(0)
+        controller._coalesce_lock.release()
+        await send_started.wait()
+
+        owner.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await owner
+        with pytest.raises(ICError, match="delivery is unknown"):
+            await peer
+
+        assert controller._pending_changes == {}
+        assert controller._pending_requests == []
+
+    @pytest.mark.asyncio
+    async def test_completed_peer_never_flushes_a_later_callers_batch(self, controller):
+        """A request detached by an earlier flush cannot own unrelated work."""
+        first_send_started = asyncio.Event()
+        release_first_send = asyncio.Event()
+        second_send_started = asyncio.Event()
+        release_second_send = asyncio.Event()
+        call_count = 0
+
+        async def scripted_send(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                first_send_started.set()
+                await release_first_send.wait()
+                raise ICConnectionError("first batch failed")
+            second_send_started.set()
+            await release_second_send.wait()
+            return {"response": "200"}
+
+        controller._connection.send_request = scripted_send
+        await controller._coalesce_lock.acquire()
+        first_owner = asyncio.create_task(controller.set_circuit_state("C001", True))
+        completed_peer = asyncio.create_task(controller.set_circuit_state("C002", True))
+        await asyncio.sleep(0)
+        controller._coalesce_lock.release()
+        await first_send_started.wait()
+
+        later_caller = asyncio.create_task(controller.set_circuit_state("C003", True))
+        await asyncio.sleep(0)
+        release_first_send.set()
+
+        with pytest.raises(ICConnectionError, match="first batch failed"):
+            await first_owner
+        await second_send_started.wait()
+        assert completed_peer.done() is True
+        with pytest.raises(ICConnectionError, match="first batch failed"):
+            await completed_peer
+
+        release_second_send.set()
+        assert await later_caller == {"response": "200"}
+        assert call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_cancelled_detached_caller_consumes_completed_exception(self, controller):
+        """Caller cancellation retrieves an already-completed detached failure."""
+        await controller._coalesce_lock.acquire()
+        caller = asyncio.create_task(controller.set_circuit_state("C001", True))
+        await asyncio.sleep(0)
+        request = controller._pending_requests[0]
+
+        # Model the atomic state immediately after another flush detached this
+        # caller, then completed its future before the lock waiter resumed.
+        controller._pending_requests = []
+        controller._pending_changes = {}
+        request.future.set_exception(ICError("detached batch failed"))
+
+        caller.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+        assert request.future.done() is True
+        assert request.future._log_traceback is False
+        controller._coalesce_lock.release()
 
 
 class TestRequestCoalescing:

@@ -159,6 +159,7 @@ from .exceptions import (
     ICCommandError,
     ICConnectionError,
     ICError,
+    ICLightGroupError,
     ICResponseError,
     ICTimeoutError,
 )
@@ -193,6 +194,7 @@ __all__ = [
     "__version__",
     # Exceptions
     "ICError",
+    "ICLightGroupError",
     "ICConnectionError",
     "ICResponseError",
     "ICCommandError",

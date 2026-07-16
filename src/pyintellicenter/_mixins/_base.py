@@ -24,6 +24,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    import asyncio
+    from collections.abc import Callable
+    from contextlib import AbstractAsyncContextManager
+
+    from ..connection import ICConnection, TransportType
     from ..controller import ICSystemInfo
     from ..model import PoolModel
 
@@ -42,6 +47,11 @@ if TYPE_CHECKING:
 
         _model: PoolModel
         _system_info: ICSystemInfo | None
+        _connection: ICConnection | None
+        _mutation_lock: asyncio.Lock
+        _mutation_owner: asyncio.Task[Any] | None
+        _light_group_mutation_pending: bool
+        _light_group_mutation_lease: object | None
 
         @property
         def system_info(self) -> ICSystemInfo | None:
@@ -64,6 +74,33 @@ if TYPE_CHECKING:
 
         async def send_cmd(self, cmd: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:
             """Send a command and return the response (provided by ``ICBaseController``)."""
+            raise NotImplementedError
+
+        def _mutation_lifecycle(self) -> AbstractAsyncContextManager[None]:
+            """Return the ordinary object-writer lifecycle context."""
+            raise NotImplementedError
+
+        def _light_group_mutation_lifecycle(self) -> AbstractAsyncContextManager[object]:
+            """Return the exclusive Color Sync lifecycle context."""
+            raise NotImplementedError
+
+        @property
+        def transport(self) -> TransportType:
+            """Return the configured connection transport."""
+            raise NotImplementedError
+
+        async def _send_cmd_on_connection_unlocked(
+            self,
+            connection: ICConnection,
+            cmd: str,
+            extra: dict[str, Any] | None = None,
+            *,
+            _mutation_lease: object,
+            request_timeout: float | None = None,
+            _before_write_callback: Callable[[int, float], None] | None = None,
+            _after_write_callback: Callable[[int], None] | None = None,
+        ) -> dict[str, Any]:
+            """Send on the captured connection using the active Sync lease."""
             raise NotImplementedError
 
 else:
