@@ -60,6 +60,7 @@ Add the following to your application:
 
 ```python
 import logging
+
 logging.basicConfig(level=logging.DEBUG)
 logging.getLogger("pyintellicenter").setLevel(logging.DEBUG)
 ```
