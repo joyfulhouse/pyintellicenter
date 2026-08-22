@@ -63,7 +63,7 @@ async def main():
         print(f"{obj.sname} ({obj.objtype}): {obj.status}")
 
     await controller.set_circuit_state("POOL", True)
-    await handler.stop()
+    handler.stop()
 
 asyncio.run(main())
 ```
