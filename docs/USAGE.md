@@ -18,6 +18,7 @@ blocked by a firewall.
 import asyncio
 from pyintellicenter import ICModelController, PoolModel, ICConnectionHandler
 
+
 async def main():
     model = PoolModel()
     controller = ICModelController("192.168.1.100", model)
@@ -29,13 +30,14 @@ async def main():
     print(controller.system_info.sw_version)
 
     # Equipment lists
-    bodies   = controller.get_bodies()
+    bodies = controller.get_bodies()
     circuits = controller.get_circuits()
-    pumps    = controller.get_pumps()
-    heaters  = controller.get_heaters()
-    sensors  = controller.get_sensors()
+    pumps = controller.get_pumps()
+    heaters = controller.get_heaters()
+    sensors = controller.get_sensors()
 
-    await handler.stop()
+    handler.stop()
+
 
 asyncio.run(main())
 ```
@@ -50,6 +52,7 @@ await controller.set_multiple_circuit_states(["AUX1", "AUX2"], True)
 
 # Heating
 from pyintellicenter import HeaterType
+
 await controller.set_heat_mode("B1101", HeaterType.HEATER)
 await controller.set_heating_setpoint("B1101", 84)
 await controller.set_cooling_setpoint("B1101", 88)  # UltraTemp heat pumps
@@ -124,6 +127,7 @@ def on_update(controller, changes):
     for objnam, attrs in changes.items():
         print(f"{objnam} changed: {attrs}")
 
+
 controller.set_updated_callback(on_update)
 ```
 
@@ -141,11 +145,11 @@ for unit in units:
 
 ```python
 from pyintellicenter import (
-    ICError,            # Base exception
+    ICError,  # Base exception
     ICConnectionError,  # Connection failures
-    ICResponseError,    # Bad response from IntelliCenter
-    ICCommandError,     # Command execution error
-    ICTimeoutError,     # Request timeout
+    ICResponseError,  # Bad response from IntelliCenter
+    ICCommandError,  # Command execution error
+    ICTimeoutError,  # Request timeout
     ICLightGroupError,  # Color Sync failed after dispatch began
 )
 
@@ -175,7 +179,7 @@ callbacks = ICConnectionHandlerCallbacks(
 handler = ICConnectionHandler(
     controller,
     callbacks=callbacks,
-    time_between_reconnects=30.0,   # Initial reconnect delay
+    time_between_reconnects=30.0,  # Initial reconnect delay
     disconnect_debounce_time=15.0,  # Grace period before disconnect callback
 )
 ```
@@ -195,8 +199,6 @@ units = await discover_intellicenter_units(timeout=5.0, zeroconf=zc)
 ```python
 async with ICConnection("192.168.1.100") as conn:
     response = await conn.send_request(
-        "GetParamList",
-        condition="",
-        objectList=[{"objnam": "INCR", "keys": ["VER", "SNAME"]}]
+        "GetParamList", condition="", objectList=[{"objnam": "INCR", "keys": ["VER", "SNAME"]}]
     )
 ```

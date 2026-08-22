@@ -50,6 +50,7 @@ Requires Python 3.13+.
 import asyncio
 from pyintellicenter import ICModelController, PoolModel, ICConnectionHandler
 
+
 async def main():
     model = PoolModel()
     controller = ICModelController("192.168.1.100", model)
@@ -65,6 +66,7 @@ async def main():
     await controller.set_circuit_state("POOL", True)
     handler.stop()
 
+
 asyncio.run(main())
 ```
 
@@ -73,12 +75,11 @@ asyncio.run(main())
 ```python
 from pyintellicenter import ICConnection
 
+
 async def main():
     async with ICConnection("192.168.1.100", transport="websocket") as conn:
         response = await conn.send_request(
-            "GetParamList",
-            condition="",
-            objectList=[{"objnam": "INCR", "keys": ["VER", "SNAME"]}]
+            "GetParamList", condition="", objectList=[{"objnam": "INCR", "keys": ["VER", "SNAME"]}]
         )
         print(response)
 ```
@@ -87,6 +88,7 @@ async def main():
 
 ```python
 from pyintellicenter import discover_intellicenter_units
+
 
 async def main():
     units = await discover_intellicenter_units(timeout=5.0)
@@ -128,11 +130,11 @@ the main concepts.
 
 ```python
 from pyintellicenter import (
-    ICError,            # Base exception
+    ICError,  # Base exception
     ICConnectionError,  # Connection failures
-    ICResponseError,    # Bad response from IntelliCenter
-    ICCommandError,     # Command execution error
-    ICTimeoutError,     # Request timeout
+    ICResponseError,  # Bad response from IntelliCenter
+    ICCommandError,  # Command execution error
+    ICTimeoutError,  # Request timeout
 )
 
 try:
@@ -162,13 +164,13 @@ except ICTimeoutError as e:
 ```python
 from pyintellicenter import HeaterType
 
-HeaterType.OFF              # Heater off
-HeaterType.HEATER           # Gas/electric heater only
-HeaterType.SOLAR_PREF       # Solar preferred, heater backup
-HeaterType.SOLAR_ONLY       # Solar only
-HeaterType.ULTRA_TEMP       # UltraTemp heat pump only
+HeaterType.OFF  # Heater off
+HeaterType.HEATER  # Gas/electric heater only
+HeaterType.SOLAR_PREF  # Solar preferred, heater backup
+HeaterType.SOLAR_ONLY  # Solar only
+HeaterType.ULTRA_TEMP  # UltraTemp heat pump only
 HeaterType.ULTRA_TEMP_PREF  # UltraTemp preferred
-HeaterType.HYBRID           # Hybrid mode
+HeaterType.HYBRID  # Hybrid mode
 # ... and more
 ```
 
