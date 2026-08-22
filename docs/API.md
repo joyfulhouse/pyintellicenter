@@ -251,7 +251,7 @@ handler = ICConnectionHandler(
 await handler.start()
 print(handler.controller.system_info.prop_name)
 print(f"Connected: {handler.connected}")
-await handler.stop()
+handler.stop()
 ```
 
 ## PoolModel

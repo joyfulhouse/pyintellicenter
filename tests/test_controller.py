@@ -1,6 +1,7 @@
 """Tests for pyintellicenter controller module."""
 
 import asyncio
+import inspect
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -2422,6 +2423,26 @@ class TestICConnectionHandler:
 
         handler.stop()
 
+        assert handler._stopped is True
+
+    def test_stop_is_not_a_coroutine_function(self):
+        """``stop()`` is synchronous, unlike ``start()``.
+
+        The README and docs/API.md show ``handler.stop()`` without ``await``.
+        Awaiting it raises ``TypeError: object NoneType can't be used in 'await'
+        expression``, so lock the contract here: if ``stop()`` ever becomes a
+        coroutine, this fails and the docs get updated with it.
+        """
+        assert inspect.iscoroutinefunction(ICConnectionHandler.start)
+        assert not inspect.iscoroutinefunction(ICConnectionHandler.stop)
+
+    @pytest.mark.asyncio
+    async def test_documented_shutdown_pattern(self, handler, mock_controller):
+        """The exact start/stop pattern the README shows must work."""
+        await handler.start()
+        await asyncio.sleep(0.1)
+
+        assert handler.stop() is None
         assert handler._stopped is True
 
     @pytest.mark.asyncio
