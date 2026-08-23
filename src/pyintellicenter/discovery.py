@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import enum
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -49,8 +50,21 @@ _RESOLVE_TIMEOUT_MS = 3000.0
 # Timeout for probing the raw TCP port of a candidate unit (seconds)
 _TCP_PROBE_TIMEOUT = 2.0
 
-# Upper bound on services resolved concurrently
-_MAX_CONCURRENT_RESOLUTIONS = 8
+# Size of the worker pool draining the candidate queue; bounds both task
+# count and concurrent resolutions
+_RESOLUTION_WORKERS = 8
+
+# Maximum resolution attempts per service generation; caps how often a
+# persistently failing service that keeps emitting updates can re-queue
+_MAX_RESOLUTION_ATTEMPTS = 3
+
+
+class _ResolutionState(enum.Enum):
+    """Resolution lifecycle of a browsed service."""
+
+    PENDING = "pending"  # queued or currently resolving
+    RESOLVED = "resolved"  # definitive outcome (unit added, or non-IntelliCenter)
+    FAILED = "failed"  # transient failure; a later Added/Updated event retries
 
 
 @dataclass(frozen=True)
@@ -80,14 +94,28 @@ class ICDiscoveryListener:
 
     The state-change handler runs on the event loop (no threads), so plain
     ``asyncio`` primitives are safe here. Added/Updated events are
-    deduplicated per ``(service_type, name)`` pair and queued as candidates
-    for concurrent resolution.
+    deduplicated per ``(service_type, name)`` pair while a resolution is
+    pending or definitively resolved; after a transient failure a later
+    event re-queues the service for another attempt.
+
+    Each service carries a generation counter that ``Removed`` bumps, so a
+    resolution that started before the removal reports a stale generation
+    and cannot resurrect the removed service (issue #76).
+
+    An Added/Updated event arriving while a resolution is in flight is
+    remembered; if that attempt then fails transiently, one retry is
+    enqueued immediately so the update is not lost. Retries are capped at
+    ``_MAX_RESOLUTION_ATTEMPTS`` per generation so a persistently failing
+    chatty service cannot re-queue itself for the whole discovery window.
     """
 
     def __init__(self) -> None:
         self._units: dict[str, ICUnit] = {}
-        self._seen: set[tuple[str, str]] = set()
-        self._candidates: asyncio.Queue[tuple[Zeroconf, str, str]] = asyncio.Queue()
+        self._states: dict[tuple[str, str], _ResolutionState] = {}
+        self._generations: dict[tuple[str, str], int] = {}
+        self._attempts: dict[tuple[str, str], int] = {}
+        self._retry_requested: dict[tuple[str, str], Zeroconf] = {}
+        self._candidates: asyncio.Queue[tuple[Zeroconf, str, str, int]] = asyncio.Queue()
 
     @property
     def units(self) -> list[ICUnit]:
@@ -102,21 +130,79 @@ class ICDiscoveryListener:
         state_change: ServiceStateChange,
     ) -> None:
         """Handle a service state change (runs in the event loop)."""
-        if state_change is ServiceStateChange.Removed:
-            self._units.pop(name, None)
-            self._seen.discard((service_type, name))
-            return
-
         key = (service_type, name)
-        if key in self._seen:
-            # Deduplicate repeated Added/Updated events
+        if state_change is ServiceStateChange.Removed:
+            # Bump the generation so an in-flight resolution that started
+            # before this removal cannot re-add the unit when it completes.
+            self._generations[key] = self._generations.get(key, 0) + 1
+            self._units.pop(name, None)
+            self._states.pop(key, None)
+            self._attempts.pop(key, None)
+            self._retry_requested.pop(key, None)
             return
-        self._seen.add(key)
-        self._candidates.put_nowait((zeroconf, service_type, name))
 
-    async def async_get_candidate(self) -> tuple[Zeroconf, str, str]:
+        state = self._states.get(key)
+        if state is _ResolutionState.RESOLVED:
+            # Definitively resolved; nothing to redo.
+            return
+        if state is _ResolutionState.PENDING:
+            # A resolution is queued or in flight. Remember that fresh
+            # records arrived so a transient failure of that attempt
+            # immediately retries instead of discarding this event.
+            self._retry_requested[key] = zeroconf
+            return
+        # Unknown or FAILED: (re-)queue, unless the retry budget for this
+        # generation is exhausted.
+        if self._attempts.get(key, 0) >= _MAX_RESOLUTION_ATTEMPTS:
+            return
+        self._enqueue(zeroconf, service_type, name)
+
+    def _enqueue(self, zeroconf: Zeroconf, service_type: str, name: str) -> None:
+        """Queue one resolution attempt for a service."""
+        key = (service_type, name)
+        self._states[key] = _ResolutionState.PENDING
+        self._attempts[key] = self._attempts.get(key, 0) + 1
+        self._candidates.put_nowait((zeroconf, service_type, name, self._generations.get(key, 0)))
+
+    async def async_get_candidate(self) -> tuple[Zeroconf, str, str, int]:
         """Wait for the next candidate service to resolve."""
         return await self._candidates.get()
+
+    def is_current(self, service_type: str, name: str, generation: int) -> bool:
+        """Return True if a candidate or outcome for a service is not stale."""
+        return self._generations.get((service_type, name), 0) == generation
+
+    def mark_resolved(
+        self, service_type: str, name: str, generation: int, unit: ICUnit | None
+    ) -> None:
+        """Record a definitive resolution outcome, unless it is stale.
+
+        ``unit`` is the discovered IntelliCenter, or None when the service
+        resolved as something other than an IntelliCenter.
+        """
+        key = (service_type, name)
+        if not self.is_current(service_type, name, generation):
+            return
+        self._states[key] = _ResolutionState.RESOLVED
+        self._retry_requested.pop(key, None)
+        if unit is not None:
+            self.add_unit(name, unit)
+
+    def mark_failed(self, service_type: str, name: str, generation: int) -> None:
+        """Record a transient resolution failure, unless it is stale.
+
+        If fresh records arrived while the failed attempt was in flight,
+        one retry is enqueued immediately (within the attempt budget);
+        otherwise a later Added/Updated event re-queues the service.
+        """
+        key = (service_type, name)
+        if not self.is_current(service_type, name, generation):
+            return
+        retry_zc = self._retry_requested.pop(key, None)
+        if retry_zc is not None and self._attempts.get(key, 0) < _MAX_RESOLUTION_ATTEMPTS:
+            self._enqueue(retry_zc, service_type, name)
+            return
+        self._states[key] = _ResolutionState.FAILED
 
     def add_unit(self, name: str, unit: ICUnit) -> None:
         """Add a discovered unit."""
@@ -160,65 +246,102 @@ async def _check_tcp_port(host: str, port: int) -> bool:
 async def _resolve_service(
     listener: ICDiscoveryListener,
     zc: Zeroconf,
-    semaphore: asyncio.Semaphore,
     service_type: str,
     name: str,
+    generation: int,
 ) -> None:
-    """Resolve service info and add to listener if it's an IntelliCenter."""
-    async with semaphore:
-        try:
-            info = AsyncServiceInfo(service_type, name)
-            if not await info.async_request(zc, _RESOLVE_TIMEOUT_MS):
-                return
+    """Resolve service info and record the outcome on the listener.
 
-            # Check if this is a Pentair/IntelliCenter device
-            service_name = info.name or name
-            if not _is_intellicenter(service_name, info):
-                return
+    Definitive outcomes — an IntelliCenter unit discovered, or a service
+    identified as something else — are marked resolved. Transient failures
+    (records not resolving, no advertised addresses, TCP probe failing) are
+    marked failed so a later Added/Updated event retries. ``generation`` is
+    validated by the listener before any state is recorded, so a service
+    removed while this resolution was in flight is not resurrected.
+    """
+    try:
+        info = AsyncServiceInfo(service_type, name)
+        if not await info.async_request(zc, _RESOLVE_TIMEOUT_MS):
+            listener.mark_failed(service_type, name, generation)
+            return
 
-            # Extract address; scoped addresses keep the scope id that
-            # link-local IPv6 needs to be connectable
-            addresses = info.parsed_scoped_addresses()
-            if not addresses:
-                return
+        # Check if this is a Pentair/IntelliCenter device
+        service_name = info.name or name
+        if not _is_intellicenter(service_name, info):
+            listener.mark_resolved(service_type, name, generation, None)
+            return
 
-            host = addresses[0]
-            # mDNS advertises WebSocket port (typically 6680)
-            ws_port = info.port or 6680
-            # Raw TCP port is WebSocket port + 1 (typically 6681)
-            tcp_port = ws_port + 1
+        # Extract addresses; scoped addresses keep the scope id that
+        # link-local IPv6 needs to be connectable
+        addresses = info.parsed_scoped_addresses()
+        if not addresses:
+            listener.mark_failed(service_type, name, generation)
+            return
 
-            # Verify TCP port is accessible
-            if not await _check_tcp_port(host, tcp_port):
-                _LOGGER.warning(
-                    "IntelliCenter %s found at %s but TCP port %d not accessible",
-                    service_name,
-                    host,
-                    tcp_port,
-                )
-                return
+        # Skip the TCP probes if the service was removed while its records
+        # were resolving; the outcome would be discarded as stale anyway.
+        if not listener.is_current(service_type, name, generation):
+            return
 
-            # Extract model from properties if available
-            model = None
-            if info.properties:
-                model_bytes = info.properties.get(b"model")
-                if model_bytes is not None:
-                    model = model_bytes.decode("utf-8", errors="ignore")
+        # mDNS advertises WebSocket port (typically 6680)
+        ws_port = info.port or 6680
+        # Raw TCP port is WebSocket port + 1 (typically 6681)
+        tcp_port = ws_port + 1
 
-            unit = ICUnit(
-                name=service_name, host=host, port=tcp_port, ws_port=ws_port, model=model or None
-            )
-            listener.add_unit(name, unit)
-            _LOGGER.debug(
-                "Discovered IntelliCenter: %s at %s (TCP:%d, WS:%d)",
+        # Probe advertised addresses in order until one is connectable; a
+        # dual-stack panel may advertise an unreachable address first. The
+        # discovery deadline in _process_candidates cancels this loop when
+        # the remaining time elapses.
+        host: str | None = None
+        for address in addresses:
+            if await _check_tcp_port(address, tcp_port):
+                host = address
+                break
+
+        if host is None:
+            _LOGGER.warning(
+                "IntelliCenter %s found at %s but TCP port %d not accessible",
                 service_name,
-                host,
+                addresses,
                 tcp_port,
-                ws_port,
             )
+            listener.mark_failed(service_type, name, generation)
+            return
 
-        except Exception:
-            _LOGGER.exception("Error resolving service %s", name)
+        # Extract model from properties if available
+        model = None
+        if info.properties:
+            model_bytes = info.properties.get(b"model")
+            if model_bytes is not None:
+                model = model_bytes.decode("utf-8", errors="ignore")
+
+        unit = ICUnit(
+            name=service_name, host=host, port=tcp_port, ws_port=ws_port, model=model or None
+        )
+        listener.mark_resolved(service_type, name, generation, unit)
+        _LOGGER.debug(
+            "Discovered IntelliCenter: %s at %s (TCP:%d, WS:%d)",
+            service_name,
+            host,
+            tcp_port,
+            ws_port,
+        )
+
+    except Exception:
+        _LOGGER.exception("Error resolving service %s", name)
+        listener.mark_failed(service_type, name, generation)
+
+
+async def _resolution_worker(listener: ICDiscoveryListener) -> None:
+    """Drain and resolve candidate services until cancelled."""
+    while True:
+        zc, service_type, name, generation = await listener.async_get_candidate()
+        # Discard candidates invalidated by a Removed event before doing
+        # any resolution work, so remove/re-add churn cannot burn workers
+        # and the discovery window on wasted network requests.
+        if not listener.is_current(service_type, name, generation):
+            continue
+        await _resolve_service(listener, zc, service_type, name, generation)
 
 
 async def _process_candidates(
@@ -227,20 +350,19 @@ async def _process_candidates(
 ) -> None:
     """Resolve candidate services concurrently until the deadline expires.
 
-    Resolutions run with bounded concurrency so a busy network full of
-    slow ``_http._tcp`` services cannot starve the IntelliCenter unit,
-    and the overall deadline is enforced on the whole batch.
+    A fixed pool of workers drains the candidate queue, bounding both task
+    count and concurrent resolutions, so a noisy network full of slow
+    ``_http._tcp`` services can neither starve the IntelliCenter unit nor
+    accumulate unbounded tasks. The overall deadline is enforced on the
+    whole pool.
     """
-    semaphore = asyncio.Semaphore(_MAX_CONCURRENT_RESOLUTIONS)
     try:
         async with asyncio.timeout(discovery_timeout), asyncio.TaskGroup() as task_group:
-            while True:
-                zc, service_type, name = await listener.async_get_candidate()
-                task_group.create_task(
-                    _resolve_service(listener, zc, semaphore, service_type, name)
-                )
+            for _ in range(_RESOLUTION_WORKERS):
+                task_group.create_task(_resolution_worker(listener))
     except TimeoutError:
-        # Discovery window elapsed; in-flight resolutions were cancelled.
+        # Discovery window elapsed; workers and in-flight resolutions
+        # were cancelled.
         pass
 
 
