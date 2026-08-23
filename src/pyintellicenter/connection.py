@@ -375,26 +375,25 @@ class ICNotificationMixin:
                 _LOGGER.debug("Notification queue race - message dropped")
 
     @staticmethod
-    def _coalesce_notifications(
-        older: dict[str, Any],
-        newer: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Merge an overflowed NotifyList into its newer successor.
+    def _coalesce_entries(
+        chronological: list[Any],
+        emission: list[Any],
+    ) -> list[Any]:
+        """Coalesce NotifyList entries so each objnam appears exactly once.
 
-        Entries are coalesced per ``objnam``: attribute params are folded
-        chronologically (older first, newer last) so the result is exactly
-        the last-write-wins state ``PoolObject.update`` would have reached
-        had both frames been delivered. The newer frame's entries keep
-        their positions; unsuperseded older entries are appended (entry
-        order across *distinct* objnams carries no meaning downstream).
-        Entries without a usable ``objnam``/``params`` pair are preserved
-        verbatim. If either frame lacks a list-shaped ``objectList`` the
-        newer frame is returned unchanged.
+        ``chronological`` orders the entries oldest-first: params for the
+        same objnam are folded in that order (newest wins per attribute),
+        producing exactly the last-write-wins state ``PoolObject.update``
+        would have reached had every entry been delivered individually.
+        ``emission`` (a permutation of the same entries) fixes the output
+        order: each objnam is emitted at its first appearance there. The
+        one-entry-per-objnam invariant matters beyond the model too:
+        ``PoolModel.process_updates`` builds its changed-attributes
+        callback payload by *replacing* per-objnam deltas per entry, so a
+        repeated objnam would silently drop earlier attributes from the
+        callback (while the model itself stayed correct). Entries without
+        a usable ``objnam``/``params`` pair are preserved verbatim.
         """
-        older_list = older.get("objectList")
-        newer_list = newer.get("objectList")
-        if not isinstance(older_list, list) or not isinstance(newer_list, list):
-            return newer
 
         def coalescible(entry: Any) -> bool:
             return (
@@ -404,13 +403,13 @@ class ICNotificationMixin:
             )
 
         params_by_objnam: dict[str, dict[str, Any]] = {}
-        for entry in (*older_list, *newer_list):  # chronological: newer wins
+        for entry in chronological:
             if coalescible(entry):
                 params_by_objnam.setdefault(entry["objnam"], {}).update(entry["params"])
 
         merged: list[Any] = []
         emitted: set[str] = set()
-        for entry in (*newer_list, *older_list):
+        for entry in emission:
             if not coalescible(entry):
                 merged.append(entry)
                 continue
@@ -420,24 +419,52 @@ class ICNotificationMixin:
             emitted.add(objnam)
             merged.append({**entry, "params": params_by_objnam[objnam]})
 
+        return merged
+
+    @classmethod
+    def _coalesce_notifications(
+        cls,
+        older: dict[str, Any],
+        newer: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Merge an overflowed NotifyList into its newer successor.
+
+        Entries are coalesced per ``objnam`` (see ``_coalesce_entries``).
+        The newer frame's entries keep their positions; unsuperseded older
+        entries are appended (entry order across *distinct* objnams
+        carries no meaning downstream). If either frame lacks a
+        list-shaped ``objectList`` the newer frame is returned unchanged.
+        """
+        older_list = older.get("objectList")
+        newer_list = newer.get("objectList")
+        if not isinstance(older_list, list) or not isinstance(newer_list, list):
+            return newer
+
+        merged = cls._coalesce_entries(
+            [*older_list, *newer_list],  # chronological: newer wins
+            [*newer_list, *older_list],  # newer entries keep their positions
+        )
         return {**newer, "objectList": merged}
 
-    @staticmethod
-    def _merge_notification_batch(batch: list[dict[str, Any]]) -> dict[str, Any]:
-        """Concatenate a drained burst into one synthetic NotifyList.
+    @classmethod
+    def _merge_notification_batch(cls, batch: list[dict[str, Any]]) -> dict[str, Any]:
+        """Merge a drained burst into one synthetic NotifyList.
 
-        ``objectList`` entries are concatenated in arrival order:
-        ``PoolObject.update`` is last-write-wins per attribute, so an
-        order-preserving concatenation yields exactly the state that
-        per-message delivery would have produced. Messages without a
+        ``objectList`` entries are collected in arrival order and
+        coalesced per ``objnam`` (see ``_coalesce_entries``), so an
+        objnam updated by several messages of the burst contributes a
+        single entry carrying all of its changed attributes with the
+        newest value winning per attribute - the same final state that
+        per-message delivery would have produced, without repeated-objnam
+        entries collapsing downstream callback deltas. Messages without a
         list-shaped ``objectList`` contribute nothing.
         """
-        merged: list[Any] = []
+        entries: list[Any] = []
         for msg in batch:
             object_list = msg.get("objectList")
             if isinstance(object_list, list):
-                merged.extend(object_list)
-        return {**batch[0], "objectList": merged}
+                entries.extend(object_list)
+        return {**batch[0], "objectList": cls._coalesce_entries(entries, entries)}
 
     async def _notification_consumer(
         self,

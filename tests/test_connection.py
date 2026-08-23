@@ -9,7 +9,13 @@ import orjson
 import pytest
 
 import pyintellicenter.connection as connection_module
-from pyintellicenter import ICConnection, ICConnectionError, ICResponseError, ICTimeoutError
+from pyintellicenter import (
+    ICConnection,
+    ICConnectionError,
+    ICResponseError,
+    ICTimeoutError,
+    PoolModel,
+)
 from pyintellicenter.connection import (
     CONNECTION_TIMEOUT,
     DEFAULT_PORT,
@@ -2275,21 +2281,77 @@ class TestNotificationBurstBatching:
         assert queue.qsize() == 1  # "NEVER" was behind the sentinel
 
     @pytest.mark.asyncio
-    async def test_merge_notification_batch_concatenates_in_order(self):
+    async def test_merge_notification_batch_coalesces_repeated_objnams(self):
         merged = ICProtocol._merge_notification_batch(
             [
-                {"command": "NotifyList", "objectList": [{"objnam": "A", "params": {"X": "1"}}]},
+                {
+                    "command": "NotifyList",
+                    "objectList": [{"objnam": "A", "params": {"X": "1", "Y": "5"}}],
+                },
                 {"command": "NotifyList", "objectList": "bogus"},
                 {"command": "NotifyList"},
+                {"command": "NotifyList", "objectList": [{"objnam": "B", "params": {"Z": "9"}}]},
                 {"command": "NotifyList", "objectList": [{"objnam": "A", "params": {"X": "2"}}]},
             ]
         )
         assert merged["command"] == "NotifyList"
-        # Duplicates are kept in arrival order: last-write-wins downstream.
+        # A repeated objnam appears once, carrying all of its changed
+        # attributes with the newest value winning per attribute:
+        # PoolModel.process_updates replaces the per-objnam callback delta
+        # per entry, so duplicates would silently drop earlier attributes.
         assert merged["objectList"] == [
-            {"objnam": "A", "params": {"X": "1"}},
-            {"objnam": "A", "params": {"X": "2"}},
+            {"objnam": "A", "params": {"X": "2", "Y": "5"}},
+            {"objnam": "B", "params": {"Z": "9"}},
         ]
+
+    @pytest.mark.asyncio
+    async def test_burst_with_repeated_objnam_keeps_all_callback_deltas(self):
+        """End-to-end: two frames for one objnam yield one callback whose
+        payload carries BOTH attributes and a correct model state."""
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        payloads = []
+        model = PoolModel()
+        model.add_object("C1", {"OBJTYP": "CIRCUIT", "SNAME": "Spa", "STATUS": "OFF", "TEMP": "70"})
+        deltas = []
+
+        async def callback(msg):
+            payloads.append(msg)
+            if msg is not payloads[0]:  # skip the HELD priming frame
+                deltas.append(model.process_updates(msg["objectList"]))
+            entered.set()
+            await release.wait()
+
+        protocol = ICProtocol(notification_callback=callback)
+        protocol.connection_made(MagicMock())
+        queue = protocol._notification_queue
+        assert queue is not None
+
+        protocol._handle_notification({"command": "NotifyList", "objectList": []})
+        await asyncio.wait_for(entered.wait(), timeout=1.0)
+
+        protocol._handle_notification(
+            {"command": "NotifyList", "objectList": [{"objnam": "C1", "params": {"STATUS": "ON"}}]}
+        )
+        protocol._handle_notification(
+            {"command": "NotifyList", "objectList": [{"objnam": "C1", "params": {"TEMP": "82"}}]}
+        )
+
+        release.set()
+        await asyncio.wait_for(queue.join(), timeout=1.0)
+
+        # One merged callback: C1 appears once with both changed attributes.
+        assert len(payloads) == 2
+        assert payloads[1]["objectList"] == [
+            {"objnam": "C1", "params": {"STATUS": "ON", "TEMP": "82"}}
+        ]
+        # The callback delta from process_updates carries BOTH attributes...
+        assert deltas == [{"C1": {"STATUS": "ON", "TEMP": "82"}}]
+        # ...and the model state is correct.
+        obj = model["C1"]
+        assert obj["STATUS"] == "ON"
+        assert obj["TEMP"] == "82"
+        protocol.connection_lost(None)
 
 
 class TestNotificationOverflowCoalescing:
