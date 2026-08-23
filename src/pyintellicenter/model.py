@@ -8,6 +8,7 @@ view of the IntelliCenter system.
 from __future__ import annotations
 
 import logging
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from .attributes import (
@@ -29,7 +30,7 @@ from .attributes import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, KeysView, ValuesView
+    from collections.abc import Iterator, KeysView, Mapping, ValuesView
 
     from .types import ObjectEntry
 
@@ -48,14 +49,19 @@ class PoolObject:
     def __init__(self, objnam: str, params: dict[str, Any]) -> None:
         """Initialize from object name and parameters.
 
+        The params dictionary is copied: the caller's dict is never mutated
+        or aliased, so it can be reused (e.g. fed to multiple models) and
+        later mutations of it cannot corrupt the object's state.
+
         Args:
             objnam: The unique object identifier (e.g., "PUMP01", "LIGHT1")
             params: Dictionary of object attributes including OBJTYP and optionally SUBTYP
         """
+        properties = dict(params)
         self._objnam = objnam
-        self._objtype: str = params.pop(OBJTYP_ATTR)
-        self._subtype: str | None = params.pop(SUBTYP_ATTR, None)
-        self._properties: dict[str, Any] = params
+        self._objtype: str = properties.pop(OBJTYP_ATTR)
+        self._subtype: str | None = properties.pop(SUBTYP_ATTR, None)
+        self._properties: dict[str, Any] = properties
 
     @property
     def objnam(self) -> str:
@@ -144,9 +150,12 @@ class PoolObject:
         return self._properties.keys()
 
     @property
-    def properties(self) -> dict[str, Any]:
-        """Return the properties of the object."""
-        return self._properties
+    def properties(self) -> Mapping[str, Any]:
+        """Return a read-only view of the properties of the object.
+
+        Mutations must go through update() so change tracking stays coherent.
+        """
+        return MappingProxyType(self._properties)
 
     def update(self, updates: dict[str, Any]) -> dict[str, Any]:
         """Update the object from a set of key/value pairs.
@@ -160,16 +169,21 @@ class PoolObject:
         changed: dict[str, Any] = {}
 
         for key, value in updates.items():
-            # Check if value is unchanged using single lookup
-            current = self._properties.get(key)
-            if current == value:
-                continue
-
-            # Handle type/subtype updates (rare but possible)
+            # OBJTYP/SUBTYP live in dedicated slots (they are popped out of
+            # the properties dict at construction), so they must be compared
+            # against those slots: comparing against _properties would report
+            # identical values as changes on every snapshot replay (issue #55).
             if key == OBJTYP_ATTR:
+                if self._objtype == value:
+                    continue
                 self._objtype = value
             elif key == SUBTYP_ATTR:
+                if self._subtype == value:
+                    continue
                 self._subtype = value
+            elif self._properties.get(key) == value:
+                # Value is unchanged (single lookup).
+                continue
             else:
                 self._properties[key] = value
             changed[key] = value
@@ -204,9 +218,13 @@ class PoolModel:
         return self._objects.values()
 
     @property
-    def objects(self) -> dict[str, PoolObject]:
-        """Return the dictionary of objects contained in the model."""
-        return self._objects
+    def objects(self) -> Mapping[str, PoolObject]:
+        """Return a read-only view of the objects contained in the model.
+
+        Additions and removals must go through add_object()/add_objects(),
+        remove_object() or reconcile() so the model stays consistent.
+        """
+        return MappingProxyType(self._objects)
 
     @property
     def num_objects(self) -> int:
@@ -220,6 +238,15 @@ class PoolModel:
     def __getitem__(self, key: str) -> PoolObject | None:
         """Return an object based on its objnam."""
         return self._objects.get(key)
+
+    def __contains__(self, objnam: object) -> bool:
+        """Return True if an object with the given objnam is in the model.
+
+        Without this, `in` would fall back to __iter__ (which yields
+        PoolObject values) and silently compare a string against PoolObject
+        instances, always returning False.
+        """
+        return objnam in self._objects
 
     def __repr__(self) -> str:
         """Return a detailed string representation for debugging."""
@@ -299,11 +326,76 @@ class PoolModel:
     def add_objects(self, obj_list: list[ObjectEntry]) -> None:
         """Create or update from all the objects in the list.
 
+        Malformed entries (missing or invalid 'objnam'/'params') are skipped
+        so one bad entry cannot abort processing of the rest.
+
         Args:
             obj_list: List of objects with 'objnam' and 'params' keys
         """
         for entry in obj_list:
-            self.add_object(entry["objnam"], entry["params"])
+            try:
+                objnam = entry["objnam"]
+                params = entry["params"]
+            except (KeyError, TypeError):
+                _LOGGER.debug("Skipping malformed object entry: %r", entry)
+                continue
+            if not isinstance(objnam, str) or not isinstance(params, dict):
+                _LOGGER.debug("Skipping object entry with invalid objnam/params: %r", entry)
+                continue
+            self.add_object(objnam, params)
+
+    def remove_object(self, objnam: str) -> PoolObject | None:
+        """Remove an object from the model.
+
+        Args:
+            objnam: The identifier of the object to remove
+
+        Returns:
+            The removed PoolObject, or None if the objnam was not in the model
+        """
+        removed = self._objects.pop(objnam, None)
+        if removed is not None:
+            _LOGGER.debug("Removed object %s from model", objnam)
+        return removed
+
+    def reconcile(self, obj_list: list[ObjectEntry]) -> list[str]:
+        """Prune objects that are absent from an authoritative snapshot.
+
+        Equipment deleted at the panel never appears in NotifyList messages
+        again, so without reconciliation it would live in the model (and in
+        attributes_to_track() re-subscription queries) forever. Callers should
+        pass a full object-list snapshot (e.g. the RequestParamList response
+        fetched on connect); any model object whose objnam is missing from the
+        snapshot is removed. Entries without a valid string objnam are ignored
+        rather than treated as removals.
+
+        This only removes objects; use add_objects()/process_updates() to add
+        or update from the same snapshot.
+
+        Args:
+            obj_list: Authoritative list of objects with 'objnam' keys
+
+        Returns:
+            List of objnams that were removed from the model
+        """
+        present: set[str] = set()
+        for entry in obj_list:
+            try:
+                objnam = entry["objnam"]
+            except (KeyError, TypeError):
+                _LOGGER.debug("Ignoring malformed snapshot entry: %r", entry)
+                continue
+            if isinstance(objnam, str):
+                present.add(objnam)
+            else:
+                _LOGGER.debug("Ignoring snapshot entry with invalid objnam: %r", entry)
+
+        removed = [objnam for objnam in self._objects if objnam not in present]
+        for objnam in removed:
+            del self._objects[objnam]
+        if removed:
+            _LOGGER.debug("Reconciled model: removed %d stale object(s): %s", len(removed), removed)
+        return removed
 
     def attributes_to_track(self) -> list[dict[str, Any]]:
         """Return all the object/attributes we want to track.
@@ -380,7 +472,8 @@ class PoolModel:
             # returning None (without storing) when there is not enough
             # information or the type is not tracked. A non-None result for a
             # previously-absent objnam means it was added to the model. Pass a
-            # copy because PoolObject consumes the dict (it pops OBJTYP/SUBTYP).
+            # copy so the caller's entry is never aliased (PoolObject.__init__
+            # also copies defensively; this is belt-and-suspenders).
             new_obj = self.add_object(objnam, dict(params))
             if new_obj is not None:
                 # Surface the new object's full attribute set through the normal
