@@ -54,6 +54,12 @@ KEEPALIVE_MAX_FAILURES = 3  # consecutive missed keepalives before the link is d
 CONNECTION_TIMEOUT = 10.0  # seconds to wait for initial connection
 MAX_BUFFER_SIZE = 1024 * 1024  # 1MB max buffer to prevent DoS
 DEFAULT_NOTIFICATION_QUEUE_SIZE = 100  # max queued notifications
+NOTIFICATION_DROP_LOG_INTERVAL = 100  # summarize queue-overflow drops every N drops
+
+# Request fields owned by the protocol layer; callers must not override them.
+# messageID correlates the response and command routes it - overriding either
+# via **kwargs guarantees a timeout or a misrouted request.
+_RESERVED_REQUEST_FIELDS = frozenset({"messageID", "command"})
 
 # Backwards compatibility alias
 DEFAULT_PORT = DEFAULT_TCP_PORT
@@ -124,6 +130,23 @@ class ICRequestMixin:
         self._message_id += 1
         return str(self._message_id)
 
+    def _build_request(self, command: str, fields: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        """Build a request payload, rejecting protocol-owned fields.
+
+        Raises:
+            ValueError: If ``fields`` contains a reserved key
+                (``messageID``/``command``); response correlation uses the
+                generated ID, so an overridden field would guarantee a
+                timeout or a misrouted request.
+        """
+        reserved = _RESERVED_REQUEST_FIELDS.intersection(fields)
+        if reserved:
+            raise ValueError(
+                f"Reserved request fields cannot be passed as kwargs: {', '.join(sorted(reserved))}"
+            )
+        msg_id = self._next_message_id()
+        return msg_id, {"messageID": msg_id, "command": command, **fields}
+
     def _handle_response(self, msg: dict[str, Any]) -> None:
         """Handle a response message by resolving the pending Future."""
         msg_id = msg.get("messageID")
@@ -155,11 +178,11 @@ class ICNotificationMixin:
 
     # These are defined in subclasses
     _notification_callback: NotificationCallback | None
-    _is_async_callback: bool
     _notification_queue_size: int
     _notification_queue: asyncio.Queue[dict[str, Any]] | None
     _consumer_task: asyncio.Task[None] | None
     _notification_observer_state: _NotificationObserverState
+    _notification_drops: int
 
     def _init_notification_mixin(
         self,
@@ -169,12 +192,10 @@ class ICNotificationMixin:
     ) -> None:
         """Initialize notification handling state."""
         self._notification_callback = notification_callback
-        self._is_async_callback = (
-            inspect.iscoroutinefunction(notification_callback) if notification_callback else False
-        )
         self._notification_queue_size = notification_queue_size
         self._notification_queue = None
         self._consumer_task = None
+        self._notification_drops = 0
         self._notification_observer_state = (
             notification_observer_state
             if notification_observer_state is not None
@@ -186,18 +207,25 @@ class ICNotificationMixin:
         if self._notification_queue is not None:
             return
 
+        self._notification_drops = 0
         self._notification_queue = asyncio.Queue(maxsize=self._notification_queue_size)
         self._consumer_task = asyncio.create_task(
             self._notification_consumer(),
             name="ic-notification-consumer",
         )
 
-    def _stop_notification_consumer(self) -> None:
-        """Stop the notification consumer task."""
-        if self._consumer_task and not self._consumer_task.done():
-            self._consumer_task.cancel()
-            self._consumer_task = None
+    def _stop_notification_consumer(self) -> asyncio.Task[None] | None:
+        """Stop the notification consumer task.
+
+        Returns the cancelled task (if any) so async close paths can await
+        its completion; sync callers may ignore the return value.
+        """
+        task, self._consumer_task = self._consumer_task, None
         self._notification_queue = None
+        if task is not None and not task.done():
+            task.cancel()
+            return task
+        return None
 
     def _dispatch_message(self, msg: dict[str, Any]) -> None:
         """Dispatch a parsed message to the appropriate handler."""
@@ -217,11 +245,12 @@ class ICNotificationMixin:
         """Handle a NotifyList notification by queuing for processing."""
         state = self._notification_observer_state
         sequence = state.sequence = state.sequence + 1
-        for observer in tuple(state.observers):
-            try:
-                observer(sequence, msg)
-            except Exception:
-                _LOGGER.exception("Error in notification observer")
+        if state.observers:
+            for observer in tuple(state.observers):
+                try:
+                    observer(sequence, msg)
+                except Exception:
+                    _LOGGER.exception("Error in notification observer")
 
         if not self._notification_callback or self._notification_queue is None:
             return
@@ -229,40 +258,61 @@ class ICNotificationMixin:
         try:
             self._notification_queue.put_nowait(msg)
         except asyncio.QueueFull:
-            _LOGGER.warning(
-                "Notification queue full (%d items), dropping oldest message",
-                self._notification_queue_size,
-            )
+            # Log the first drop, then a periodic summary: a warning per
+            # dropped message can flood the logs under sustained overflow.
+            self._notification_drops += 1
+            if (
+                self._notification_drops == 1
+                or self._notification_drops % NOTIFICATION_DROP_LOG_INTERVAL == 0
+            ):
+                _LOGGER.warning(
+                    "Notification queue full (%d items) - dropped %d message(s) so far, "
+                    "keeping newest",
+                    self._notification_queue_size,
+                    self._notification_drops,
+                )
             try:
                 self._notification_queue.get_nowait()
+                # Account for the discarded item so queue.join() cannot hang.
+                self._notification_queue.task_done()
                 self._notification_queue.put_nowait(msg)
             except asyncio.QueueEmpty:
                 _LOGGER.debug("Notification queue race - message dropped")
 
     async def _notification_consumer(self) -> None:
-        """Process notifications from queue."""
-        if self._notification_queue is None:
+        """Process notifications from the queue captured for this consumer.
+
+        The queue is captured in a local because teardown can null out (or a
+        fast restart can replace) ``self._notification_queue`` while an async
+        callback is suspended; the ``finally`` below must account for the
+        item on the queue it actually came from - and cancellation must
+        surface as a clean CancelledError, not an AttributeError.
+        """
+        queue = self._notification_queue
+        if queue is None:
             raise RuntimeError("Notification queue not initialized")
 
         while True:
             try:
-                msg = await self._notification_queue.get()
+                msg = await queue.get()
             except asyncio.CancelledError:
                 _LOGGER.debug("Notification consumer cancelled")
                 break
 
             try:
-                if self._notification_callback:
-                    if self._is_async_callback:
-                        result = self._notification_callback(msg)
-                        if result is not None:
-                            await result
-                    else:
-                        self._notification_callback(msg)
+                callback = self._notification_callback
+                if callback is not None:
+                    result = callback(msg)
+                    # isawaitable covers coroutine functions, async __call__
+                    # objects, and sync callables returning an awaitable;
+                    # for a plain sync callback returning None it is a
+                    # single cheap check.
+                    if inspect.isawaitable(result):
+                        await result
             except Exception:
                 _LOGGER.exception("Error in notification callback")
             finally:
-                self._notification_queue.task_done()
+                queue.task_done()
 
 
 class ICProtocol(ICRequestMixin, ICNotificationMixin, asyncio.Protocol):
@@ -306,6 +356,10 @@ class ICProtocol(ICRequestMixin, ICNotificationMixin, asyncio.Protocol):
         # Buffer for incomplete messages (bytearray for efficient appending)
         self._buffer = bytearray()
 
+        # How far the buffer has already been searched for a frame
+        # terminator (see data_received)
+        self._scan_pos = 0
+
         # Connection state
         self._connected = False
 
@@ -319,6 +373,7 @@ class ICProtocol(ICRequestMixin, ICNotificationMixin, asyncio.Protocol):
         self._transport = transport  # type: ignore[assignment]
         self._connected = True
         self._buffer = bytearray()
+        self._scan_pos = 0
         self._message_id = 0
         peername = transport.get_extra_info("peername")
         _LOGGER.debug("TCP connected to IntelliCenter at %s", peername)
@@ -344,26 +399,46 @@ class ICProtocol(ICRequestMixin, ICNotificationMixin, asyncio.Protocol):
 
     def data_received(self, data: bytes) -> None:
         """Called by event loop when data arrives."""
-        self._buffer.extend(data)
+        buffer = self._buffer
+        buffer.extend(data)
 
-        if len(self._buffer) > MAX_BUFFER_SIZE:
+        if len(buffer) > MAX_BUFFER_SIZE:
             _LOGGER.error("Buffer overflow - closing connection")
             if self._transport:
                 self._transport.close()
             return
 
-        while b"\r\n" in self._buffer:
-            idx = self._buffer.index(b"\r\n")
-            line = bytes(self._buffer[:idx])
-            del self._buffer[: idx + 2]
+        # Cursor-based framing: scan with a moving offset and compact the
+        # buffer once per call instead of re-scanning from offset 0 and
+        # memmoving per message. _scan_pos remembers how far an incomplete
+        # frame was already searched, backed off one byte so a \r\n split
+        # across two chunks is still found.
+        start = 0
+        search_from = self._scan_pos
+        try:
+            while (idx := buffer.find(b"\r\n", search_from)) != -1:
+                line = buffer[start:idx]  # bytearray slice: orjson accepts it directly
+                start = idx + 2
+                search_from = start
 
-            try:
-                msg: dict[str, Any] = orjson.loads(line)
-            except orjson.JSONDecodeError as err:
-                _LOGGER.error("Invalid JSON received: %s", err)
-                continue
+                try:
+                    decoded: Any = orjson.loads(line)
+                except orjson.JSONDecodeError as err:
+                    _LOGGER.error("Invalid JSON received: %s", err)
+                    continue
 
-            self._dispatch_message(msg)
+                if not isinstance(decoded, dict):
+                    # Valid JSON with a non-object root (number, string,
+                    # array, null): skip the frame; it must never escape
+                    # data_received or asyncio aborts the whole connection.
+                    _LOGGER.error("Ignoring non-object JSON frame: %.80s", line)
+                    continue
+
+                self._dispatch_message(decoded)
+        finally:
+            if start:
+                del buffer[:start]
+            self._scan_pos = max(len(buffer) - 1, 0)
 
     async def send_request(
         self,
@@ -378,12 +453,7 @@ class ICProtocol(ICRequestMixin, ICNotificationMixin, asyncio.Protocol):
         if not self.connected or not self._transport:
             raise ICConnectionError("Not connected")
 
-        msg_id = self._next_message_id()
-        request: dict[str, Any] = {
-            "messageID": msg_id,
-            "command": command,
-            **kwargs,
-        }
+        msg_id, request = self._build_request(command, kwargs)
 
         # Create Future for this request (uses running event loop automatically)
         self._response_future = asyncio.Future()
@@ -516,21 +586,28 @@ class ICWebSocketTransport(ICRequestMixin, ICNotificationMixin):
           *not* an ``OSError``/``ConnectionError``) or an OS-level error
         - the task is cancelled by a deliberate ``close()``/``aclose()``
 
-        The first two must run the disconnect path so the disconnect
-        callback fires and reconnection logic can take over.
+        Everything except cancellation - including any unexpected
+        decode/dispatch error - must run the disconnect path so the
+        disconnect callback fires and reconnection logic can take over.
         """
         exc: Exception | None = None
         try:
             async for message in self._ws:
-                data = message if isinstance(message, bytes) else message.encode()
-
                 try:
-                    msg: dict[str, Any] = orjson.loads(data)
+                    # orjson accepts str directly - no encode() copy needed
+                    decoded: Any = orjson.loads(message)
                 except orjson.JSONDecodeError as err:
                     _LOGGER.error("Invalid JSON received: %s", err)
                     continue
 
-                self._dispatch_message(msg)
+                if not isinstance(decoded, dict):
+                    # Valid JSON with a non-object root (number, string,
+                    # array, null): skip the frame instead of letting a
+                    # TypeError/AttributeError kill the reader.
+                    _LOGGER.error("Ignoring non-object JSON frame: %.80s", message)
+                    continue
+
+                self._dispatch_message(decoded)
 
             _LOGGER.debug("WebSocket closed by server")
 
@@ -540,6 +617,13 @@ class ICWebSocketTransport(ICRequestMixin, ICNotificationMixin):
             return
         except (WebSocketException, OSError, ConnectionError) as err:
             _LOGGER.debug("WebSocket reader error: %s", err)
+            exc = err
+        except Exception as err:
+            # Defense in depth: a decode/dispatch surprise must still run
+            # the disconnect path. A silently dead reader would leave a
+            # zombie connection that looks connected but never delivers
+            # notifications and blocks every request until timeout.
+            _LOGGER.exception("Unexpected error in WebSocket reader")
             exc = err
 
         self._handle_disconnect(exc)
@@ -577,12 +661,7 @@ class ICWebSocketTransport(ICRequestMixin, ICNotificationMixin):
         if not self.connected or not self._ws:
             raise ICConnectionError("Not connected")
 
-        msg_id = self._next_message_id()
-        request: dict[str, Any] = {
-            "messageID": msg_id,
-            "command": command,
-            **kwargs,
-        }
+        msg_id, request = self._build_request(command, kwargs)
 
         # Create Future for this request (uses running event loop automatically)
         self._response_future = asyncio.Future()
@@ -628,6 +707,11 @@ class ICWebSocketTransport(ICRequestMixin, ICNotificationMixin):
         """Close the connection."""
         self._connected = False
 
+        # A deliberate close must not leave an in-flight request hanging
+        # until its timeout: fail it before tearing down the reader (whose
+        # cancellation deliberately skips the disconnect path).
+        self._fail_pending_request(ICConnectionError("Connection closed"))
+
         if self._reader_task and not self._reader_task.done():
             self._reader_task.cancel()
             self._reader_task = None
@@ -649,14 +733,25 @@ class ICWebSocketTransport(ICRequestMixin, ICNotificationMixin):
     async def aclose(self) -> None:
         """Close the connection asynchronously (preferred for proper cleanup)."""
         self._connected = False
+        self._fail_pending_request(ICConnectionError("Connection closed"))
 
-        if self._reader_task and not self._reader_task.done():
-            self._reader_task.cancel()
+        reader_task, self._reader_task = self._reader_task, None
+        if reader_task and not reader_task.done():
+            reader_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await self._reader_task
-            self._reader_task = None
+                await reader_task
 
-        self._stop_notification_consumer()
+        consumer_task = self._stop_notification_consumer()
+        if consumer_task is not None:
+            with contextlib.suppress(asyncio.CancelledError):
+                await consumer_task
+
+        # A close() that ran earlier scheduled the handshake in the
+        # background; take ownership so the close frame is truly awaited.
+        close_task, self._close_task = self._close_task, None
+        if close_task is not None:
+            with contextlib.suppress(asyncio.CancelledError):
+                await close_task
 
         await self._async_close()
 
@@ -772,9 +867,6 @@ class ICConnection:
         self._notification_callback = callback
         if self._protocol:
             self._protocol._notification_callback = callback
-            self._protocol._is_async_callback = (
-                inspect.iscoroutinefunction(callback) if callback else False
-            )
             if callback and self._protocol.connected and self._protocol._notification_queue is None:
                 self._protocol._start_notification_consumer()
 
@@ -963,7 +1055,13 @@ class ICConnection:
             self._keepalive_task = None
 
         if protocol is not None:
-            protocol.close()
+            aclose = getattr(protocol, "aclose", None)
+            if inspect.iscoroutinefunction(aclose):
+                # WebSocket transport: await the full close handshake
+                # instead of firing it off in a background task.
+                await aclose()
+            else:
+                protocol.close()
 
         _LOGGER.debug("Disconnected from IC")
 
@@ -1014,9 +1112,12 @@ class ICConnection:
         Raises:
             ICConnectionError: If not connected or connection fails.
             ICResponseError: If IntelliCenter returns an error response.
-            TimeoutError: If no response received within timeout.
+            ICTimeoutError: If no response is received within the timeout.
+            ValueError: If kwargs contain protocol-owned fields
+                (``messageID``/``command``).
         """
-        if not self._protocol or not self._protocol.connected:
+        protocol = self._protocol
+        if protocol is None or not protocol.connected:
             raise ICConnectionError("Not connected")
 
         effective_timeout = (
@@ -1024,7 +1125,14 @@ class ICConnection:
         )
 
         async with self._request_lock:
-            return await self._protocol.send_request(
+            # Re-check under the lock: the connection may have been torn
+            # down (keepalive abort, disconnect) or replaced by a reconnect
+            # while this request waited its turn. Send only on the protocol
+            # generation captured at call time.
+            if self._protocol is not protocol or not protocol.connected:
+                raise ICConnectionError("Connection lost while request was queued")
+
+            return await protocol.send_request(
                 command,
                 request_timeout=effective_timeout,
                 _before_write_callback=_before_write_callback,
