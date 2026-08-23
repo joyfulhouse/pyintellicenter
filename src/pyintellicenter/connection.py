@@ -87,7 +87,9 @@ async def _await_shutdown_task(task: asyncio.Task[Any] | None) -> None:
         return
     exc = task.exception()
     if exc is not None:
-        _LOGGER.debug("Shutdown task %s raised: %r", task.get_name(), exc)
+        # A real (non-cancellation) failure in a cleanup task is a defect
+        # worth surfacing, not routine shutdown noise.
+        _LOGGER.warning("Shutdown task %s raised: %r", task.get_name(), exc)
 
 
 @dataclass(slots=True)
@@ -208,6 +210,9 @@ class ICNotificationMixin:
     # _stop_notification_consumer); real notifications are always dicts.
     _notification_queue: asyncio.Queue[dict[str, Any] | None] | None
     _consumer_task: asyncio.Task[None] | None
+    # Per-generation shutdown signal for the consumer: once set, the
+    # consumer drains its queue without dispatching callbacks.
+    _consumer_stop: asyncio.Event | None
     _notification_observer_state: _NotificationObserverState
     _notification_drops: int
 
@@ -222,6 +227,7 @@ class ICNotificationMixin:
         self._notification_queue_size = notification_queue_size
         self._notification_queue = None
         self._consumer_task = None
+        self._consumer_stop = None
         self._notification_drops = 0
         self._notification_observer_state = (
             notification_observer_state
@@ -235,9 +241,17 @@ class ICNotificationMixin:
             return
 
         self._notification_drops = 0
-        self._notification_queue = asyncio.Queue(maxsize=self._notification_queue_size)
+        queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(
+            maxsize=self._notification_queue_size
+        )
+        stop = asyncio.Event()
+        self._notification_queue = queue
+        self._consumer_stop = stop
+        # The queue and stop signal are passed explicitly so the consumer
+        # is bound to its own generation even if teardown or a fast
+        # restart replaces the instance attributes before it first runs.
         self._consumer_task = asyncio.create_task(
-            self._notification_consumer(),
+            self._notification_consumer(queue, stop),
             name="ic-notification-consumer",
         )
 
@@ -252,12 +266,18 @@ class ICNotificationMixin:
         the *current* task: cancelling it would deliver the CancelledError
         to the disconnect path, where it would be consumed and the
         consumer would resume waiting forever on its detached queue.
-        Instead a ``None`` sentinel is enqueued so the loop exits
-        deterministically once the callback returns; ``None`` is returned
-        because the current task must never await itself.
+        Instead the per-generation stop signal is set (so any entries
+        still queued are drained without dispatching - they are stale
+        once the connection is closing) and a ``None`` sentinel is
+        enqueued so the loop exits deterministically once the callback
+        returns; ``None`` is returned because the current task must never
+        await itself.
         """
         task, self._consumer_task = self._consumer_task, None
         queue, self._notification_queue = self._notification_queue, None
+        stop, self._consumer_stop = self._consumer_stop, None
+        if stop is not None:
+            stop.set()
         if task is None or task.done():
             return None
 
@@ -333,19 +353,20 @@ class ICNotificationMixin:
             except asyncio.QueueEmpty:
                 _LOGGER.debug("Notification queue race - message dropped")
 
-    async def _notification_consumer(self) -> None:
-        """Process notifications from the queue captured for this consumer.
+    async def _notification_consumer(
+        self,
+        queue: asyncio.Queue[dict[str, Any] | None],
+        stop: asyncio.Event,
+    ) -> None:
+        """Process notifications from this consumer generation's queue.
 
-        The queue is captured in a local because teardown can null out (or a
-        fast restart can replace) ``self._notification_queue`` while an async
-        callback is suspended; the ``finally`` below must account for the
-        item on the queue it actually came from - and cancellation must
-        surface as a clean CancelledError, not an AttributeError.
+        The queue and stop signal are received as arguments because
+        teardown can null out (or a fast restart can replace) the
+        instance attributes while an async callback is suspended; the
+        ``finally`` below must account for the item on the queue it
+        actually came from - and cancellation must surface as a clean
+        CancelledError, not an AttributeError.
         """
-        queue = self._notification_queue
-        if queue is None:
-            raise RuntimeError("Notification queue not initialized")
-
         while True:
             try:
                 msg = await queue.get()
@@ -353,14 +374,18 @@ class ICNotificationMixin:
                 _LOGGER.debug("Notification consumer cancelled")
                 break
 
-            if msg is None:
-                # Shutdown sentinel: the consumer stopped itself from
-                # inside a notification callback (see
-                # _stop_notification_consumer) and must exit its loop
-                # instead of waiting forever on the detached queue.
+            if msg is None or stop.is_set():
+                # A shutdown is in progress (see
+                # _stop_notification_consumer): drain entries without
+                # dispatching - anything still queued is stale once the
+                # connection is closing - and exit on the ``None``
+                # sentinel instead of waiting forever on the detached
+                # queue.
                 queue.task_done()
-                _LOGGER.debug("Notification consumer stopped")
-                break
+                if msg is None:
+                    _LOGGER.debug("Notification consumer stopped")
+                    break
+                continue
 
             try:
                 callback = self._notification_callback
@@ -790,10 +815,18 @@ class ICWebSocketTransport(ICRequestMixin, ICNotificationMixin):
 
         self._stop_notification_consumer()
 
-        if self._ws:
-            # Schedule close in background (can't await in sync method)
-            # Track the task to avoid orphaned coroutines
-            self._close_task = asyncio.create_task(self._async_close())
+        # Detach the handle synchronously so repeated close() calls cannot
+        # schedule a second task: exactly one tracked task owns the close
+        # handshake per handle, and a live _close_task is never replaced
+        # (a replacement would let aclose() return before the real close
+        # completed). Can't await in a sync method, so the handshake runs
+        # in the background; aclose() takes ownership of it.
+        ws, self._ws = self._ws, None
+        if ws is not None:
+            self._close_task = asyncio.create_task(
+                self._close_websocket(ws),
+                name="ic-websocket-close",
+            )
 
     async def _async_close(self) -> None:
         """Close WebSocket connection asynchronously."""

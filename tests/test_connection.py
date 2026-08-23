@@ -2010,3 +2010,95 @@ class TestWebSocketReaderErrorClosesSocket:
         # A later aclose() must not close the discarded socket again.
         await transport.aclose()
         assert ws.close_calls == 1
+
+
+class _HeldCloseWebSocket(_ScriptedWebSocket):
+    """WebSocket whose close handshake blocks until released."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.close_release = asyncio.Event()
+
+    async def close(self) -> None:
+        self.close_calls += 1
+        await self.close_release.wait()
+        self.close_awaited = True
+
+
+class TestStaleNotificationsAfterSelfDisconnect:
+    """Issue #75 follow-up: no callback may run after a self-disconnect.
+
+    Entries queued ahead of the shutdown sentinel are stale once the
+    callback closed the connection; the consumer must drain them (with
+    task_done accounting) without dispatching.
+    """
+
+    @pytest.mark.asyncio
+    async def test_no_callbacks_run_after_self_disconnect_with_full_queue(self):
+        ws = _ScriptedWebSocket()
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        calls = []
+
+        async def callback(msg):
+            calls.append(msg["objectList"][0]["objnam"])
+            entered.set()
+            await release.wait()
+            await transport.aclose()
+
+        transport = _start_ws_transport(
+            ws, notification_callback=callback, notification_queue_size=2
+        )
+        consumer_task = transport._consumer_task
+        assert consumer_task is not None
+
+        def notify(objnam):
+            transport._handle_notification(
+                {"command": "NotifyList", "objectList": [{"objnam": objnam}]}
+            )
+
+        notify("N1")
+        await asyncio.wait_for(entered.wait(), timeout=1.0)  # consumer holds N1
+        notify("N2")  # queued
+        notify("N3")  # queue now full
+
+        release.set()
+        await asyncio.wait_for(consumer_task, timeout=1.0)
+
+        # N2/N3 were queued before the self-disconnecting callback closed
+        # the connection - neither may be dispatched afterwards.
+        assert calls == ["N1"]
+        assert ws.close_calls == 1
+
+
+class TestRepeatedSyncClose:
+    """Issue #75 follow-up: repeated close() must not race the close task.
+
+    Each close() used to schedule a fresh _async_close() task while _ws
+    was still set, so the first task owned the real handshake and aclose()
+    awaited only the latest (instant) one - returning before the socket
+    actually closed.
+    """
+
+    @pytest.mark.asyncio
+    async def test_two_rapid_closes_single_task_and_aclose_awaits_real_close(self):
+        ws = _HeldCloseWebSocket()
+        transport = _start_ws_transport(ws)
+
+        transport.close()
+        first_close_task = transport._close_task
+        assert first_close_task is not None
+        transport.close()  # must not replace the tracked close task
+        assert transport._close_task is first_close_task
+
+        acloser = asyncio.create_task(transport.aclose())
+        await asyncio.sleep(0.01)
+        # The real handshake is still in flight - aclose() must not have
+        # returned, and only one close may have been started.
+        assert not acloser.done()
+        assert ws.close_calls == 1
+
+        ws.close_release.set()
+        await asyncio.wait_for(acloser, timeout=1.0)
+        assert ws.close_calls == 1
+        assert ws.close_awaited is True
