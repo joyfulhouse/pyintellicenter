@@ -13,6 +13,18 @@ pass (#68).
 
 ### Added
 
+- **Per-object subscription API** (#66):
+  `ICModelController.subscribe(objnam, callback)` registers any number of
+  per-object (or, with `objnam=None`, all-object) update listeners and
+  returns an unsubscribe callable (Home Assistant remover idiom).
+  Subscribers are dispatched from the same place as the legacy updated
+  callback (which is unchanged, and still claimed by
+  `ICConnectionHandler`), share its `(controller, changes)` signature and
+  `{objnam: None}` removal contract, and are individually exception-guarded
+  so one raising never affects other subscribers, the legacy callback, or
+  update processing. Unsubscribing during dispatch is safe.
+  `ICConnectionHandler.subscribe()` forwards to the managed controller so
+  consumers holding only the handler can subscribe directly.
 - **Ghost-equipment fix, end-to-end** (#56, #68): `PoolModel` gains
   `remove_object(objnam)` and `reconcile(obj_list)` (which prunes objects
   absent from an authoritative snapshot and returns the removed objnams), and

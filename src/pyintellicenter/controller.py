@@ -821,6 +821,13 @@ class ICModelController(
             Callable[[ICModelController, Mapping[str, dict[str, Any] | None]], None] | None
         ) = None
 
+        # Per-object subscriptions: key is an objnam (or None for all-object
+        # subscribers), value is the list of listeners for that key.
+        self._subscriptions: dict[
+            str | None,
+            list[Callable[[ICModelController, Mapping[str, dict[str, Any] | None]], None]],
+        ] = {}
+
         # Request coalescing state
         # When multiple convenience method calls happen while a request is in-flight,
         # they are merged into a single batch request. Latest value wins for same (objnam, attr).
@@ -858,6 +865,60 @@ class ICModelController(
         objnam. Attribute-change entries are always non-``None`` dicts.
         """
         self._updated_callback = callback
+
+    def subscribe(
+        self,
+        objnam: str | None,
+        callback: Callable[[ICModelController, Mapping[str, dict[str, Any] | None]], None],
+    ) -> Callable[[], None]:
+        """Subscribe to model updates for one object, or for all objects.
+
+        Unlike :meth:`set_updated_callback` (a single overwrite-slot, typically
+        claimed by :class:`ICConnectionHandler`), any number of subscribers can
+        be registered, each scoped to a single objnam or to every object.
+
+        Args:
+            objnam: Object name to listen for, or ``None`` to receive updates
+                for all objects.
+            callback: Called as ``callback(controller, changes)``. A per-objnam
+                subscriber receives only its object's entry, still as a mapping
+                (``{objnam: attrs}``); a ``None``-objnam subscriber receives the
+                full update mapping. As with the updated callback, an entry
+                value of ``None`` marks the object's *removal* from the model
+                (equipment deleted at the panel); attribute-change entries are
+                always non-``None`` dicts.
+
+        Returns:
+            A zero-argument callable that removes this subscription. Calling it
+            more than once is safe, as is calling it from within a callback
+            during dispatch.
+
+        Note:
+            Subscribers are invoked after the legacy updated callback, in
+            registration order (all-object subscribers first). A subscriber
+            raising is logged and never affects other subscribers, the legacy
+            callback, or update processing.
+        """
+        listeners = self._subscriptions.setdefault(objnam, [])
+        listeners.append(callback)
+        removed = False
+
+        def _unsubscribe() -> None:
+            nonlocal removed
+            if removed:
+                # Idempotent: a second call must not remove another
+                # subscription that registered the same callback object.
+                return
+            removed = True
+            current = self._subscriptions.get(objnam)
+            if current is None:
+                return
+            with contextlib.suppress(ValueError):
+                current.remove(callback)
+            if not current:
+                del self._subscriptions[objnam]
+
+        return _unsubscribe
 
     async def start(self) -> None:
         """Connect, fetch objects, and start monitoring.
@@ -1020,12 +1081,47 @@ class ICModelController(
         monitoring, startup or the reconnect machinery that dispatches
         updates. An entry with value ``None`` marks an object removed from
         the model (reconnect reconciliation); attribute changes are dicts.
+
+        Per-object subscribers (see :meth:`subscribe`) are dispatched from the
+        same place, after the legacy callback, so ordering and semantics are
+        identical for both mechanisms.
         """
-        if updates and self._updated_callback:
+        if not updates:
+            return
+        if self._updated_callback:
             try:
                 self._updated_callback(self, updates)
             except Exception:
                 _LOGGER.exception("Error in model updated callback")
+        self._dispatch_subscriptions(updates)
+
+    def _dispatch_subscriptions(self, updates: Mapping[str, dict[str, Any] | None]) -> None:
+        """Fan updates out to per-object and all-object subscribers.
+
+        Each invocation is exception-guarded so one subscriber raising cannot
+        affect other subscribers or the reader path. Listener lists are
+        snapshotted before iteration so a callback unsubscribing (itself or a
+        peer) during dispatch is safe.
+        """
+        if not self._subscriptions:
+            return
+
+        for callback in list(self._subscriptions.get(None, ())):
+            try:
+                callback(self, updates)
+            except Exception:
+                _LOGGER.exception("Error in model update subscriber (all objects)")
+
+        for objnam, changes in updates.items():
+            listeners = self._subscriptions.get(objnam)
+            if not listeners:
+                continue
+            entry: Mapping[str, dict[str, Any] | None] = {objnam: changes}
+            for callback in list(listeners):
+                try:
+                    callback(self, entry)
+                except Exception:
+                    _LOGGER.exception("Error in model update subscriber for %s", objnam)
 
     def _on_monitor_task_done(self, task: asyncio.Task[None]) -> None:
         """Discard a finished monitor task and surface any unexpected error.
@@ -1816,6 +1912,31 @@ class ICConnectionHandler:
             return
         if not self._is_connected:
             self._invoke_callback(self.on_disconnected, controller, exc)
+
+    def subscribe(
+        self,
+        objnam: str | None,
+        callback: Callable[[ICModelController, Mapping[str, dict[str, Any] | None]], None],
+    ) -> Callable[[], None]:
+        """Subscribe to model updates for one object (``None`` for all objects).
+
+        Forwards to :meth:`ICModelController.subscribe` on the managed
+        controller, so consumers holding only the handler (the common Home
+        Assistant setup, where the handler claims the single
+        ``set_updated_callback`` slot) can register any number of per-object
+        listeners. Returns a zero-argument callable that removes the
+        subscription.
+
+        Raises:
+            TypeError: If the managed controller is not an ICModelController.
+        """
+        controller = self._controller
+        if not isinstance(controller, ICModelController):
+            raise TypeError(
+                "subscribe() requires the handler to manage an ICModelController, "
+                f"got {type(controller).__name__}"
+            )
+        return controller.subscribe(objnam, callback)
 
     def _on_model_updated(
         self, controller: ICModelController, updates: Mapping[str, dict[str, Any] | None]

@@ -3922,3 +3922,214 @@ class TestCoalescedFlushResilience:
         assert all(isinstance(result, RuntimeError) for result in results)
         assert controller._pending_requests == []
         assert controller._pending_changes == {}
+
+
+class TestSubscriptions:
+    """Test the per-object subscription API (issue #66)."""
+
+    @pytest.fixture
+    def model(self):
+        """Create a PoolModel instance."""
+        return PoolModel()
+
+    @pytest.fixture
+    def controller(self, model):
+        """Create an ICModelController with two circuits in the model."""
+        controller = ICModelController("192.168.1.100", model, 6681)
+        model.add_object(
+            "C0001",
+            {"OBJTYP": "CIRCUIT", "SUBTYP": "LIGHT", "SNAME": "Pool Light", "STATUS": "OFF"},
+        )
+        model.add_object(
+            "C0002",
+            {"OBJTYP": "CIRCUIT", "SUBTYP": "GENERIC", "SNAME": "Cleaner", "STATUS": "OFF"},
+        )
+        return controller
+
+    def _notify(self, controller, objnam, attrs):
+        """Push a NotifyList for one object through the real dispatch path."""
+        controller._on_notification(
+            {"command": "NotifyList", "objectList": [{"objnam": objnam, "params": attrs}]}
+        )
+
+    def test_per_objnam_subscriber_receives_only_its_changes(self, controller):
+        """A per-objnam subscriber sees only its object's entry, as a mapping."""
+        received = []
+        controller.subscribe("C0001", lambda ctrl, changes: received.append(dict(changes)))
+
+        self._notify(controller, "C0002", {"STATUS": "ON"})
+        assert received == []
+
+        self._notify(controller, "C0001", {"STATUS": "ON"})
+        assert received == [{"C0001": {"STATUS": "ON"}}]
+
+    def test_per_objnam_subscriber_gets_controller_argument(self, controller):
+        """The first callback argument is the controller (matches legacy signature)."""
+        seen = []
+        controller.subscribe("C0001", lambda ctrl, changes: seen.append(ctrl))
+        self._notify(controller, "C0001", {"STATUS": "ON"})
+        assert seen == [controller]
+
+    def test_per_objnam_subscriber_receives_removal_none(self, controller):
+        """Removal is delivered as {objnam: None} per the PR #81 contract."""
+        received = []
+        controller.subscribe("C0001", lambda ctrl, changes: received.append(dict(changes)))
+
+        controller._notify_updated({"C0001": None})
+        assert received == [{"C0001": None}]
+
+    def test_none_objnam_subscriber_receives_all_updates(self, controller):
+        """An all-object subscriber receives the full update mapping."""
+        received = []
+        controller.subscribe(None, lambda ctrl, changes: received.append(dict(changes)))
+
+        self._notify(controller, "C0001", {"STATUS": "ON"})
+        self._notify(controller, "C0002", {"STATUS": "ON"})
+
+        assert received == [{"C0001": {"STATUS": "ON"}}, {"C0002": {"STATUS": "ON"}}]
+
+    def test_multiple_subscribers_same_objnam(self, controller):
+        """Multiple subscribers for the same objnam all fire, in order."""
+        order = []
+        controller.subscribe("C0001", lambda ctrl, changes: order.append("first"))
+        controller.subscribe("C0001", lambda ctrl, changes: order.append("second"))
+
+        self._notify(controller, "C0001", {"STATUS": "ON"})
+        assert order == ["first", "second"]
+
+    def test_unsubscribe_stops_delivery(self, controller):
+        """Calling the remover stops delivery; calling it again is a no-op."""
+        received = []
+        unsubscribe = controller.subscribe(
+            "C0001", lambda ctrl, changes: received.append(dict(changes))
+        )
+
+        self._notify(controller, "C0001", {"STATUS": "ON"})
+        assert len(received) == 1
+
+        unsubscribe()
+        self._notify(controller, "C0001", {"STATUS": "OFF"})
+        assert len(received) == 1
+
+        # Idempotent, and empty listener lists are pruned.
+        unsubscribe()
+        assert controller._subscriptions == {}
+
+    def test_unsubscribe_idempotent_with_duplicate_callback(self, controller):
+        """A remover called twice must not remove a peer's identical callback."""
+        received = []
+
+        def cb(ctrl, changes):
+            received.append(dict(changes))
+
+        remove_first = controller.subscribe("C0001", cb)
+        controller.subscribe("C0001", cb)
+
+        remove_first()
+        remove_first()  # must not remove the second registration
+
+        self._notify(controller, "C0001", {"STATUS": "ON"})
+        assert len(received) == 1
+
+    def test_unsubscribe_during_dispatch_is_safe(self, controller):
+        """A subscriber removing itself (or a peer) mid-dispatch does not break dispatch."""
+        received = []
+        removers = {}
+
+        def self_removing(ctrl, changes):
+            received.append("self_removing")
+            removers["self"]()
+
+        def peer(ctrl, changes):
+            received.append("peer")
+
+        removers["self"] = controller.subscribe("C0001", self_removing)
+        controller.subscribe("C0001", peer)
+
+        self._notify(controller, "C0001", {"STATUS": "ON"})
+        assert received == ["self_removing", "peer"]
+
+        # The self-removed subscriber gets no further updates.
+        self._notify(controller, "C0001", {"STATUS": "OFF"})
+        assert received == ["self_removing", "peer", "peer"]
+
+    def test_subscriber_exception_does_not_affect_others_or_legacy(self, controller, caplog):
+        """One subscriber raising never breaks peers, the legacy callback, or dispatch."""
+        legacy = []
+        controller.set_updated_callback(lambda ctrl, updates: legacy.append(dict(updates)))
+
+        survivors = []
+
+        def exploding(ctrl, changes):
+            raise RuntimeError("boom")
+
+        controller.subscribe(None, exploding)
+        controller.subscribe("C0001", exploding)
+        controller.subscribe("C0001", lambda ctrl, changes: survivors.append(dict(changes)))
+
+        with caplog.at_level(logging.ERROR):
+            self._notify(controller, "C0001", {"STATUS": "ON"})
+
+        assert legacy == [{"C0001": {"STATUS": "ON"}}]
+        assert survivors == [{"C0001": {"STATUS": "ON"}}]
+        assert "Error in model update subscriber" in caplog.text
+
+    def test_legacy_callback_exception_does_not_affect_subscribers(self, controller, caplog):
+        """The legacy callback raising never blocks subscription dispatch."""
+
+        def exploding(ctrl, updates):
+            raise RuntimeError("legacy boom")
+
+        controller.set_updated_callback(exploding)
+        received = []
+        controller.subscribe("C0001", lambda ctrl, changes: received.append(dict(changes)))
+
+        with caplog.at_level(logging.ERROR):
+            self._notify(controller, "C0001", {"STATUS": "ON"})
+
+        assert received == [{"C0001": {"STATUS": "ON"}}]
+
+    def test_legacy_callback_fires_before_subscribers(self, controller):
+        """Ordering: legacy updated callback first, then subscribers."""
+        order = []
+        controller.set_updated_callback(lambda ctrl, updates: order.append("legacy"))
+        controller.subscribe(None, lambda ctrl, changes: order.append("all"))
+        controller.subscribe("C0001", lambda ctrl, changes: order.append("per-object"))
+
+        self._notify(controller, "C0001", {"STATUS": "ON"})
+        assert order == ["legacy", "all", "per-object"]
+
+    def test_empty_updates_do_not_dispatch(self, controller):
+        """Empty update mappings are not dispatched to anyone."""
+        received = []
+        controller.subscribe(None, lambda ctrl, changes: received.append(dict(changes)))
+        controller._notify_updated({})
+        assert received == []
+
+    def test_handler_subscribe_forwards_to_controller(self, controller):
+        """ICConnectionHandler.subscribe forwards to the managed controller."""
+        handler = ICConnectionHandler(controller)
+        legacy = []
+        handler.on_updated = lambda ctrl, updates: legacy.append(dict(updates))
+
+        received = []
+        unsubscribe = handler.subscribe(
+            "C0001", lambda ctrl, changes: received.append(dict(changes))
+        )
+
+        self._notify(controller, "C0001", {"STATUS": "ON"})
+        # Handler's claimed slot (on_updated) still works unchanged...
+        assert legacy == [{"C0001": {"STATUS": "ON"}}]
+        # ...and the forwarded subscription delivers per-object entries.
+        assert received == [{"C0001": {"STATUS": "ON"}}]
+
+        unsubscribe()
+        self._notify(controller, "C0001", {"STATUS": "OFF"})
+        assert len(received) == 1
+
+    def test_handler_subscribe_requires_model_controller(self):
+        """Handler subscribe raises TypeError for a non-model controller."""
+        base = ICBaseController("192.168.1.100", 6681)
+        handler = ICConnectionHandler(base)
+        with pytest.raises(TypeError, match="ICModelController"):
+            handler.subscribe("C0001", lambda ctrl, changes: None)
