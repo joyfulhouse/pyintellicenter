@@ -47,7 +47,13 @@ conn.set_disconnect_callback(lambda exc: print(f"Disconnected: {exc}"))
 Controller that maintains equipment state in a PoolModel.
 
 ```python
-from pyintellicenter import ICError, ICLightGroupError, ICModelController, PoolModel
+from pyintellicenter import (
+    HeaterType,
+    ICError,
+    ICLightGroupError,
+    ICModelController,
+    PoolModel,
+)
 
 model = PoolModel()
 controller = ICModelController(
@@ -232,29 +238,46 @@ even when the controller never returned an acknowledgement.
 
 Wraps a controller with automatic reconnection and lifecycle callbacks.
 
-```python
-from pyintellicenter import ICConnectionHandler, ICConnectionHandlerCallbacks
+Lifecycle events are handled by overriding (or assigning to) the handler's
+callback methods. `ICConnectionHandlerCallbacks` is a `typing.Protocol` that
+describes these callbacks for static type checking — it is not instantiated
+or passed to the handler.
 
-callbacks = ICConnectionHandlerCallbacks(
-    on_started=lambda: print("Connected!"),
-    on_stopped=lambda: print("Stopped"),
-    on_disconnected=lambda: print("Disconnected"),
-    on_reconnected=lambda: print("Reconnected!"),
-    on_retrying=lambda attempt, delay: print(f"Retry {attempt} in {delay}s"),
-)
+```python
+from pyintellicenter import ICConnectionHandler
 
 handler = ICConnectionHandler(
     controller,
-    callbacks=callbacks,
-    time_between_reconnects=30.0,  # Initial reconnect delay
-    disconnect_debounce_time=15.0,  # Grace period before disconnect callback
+    time_between_reconnects=30,  # Initial reconnect delay (seconds)
+    disconnect_debounce_time=15,  # Grace period before disconnect callback (seconds)
 )
+
+# Assign (or override in a subclass) the lifecycle callbacks
+handler.on_started = lambda ctrl: print("Connected!")
+handler.on_reconnected = lambda ctrl: print("Reconnected!")
+handler.on_disconnected = lambda ctrl, exc: print(f"Disconnected: {exc}")
+handler.on_retrying = lambda delay: print(f"Retrying in {delay}s")
+handler.on_updated = lambda ctrl, updates: print(f"Updated: {updates}")
 
 await handler.start()
 print(handler.controller.system_info.prop_name)
-print(f"Connected: {handler.connected}")
+print(f"Connected: {handler.controller.connected}")
 handler.stop()
 ```
+
+Callback signatures:
+
+- `on_started(controller)` — called on the initial successful connection
+- `on_reconnected(controller)` — called when reconnected after a disconnect
+- `on_disconnected(controller, exc)` — called when disconnected (after the
+  debounce period); `exc` is the causing exception or `None`
+- `on_retrying(delay)` — called before each retry attempt with the delay in
+  seconds
+- `on_updated(controller, updates)` — called when the model is updated (only
+  when wrapping an `ICModelController`)
+
+`handler.controller.connected` reports whether the underlying controller
+currently has an active connection.
 
 ## PoolModel
 
@@ -288,18 +311,21 @@ obj.objnam  # Object name: "PUMP1"
 obj.sname  # Friendly name: "Pool Pump"
 obj.objtype  # Type: "PUMP"
 obj.subtype  # Subtype: "VSF"
-obj.status  # Status: "ON" or "OFF"
-obj.parent  # Parent object name
+obj.status  # Status: "ON" or "OFF" ("10"/"4" for pumps)
 
 obj.is_a_light  # Is this a light?
 obj.is_a_light_show  # Is this a light show circuit?
 obj.is_featured  # Is this marked as featured?
 obj.supports_color_effects  # Supports IntelliBrite effects?
-obj.is_on  # Is status ON?
+
+obj.on_status  # The "on" status value for this type ("ON", or "10" for pumps)
+obj.off_status  # The "off" status value for this type ("OFF", or "4" for pumps)
+is_on = obj.status == obj.on_status  # Check whether the object is on
 
 rpm = obj["RPM"]
 power = obj["PWR"]
 temp = obj["TEMP"]
+parent = obj["PARENT"]  # Parent object name (objnam), if any
 
 for key in obj.attribute_keys:
     print(f"{key}: {obj[key]}")
@@ -317,16 +343,16 @@ from pyintellicenter import (
     ICUnit,
 )
 
-units = await discover_intellicenter_units(timeout=5.0)
+units = await discover_intellicenter_units(discovery_timeout=5.0)
 
 # With existing Zeroconf instance (for Home Assistant)
 from zeroconf import Zeroconf
 
 zc = Zeroconf()
-units = await discover_intellicenter_units(timeout=5.0, zeroconf=zc)
+units = await discover_intellicenter_units(discovery_timeout=5.0, zeroconf=zc)
 
-unit = await find_unit_by_name("My Pool", timeout=5.0)
-unit = await find_unit_by_host("192.168.1.100", timeout=5.0)
+unit = await find_unit_by_name("My Pool", discovery_timeout=5.0)
+unit = await find_unit_by_host("192.168.1.100", discovery_timeout=5.0)
 
 unit.name  # Friendly name
 unit.host  # IP address
