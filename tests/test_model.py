@@ -1,5 +1,6 @@
 """Tests for PoolModel and PoolObject classes."""
 
+import logging
 from collections.abc import KeysView, Mapping
 from typing import Any
 
@@ -775,3 +776,133 @@ class TestModelHardening:
         assert model.num_objects == 1
         assert model["VALID1"] is not None
         assert model["BADPARAMS"] is None
+
+
+class TestDeepIngestAndSnapshotObservability:
+    """Regression tests for issue #77: shallow ingest copies, silent partial snapshots."""
+
+    def test_nested_list_mutation_after_add_object_does_not_affect_model(self):
+        """Mutating a nested list in the caller's params after add is isolated.
+
+        dict(params) only copied the top level, so nested list values stayed
+        aliased: appending to the caller's list rewrote model state and
+        bypassed change tracking.
+        """
+        model = PoolModel()
+        params: dict[str, Any] = {
+            OBJTYP_ATTR: CIRCUIT_TYPE,
+            SUBTYP_ATTR: "LITSHO",
+            SNAME_ATTR: "Party Show",
+            "USE": ["C1", "C2"],
+        }
+        obj = model.add_object("SHOW1", params)
+        assert obj is not None
+
+        params["USE"].append("HACKED")
+        params["USE"][0] = "MUTATED"
+
+        assert obj["USE"] == ["C1", "C2"]
+
+    def test_nested_dict_mutation_after_add_object_does_not_affect_model(self):
+        """Mutating a nested dict in the caller's params after add is isolated."""
+        model = PoolModel()
+        params: dict[str, Any] = {
+            OBJTYP_ATTR: CIRCUIT_TYPE,
+            SNAME_ATTR: "Circuit",
+            "META": {"limits": {"min": "0", "max": "100"}},
+        }
+        obj = model.add_object("CIRC9", params)
+        assert obj is not None
+
+        params["META"]["limits"]["max"] = "9999"
+        params["META"]["extra"] = "HACKED"
+
+        assert obj["META"] == {"limits": {"min": "0", "max": "100"}}
+
+    def test_nested_mutation_after_add_objects_does_not_affect_model(self):
+        """The batch ingest path (add_objects) is nested-mutation isolated too."""
+        model = PoolModel()
+        entries: list[Any] = [
+            {
+                "objnam": "SHOW1",
+                "params": {
+                    OBJTYP_ATTR: CIRCUIT_TYPE,
+                    SUBTYP_ATTR: "LITSHO",
+                    "USE": ["C1", "C2"],
+                },
+            },
+        ]
+        model.add_objects(entries)
+
+        entries[0]["params"]["USE"].append("HACKED")
+
+        show = model["SHOW1"]
+        assert show is not None
+        assert show["USE"] == ["C1", "C2"]
+
+    def test_add_objects_returns_added_objnams(self, pool_model_data: list[dict[str, Any]]):
+        """add_objects returns the objnams it ingested (snapshot observability)."""
+        model = PoolModel()
+
+        added = model.add_objects(pool_model_data)
+
+        assert added == [entry["objnam"] for entry in pool_model_data]
+        assert model.num_objects == len(added)
+
+        # A replay updates in place and still reports the ingested objnams.
+        assert model.add_objects(pool_model_data) == added
+
+    def test_add_objects_returns_only_ingested_objnams(self):
+        """Skipped/rejected entries are absent from the returned objnams."""
+        model = PoolModel(attribute_map={CIRCUIT_TYPE: {STATUS_ATTR}})
+        objects: list[Any] = [
+            {"objnam": "VALID1", "params": {OBJTYP_ATTR: CIRCUIT_TYPE}},
+            {"params": {OBJTYP_ATTR: CIRCUIT_TYPE}},  # malformed: missing objnam
+            {"objnam": "_FDR", "params": {}},  # rejected: missing OBJTYP
+            {"objnam": "PUMP1", "params": {OBJTYP_ATTR: PUMP_TYPE}},  # untracked type
+            {"objnam": "VALID2", "params": {OBJTYP_ATTR: CIRCUIT_TYPE}},
+        ]
+
+        added = model.add_objects(objects)
+
+        assert added == ["VALID1", "VALID2"]
+        assert model.num_objects == 2
+
+    def test_add_objects_warns_with_counts_when_entries_skipped(
+        self, caplog: pytest.LogCaptureFixture
+    ):
+        """Malformed snapshot entries produce a WARNING with per-call counts."""
+        model = PoolModel()
+        objects: list[Any] = [
+            {"params": {OBJTYP_ATTR: CIRCUIT_TYPE}},  # missing objnam
+            {"objnam": "BADPARAMS", "params": "garbage"},  # params not a dict
+            {"objnam": "VALID1", "params": {OBJTYP_ATTR: CIRCUIT_TYPE}},
+        ]
+
+        with caplog.at_level(logging.WARNING, logger="pyintellicenter.model"):
+            added = model.add_objects(objects)
+
+        assert added == ["VALID1"]
+        warnings = [rec for rec in caplog.records if rec.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        message = warnings[0].getMessage()
+        assert "2" in message  # skipped count
+        assert "3" in message  # total entries in the call
+        assert "1" in message  # ingested count
+
+    def test_add_objects_no_warning_when_all_entries_well_formed(
+        self, caplog: pytest.LogCaptureFixture, pool_model_data: list[dict[str, Any]]
+    ):
+        """A clean snapshot (including OBJTYP-less firmware entries) stays quiet.
+
+        Entries like _FDR (valid shape, empty params) are normal firmware
+        behavior filtered by add_object at DEBUG; they must not raise the
+        malformed-snapshot WARNING on every startup.
+        """
+        model = PoolModel()
+        objects: list[Any] = [*pool_model_data, {"objnam": "_FDR", "params": {}}]
+
+        with caplog.at_level(logging.WARNING, logger="pyintellicenter.model"):
+            model.add_objects(objects)
+
+        assert [rec for rec in caplog.records if rec.levelno >= logging.WARNING] == []
