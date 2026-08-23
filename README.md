@@ -64,11 +64,15 @@ async def main():
         print(f"{obj.sname} ({obj.objtype}): {obj.status}")
 
     await controller.set_circuit_state("POOL", True)
-    handler.stop()
+    await handler.astop()
 
 
 asyncio.run(main())
 ```
+
+`await handler.astop()` waits for the connection teardown to complete. The
+synchronous `handler.stop()` is the best-effort form: it schedules the teardown
+in the background and is safe to call from callbacks.
 
 ### WebSocket Connection
 
@@ -118,6 +122,19 @@ the main concepts.
 2. Exponential Backoff: starts at 30 s, increases 1.5x each attempt (max 10 min)
 3. Circuit Breaker: after 5 consecutive failures, pauses for 5 minutes
 4. Reset: successful connection resets failure counters
+5. Reconcile: every (re)connect prunes equipment deleted at the panel from the
+   model and reports the removals through the update callback as
+   `{objnam: None}` entries
+
+**Handler Lifecycle:**
+
+- `await handler.start()` — connect and wait for the first successful attempt;
+  reconnection then continues in the background
+- `handler.connected` — `True` while the handler considers the connection
+  established (debounced view)
+- `handler.stop()` — synchronous best-effort stop (teardown runs in the
+  background; safe from callbacks)
+- `await handler.astop()` — stop and wait for the full connection teardown
 
 **Notification Processing:**
 

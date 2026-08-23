@@ -197,12 +197,43 @@ days = controller.get_schedule_days("SCH01")  # e.g. "MTWRFAU"
 # Update callback
 def on_update(controller, changes):
     for objnam, attrs in changes.items():
-        print(f"{objnam} changed: {attrs}")
+        if attrs is None:
+            # Removal: the object disappeared from the panel and was pruned
+            # from the model during (re)connect reconciliation.
+            print(f"{objnam} was removed")
+        else:
+            print(f"{objnam} changed: {attrs}")
 
 
 controller.set_updated_callback(on_update)
 await controller.stop()
 ```
+
+### Snapshot reconciliation and removals
+
+On every `start()` — the initial connect and each automatic reconnect — the
+controller fetches an authoritative snapshot of all objects and reconciles the
+model against it (`PoolModel.reconcile()`). Any object in the model that is
+absent from the snapshot (equipment deleted at the panel) is:
+
+- removed from the model (and from the attribute-subscription queries built
+  during startup, so it is never re-subscribed),
+- logged at INFO, and
+- reported to the updated callback as an entry with value `None`
+  (`{objnam: None}`), so consumers such as Home Assistant can remove the
+  corresponding entities.
+
+Attribute-change entries passed to the callback are always non-`None` dicts;
+`None` is reserved for removals. The callback payload is typed
+`Mapping[str, dict[str, Any] | None]`.
+
+Partial snapshots are surfaced by the model layer: `PoolModel.add_objects()`
+returns the ingested objnams and logs one WARNING when a snapshot contains
+malformed entries, while expected skips (a missing or untracked `OBJTYP`,
+such as the firmware 3.008+ `_FDR` artifacts) are logged at DEBUG only. The
+controller reports the ingested/snapshot counts in its INFO startup line
+(`Model contains N objects (I of S snapshot entries ingested)`) instead of
+emitting a separate warning.
 
 For compatibility, a legacy standalone `CIRCGRP` object with a direct
 space-separated `CIRCUIT` list can still be passed to
@@ -261,9 +292,29 @@ handler.on_updated = lambda ctrl, updates: print(f"Updated: {updates}")
 
 await handler.start()
 print(handler.controller.system_info.prop_name)
-print(f"Connected: {handler.controller.connected}")
-handler.stop()
+print(f"Connected: {handler.connected}")
+await handler.astop()
 ```
+
+Methods and properties:
+
+- `await handler.start()` — connects and waits for the first successful
+  attempt (raising if it fails); reconnection then continues automatically in
+  the background. The handler can be started again after `stop()`/`astop()`.
+- `handler.stop()` — synchronous best-effort stop: cancels reconnection and
+  schedules the controller teardown in a tracked background task. Returns
+  `None` (it is not awaitable) and is safe to call from callbacks.
+- `await handler.astop()` — stops the handler and waits for the full
+  controller teardown to complete. Use this where shutdown must be finished
+  before proceeding (e.g. Home Assistant's `async_unload_entry`). The
+  teardown is shielded from caller cancellation: cancelling an `astop()`
+  caller raises `CancelledError` to that caller while the teardown keeps
+  running in the background, and a later `start()`/`astop()` waits for its
+  actual completion.
+- `handler.connected` — `True` while the handler considers the connection
+  established (the debounced handler-level view): it turns `True` after a
+  successful connect or reconnect and `False` on disconnect or
+  `stop()`/`astop()`.
 
 Callback signatures:
 
@@ -274,10 +325,13 @@ Callback signatures:
 - `on_retrying(delay)` — called before each retry attempt with the delay in
   seconds
 - `on_updated(controller, updates)` — called when the model is updated (only
-  when wrapping an `ICModelController`)
+  when wrapping an `ICModelController`); an entry with value `None` marks an
+  object removed from the model during reconnect reconciliation (see the
+  `ICModelController` section above)
 
 `handler.controller.connected` reports whether the underlying controller
-currently has an active connection.
+currently has a live connection (the transport-level view, without the
+handler's debounce).
 
 ## PoolModel
 
@@ -298,6 +352,12 @@ pumps = model.get_by_type("PUMP")
 
 children = model.get_children(panel)
 print(f"Total objects: {model.num_objects}")
+
+# Removal APIs (ICModelController.start() wires reconcile() automatically)
+removed_obj = model.remove_object("PUMP1")  # The removed PoolObject, or None
+removed_objnams = model.reconcile(snapshot)  # Prune objects absent from an
+#                                              authoritative object-list snapshot;
+#                                              returns the removed objnams
 ```
 
 ## PoolObject
