@@ -136,7 +136,7 @@ controller.set_updated_callback(on_update)
 ```python
 from pyintellicenter import discover_intellicenter_units
 
-units = await discover_intellicenter_units(timeout=5.0)
+units = await discover_intellicenter_units(discovery_timeout=5.0)
 for unit in units:
     print(f"{unit.name} at {unit.host}:{unit.port}")
 ```
@@ -163,26 +163,28 @@ except ICTimeoutError as e:
 
 ## Advanced
 
-### Custom reconnection parameters
+### Custom reconnection parameters and lifecycle callbacks
+
+Lifecycle events are handled by assigning to (or overriding) the handler's
+callback methods. `ICConnectionHandlerCallbacks` is a `typing.Protocol` used
+for static typing only — it is not instantiated or passed to the handler.
 
 ```python
-from pyintellicenter import ICConnectionHandler, ICConnectionHandlerCallbacks
-
-callbacks = ICConnectionHandlerCallbacks(
-    on_started=lambda: print("Connected!"),
-    on_stopped=lambda: print("Stopped"),
-    on_disconnected=lambda: print("Disconnected"),
-    on_reconnected=lambda: print("Reconnected!"),
-    on_retrying=lambda attempt, delay: print(f"Retry {attempt} in {delay}s"),
-)
+from pyintellicenter import ICConnectionHandler
 
 handler = ICConnectionHandler(
     controller,
-    callbacks=callbacks,
-    time_between_reconnects=30.0,  # Initial reconnect delay
-    disconnect_debounce_time=15.0,  # Grace period before disconnect callback
+    time_between_reconnects=30,  # Initial reconnect delay (seconds)
+    disconnect_debounce_time=15,  # Grace period before disconnect callback (seconds)
 )
+
+handler.on_started = lambda ctrl: print("Connected!")
+handler.on_reconnected = lambda ctrl: print("Reconnected!")
+handler.on_disconnected = lambda ctrl, exc: print(f"Disconnected: {exc}")
+handler.on_retrying = lambda delay: print(f"Retrying in {delay}s")
 ```
+
+See [API.md](API.md#icconnectionhandler) for the full callback signatures.
 
 ### Using a shared Zeroconf instance (Home Assistant)
 
@@ -191,7 +193,7 @@ from zeroconf import Zeroconf
 from pyintellicenter import discover_intellicenter_units
 
 zc = Zeroconf()
-units = await discover_intellicenter_units(timeout=5.0, zeroconf=zc)
+units = await discover_intellicenter_units(discovery_timeout=5.0, zeroconf=zc)
 ```
 
 ### Low-level raw request
