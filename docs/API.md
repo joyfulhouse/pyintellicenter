@@ -49,12 +49,14 @@ The panel emits NotifyList bursts (e.g. a scene change produces several
 back-to-back frames). With `notification_batching=True` (the default), any
 messages already queued behind the one just received are drained — at most
 25 per callback invocation, so a lone message is still delivered immediately —
-and merged into a single synthetic NotifyList whose `objectList` is the
-order-preserving concatenation of the burst's entries. Because
-`PoolObject.update` is last-write-wins per attribute, the merged frame yields
-exactly the same final model state as per-message delivery, with one callback
-invocation per burst instead of one per message. Set
-`notification_batching=False` to restore strict per-message delivery.
+and merged into a single synthetic NotifyList. Its `objectList` is coalesced
+per `objnam`: an object updated by several frames of the burst contributes one
+entry whose params are folded in arrival order (newest value wins per
+attribute), so the merged frame yields exactly the same final model state as
+per-message delivery — and the changed-attributes callback payload carries
+every attribute the burst touched — with one callback invocation per burst
+instead of one per message. Set `notification_batching=False` to restore
+strict per-message delivery.
 
 On notification-queue overflow, the oldest queued frame is no longer dropped
 wholesale: its `objectList` entries are coalesced by `objnam` into the

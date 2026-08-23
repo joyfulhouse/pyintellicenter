@@ -18,8 +18,10 @@ pass (#68).
   (default `True`). The notification consumer now drains messages already
   queued behind the one it just received (bounded at 25 per invocation) and
   delivers the burst as one merged synthetic NotifyList — `objectList`
-  entries are concatenated in arrival order, so last-write-wins model
-  updates reach the same final state with one callback per burst instead of
+  entries are coalesced per `objnam` with params folded in arrival order
+  (newest value wins per attribute), so the model reaches the same final
+  state and the changed-attributes callback payload keeps every attribute
+  the burst touched, with one callback per burst instead of
   one per message; a lone message is still dispatched immediately and
   as-is. Set `notification_batching=False` for strict per-message delivery.
   On queue overflow, the oldest frame's `objectList` is now coalesced by
