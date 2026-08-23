@@ -520,7 +520,6 @@ class LightGroupSyncTracker:
         self._baseline_values: dict[str, dict[str, str | None]] | None = None
         self.prebaseline: list[tuple[int, dict[str, Any]]] = []
         self.dynamic_types = dict(topology.inventory)
-        self.pre_send_sequence: int | None = None
         self.watermark: int | None = None
         self.write_started_at: float | None = None
         self.action_deadline: float | None = None
@@ -714,9 +713,8 @@ class LightGroupSyncTracker:
             self.terminal_time = asyncio.get_running_loop().time()
             self.terminal_event.set()
 
-    def mark_before_write(self, sequence: int, started_at: float) -> None:
+    def mark_before_write(self, _sequence: int, started_at: float) -> None:
         self.raise_if_failed()
-        self.pre_send_sequence = sequence
         self.write_started_at = started_at
         self.action_deadline = started_at + SYNC_ACTION_DEADLINE_SECONDS
         self.write_started.set()
@@ -731,8 +729,12 @@ async def _cancel_and_await(task: asyncio.Task[Any] | None) -> None:
         return
     if not task.done():
         task.cancel()
-    with contextlib.suppress(BaseException):
-        await task
+    # A cancellation delivered to the current task at this await must propagate
+    # to the caller; the child's own outcome (result, error, or cancellation)
+    # is drained and discarded without raising.
+    await asyncio.wait({task})
+    if not task.cancelled():
+        task.exception()
 
 
 async def _wait_deadline(deadline: float) -> None:
@@ -796,9 +798,14 @@ async def run_light_group_sync(
         for task in tasks:
             if not task.done():
                 task.cancel()
+        if tasks:
+            # A cancellation delivered to the current task at this await must
+            # propagate to the caller; each child's own outcome is drained and
+            # discarded without raising.
+            await asyncio.wait(tasks)
         for task in tasks:
-            with contextlib.suppress(BaseException):
-                await task
+            if not task.cancelled():
+                task.exception()
 
     try:
         async with contextlib.AsyncExitStack() as stack:
@@ -902,6 +909,36 @@ async def run_light_group_sync(
                 )
             )
             owned_tasks.add(action_task)
+
+            async def process_action_result() -> dict[str, Any]:
+                """Record ack metadata for a completed action before classifying."""
+                try:
+                    result = await action_task
+                except ICCommandError as error:
+                    tracker.response_received = True
+                    if connection_closed.done():
+                        raise _closed_error() from error
+                    tracker.raise_if_failed()
+                    raise
+                except BaseException as error:
+                    if connection_closed.done():
+                        raise _closed_error() from error
+                    tracker.raise_if_failed()
+                    raise
+                tracker.response_received = True
+                if (
+                    result.get("response") == "200"
+                    and isinstance(result.get("messageID"), str)
+                    and result["messageID"]
+                ):
+                    tracker.acknowledged = True
+                if connection_closed.done():
+                    raise _closed_error()
+                tracker.raise_if_failed()
+                if not tracker.acknowledged:
+                    raise ICError("Color Sync acknowledgement is malformed")
+                return result
+
             write_waiter = asyncio.create_task(tracker.write_started.wait())
             owned_tasks.add(write_waiter)
             initial_wait_set: set[asyncio.Future[Any]] = {
@@ -917,6 +954,12 @@ async def run_light_group_sync(
             if connection_closed in initial_done:
                 await _cancel_and_await(action_task)
                 raise _closed_error()
+            if (
+                (failure_task in initial_done or tracker.failure is not None)
+                and action_task in initial_done
+                and tracker.write_started.is_set()
+            ):
+                await process_action_result()
             if failure_task in initial_done:
                 await _cancel_and_await(action_task)
                 tracker.raise_if_failed()
@@ -972,6 +1015,13 @@ async def run_light_group_sync(
                 action_done, _ = await asyncio.wait(wait_set, return_when=asyncio.FIRST_COMPLETED)
                 if connection_closed in action_done:
                     raise _closed_error()
+                if (
+                    (failure_task in action_done or tracker.failure is not None)
+                    and action_task in action_done
+                    and not action_processed
+                ):
+                    action_processed = True
+                    acknowledgement = await process_action_result()
                 if failure_task in action_done:
                     tracker.raise_if_failed()
                 if connection_closed.done():
@@ -986,36 +1036,12 @@ async def run_light_group_sync(
                     raise ICError("Color Sync action deadline expired")
                 if action_task in action_done and not action_processed:
                     action_processed = True
-                    try:
-                        acknowledgement = await action_task
-                    except ICCommandError as error:
-                        tracker.response_received = True
-                        if connection_closed.done():
-                            raise _closed_error() from error
-                        tracker.raise_if_failed()
-                        raise
-                    except BaseException as error:
-                        if connection_closed.done():
-                            raise _closed_error() from error
-                        tracker.raise_if_failed()
-                        raise
-                    tracker.response_received = True
-                    if connection_closed.done():
-                        raise _closed_error()
-                    tracker.raise_if_failed()
-                    if (
-                        acknowledgement.get("response") != "200"
-                        or not isinstance(acknowledgement.get("messageID"), str)
-                        or not acknowledgement["messageID"]
-                    ):
-                        raise ICError("Color Sync acknowledgement is malformed")
-                    tracker.acknowledged = True
+                    acknowledgement = await process_action_result()
                 if connection_closed.done():
                     raise _closed_error()
                 tracker.raise_if_failed()
                 if asyncio.get_running_loop().time() >= tracker.action_deadline:
                     raise ICError("Color Sync action deadline expired")
-                phase = _phase_for_tracker(tracker, "terminal")
 
             if not action_processed or acknowledgement is None:
                 raise ICError("Color Sync acknowledgement was not processed")
