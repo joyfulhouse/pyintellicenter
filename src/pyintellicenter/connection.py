@@ -65,6 +65,33 @@ _RESERVED_REQUEST_FIELDS = frozenset({"messageID", "command"})
 DEFAULT_PORT = DEFAULT_TCP_PORT
 
 
+async def _await_shutdown_task(task: asyncio.Task[Any] | None) -> None:
+    """Await a shutdown task's completion without masking the caller.
+
+    ``asyncio.wait`` never raises the child's outcome, so a CancelledError
+    surfacing here can only be the *caller's* own cancellation and must
+    propagate - ``await task`` under ``suppress(CancelledError)`` cannot
+    make that distinction and would swallow a cancelled ``aclose()``
+    caller. The child's outcome is then retrieved explicitly so a failed
+    task is logged instead of tripping the event loop's "exception was
+    never retrieved" warning.
+
+    A task that *is* the current task is skipped: awaiting yourself is a
+    deadlock (and a RuntimeError); such tasks are shut down via the
+    notification queue sentinel instead.
+    """
+    if task is None or task is asyncio.current_task():
+        return
+    await asyncio.wait((task,))
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        # A real (non-cancellation) failure in a cleanup task is a defect
+        # worth surfacing, not routine shutdown noise.
+        _LOGGER.warning("Shutdown task %s raised: %r", task.get_name(), exc)
+
+
 @dataclass(slots=True)
 class _NotificationObserverState:
     """Connection-owned sequence and additive raw notification observers."""
@@ -179,8 +206,13 @@ class ICNotificationMixin:
     # These are defined in subclasses
     _notification_callback: NotificationCallback | None
     _notification_queue_size: int
-    _notification_queue: asyncio.Queue[dict[str, Any]] | None
+    # ``None`` on the queue is the shutdown sentinel (see
+    # _stop_notification_consumer); real notifications are always dicts.
+    _notification_queue: asyncio.Queue[dict[str, Any] | None] | None
     _consumer_task: asyncio.Task[None] | None
+    # Per-generation shutdown signal for the consumer: once set, the
+    # consumer drains its queue without dispatching callbacks.
+    _consumer_stop: asyncio.Event | None
     _notification_observer_state: _NotificationObserverState
     _notification_drops: int
 
@@ -195,6 +227,7 @@ class ICNotificationMixin:
         self._notification_queue_size = notification_queue_size
         self._notification_queue = None
         self._consumer_task = None
+        self._consumer_stop = None
         self._notification_drops = 0
         self._notification_observer_state = (
             notification_observer_state
@@ -208,9 +241,17 @@ class ICNotificationMixin:
             return
 
         self._notification_drops = 0
-        self._notification_queue = asyncio.Queue(maxsize=self._notification_queue_size)
+        queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(
+            maxsize=self._notification_queue_size
+        )
+        stop = asyncio.Event()
+        self._notification_queue = queue
+        self._consumer_stop = stop
+        # The queue and stop signal are passed explicitly so the consumer
+        # is bound to its own generation even if teardown or a fast
+        # restart replaces the instance attributes before it first runs.
         self._consumer_task = asyncio.create_task(
-            self._notification_consumer(),
+            self._notification_consumer(queue, stop),
             name="ic-notification-consumer",
         )
 
@@ -219,13 +260,46 @@ class ICNotificationMixin:
 
         Returns the cancelled task (if any) so async close paths can await
         its completion; sync callers may ignore the return value.
+
+        When the stop is triggered from inside the consumer itself (a
+        notification callback awaiting ``disconnect()``), the consumer is
+        the *current* task: cancelling it would deliver the CancelledError
+        to the disconnect path, where it would be consumed and the
+        consumer would resume waiting forever on its detached queue.
+        Instead the per-generation stop signal is set (so any entries
+        still queued are drained without dispatching - they are stale
+        once the connection is closing) and a ``None`` sentinel is
+        enqueued so the loop exits deterministically once the callback
+        returns; ``None`` is returned because the current task must never
+        await itself.
         """
         task, self._consumer_task = self._consumer_task, None
-        self._notification_queue = None
-        if task is not None and not task.done():
-            task.cancel()
-            return task
-        return None
+        queue, self._notification_queue = self._notification_queue, None
+        stop, self._consumer_stop = self._consumer_stop, None
+        if stop is not None:
+            stop.set()
+        if task is None or task.done():
+            return None
+
+        try:
+            current = asyncio.current_task()
+        except RuntimeError:
+            current = None
+        if task is current:
+            if queue is not None:
+                try:
+                    queue.put_nowait(None)
+                except asyncio.QueueFull:
+                    # Drop the oldest queued item to make room; account it
+                    # so a future queue.join() cannot hang. put_nowait
+                    # cannot fail again: nothing runs between the two.
+                    queue.get_nowait()
+                    queue.task_done()
+                    queue.put_nowait(None)
+            return None
+
+        task.cancel()
+        return task
 
     def _dispatch_message(self, msg: dict[str, Any]) -> None:
         """Dispatch a parsed message to the appropriate handler."""
@@ -279,25 +353,39 @@ class ICNotificationMixin:
             except asyncio.QueueEmpty:
                 _LOGGER.debug("Notification queue race - message dropped")
 
-    async def _notification_consumer(self) -> None:
-        """Process notifications from the queue captured for this consumer.
+    async def _notification_consumer(
+        self,
+        queue: asyncio.Queue[dict[str, Any] | None],
+        stop: asyncio.Event,
+    ) -> None:
+        """Process notifications from this consumer generation's queue.
 
-        The queue is captured in a local because teardown can null out (or a
-        fast restart can replace) ``self._notification_queue`` while an async
-        callback is suspended; the ``finally`` below must account for the
-        item on the queue it actually came from - and cancellation must
-        surface as a clean CancelledError, not an AttributeError.
+        The queue and stop signal are received as arguments because
+        teardown can null out (or a fast restart can replace) the
+        instance attributes while an async callback is suspended; the
+        ``finally`` below must account for the item on the queue it
+        actually came from - and cancellation must surface as a clean
+        CancelledError, not an AttributeError.
         """
-        queue = self._notification_queue
-        if queue is None:
-            raise RuntimeError("Notification queue not initialized")
-
         while True:
             try:
                 msg = await queue.get()
             except asyncio.CancelledError:
                 _LOGGER.debug("Notification consumer cancelled")
                 break
+
+            if msg is None or stop.is_set():
+                # A shutdown is in progress (see
+                # _stop_notification_consumer): drain entries without
+                # dispatching - anything still queued is stale once the
+                # connection is closing - and exit on the ``None``
+                # sentinel instead of waiting forever on the detached
+                # queue.
+                queue.task_done()
+                if msg is None:
+                    _LOGGER.debug("Notification consumer stopped")
+                    break
+                continue
 
             try:
                 callback = self._notification_callback
@@ -635,7 +723,16 @@ class ICWebSocketTransport(ICRequestMixin, ICNotificationMixin):
         self._disconnect_handled = True
 
         self._connected = False
-        self._ws = None
+        ws, self._ws = self._ws, None
+        if ws is not None:
+            # An unexpected reader error leaves the underlying socket
+            # open: schedule (and track) its closure so the panel session
+            # is released instead of lingering until GC - IntelliCenter
+            # has a small concurrent-client budget.
+            self._close_task = asyncio.create_task(
+                self._close_websocket(ws),
+                name="ic-websocket-close",
+            )
 
         self._stop_notification_consumer()
 
@@ -718,40 +815,54 @@ class ICWebSocketTransport(ICRequestMixin, ICNotificationMixin):
 
         self._stop_notification_consumer()
 
-        if self._ws:
-            # Schedule close in background (can't await in sync method)
-            # Track the task to avoid orphaned coroutines
-            self._close_task = asyncio.create_task(self._async_close())
+        # Detach the handle synchronously so repeated close() calls cannot
+        # schedule a second task: exactly one tracked task owns the close
+        # handshake per handle, and a live _close_task is never replaced
+        # (a replacement would let aclose() return before the real close
+        # completed). Can't await in a sync method, so the handshake runs
+        # in the background; aclose() takes ownership of it.
+        ws, self._ws = self._ws, None
+        if ws is not None:
+            self._close_task = asyncio.create_task(
+                self._close_websocket(ws),
+                name="ic-websocket-close",
+            )
 
     async def _async_close(self) -> None:
         """Close WebSocket connection asynchronously."""
-        if self._ws:
-            with contextlib.suppress(Exception):
-                await self._ws.close()
-            self._ws = None
+        ws, self._ws = self._ws, None
+        if ws is not None:
+            await self._close_websocket(ws)
+
+    @staticmethod
+    async def _close_websocket(ws: Any) -> None:
+        """Close a websocket handle, tolerating an already-dead link."""
+        with contextlib.suppress(Exception):
+            await ws.close()
 
     async def aclose(self) -> None:
-        """Close the connection asynchronously (preferred for proper cleanup)."""
+        """Close the connection asynchronously (preferred for proper cleanup).
+
+        Child tasks are awaited via ``_await_shutdown_task`` so a
+        CancelledError raised here always belongs to the *caller* and
+        propagates - suppressing it would make a cancelled shutdown look
+        successful.
+        """
         self._connected = False
         self._fail_pending_request(ICConnectionError("Connection closed"))
 
         reader_task, self._reader_task = self._reader_task, None
-        if reader_task and not reader_task.done():
+        if reader_task is not None and not reader_task.done():
             reader_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await reader_task
+        await _await_shutdown_task(reader_task)
 
-        consumer_task = self._stop_notification_consumer()
-        if consumer_task is not None:
-            with contextlib.suppress(asyncio.CancelledError):
-                await consumer_task
+        await _await_shutdown_task(self._stop_notification_consumer())
 
-        # A close() that ran earlier scheduled the handshake in the
-        # background; take ownership so the close frame is truly awaited.
+        # A close() (or a reader-error disconnect) that ran earlier
+        # scheduled the handshake in the background; take ownership so
+        # the close frame is truly awaited.
         close_task, self._close_task = self._close_task, None
-        if close_task is not None:
-            with contextlib.suppress(asyncio.CancelledError):
-                await close_task
+        await _await_shutdown_task(close_task)
 
         await self._async_close()
 
@@ -1048,11 +1159,12 @@ class ICConnection:
         if protocol is not None:
             protocol._disconnect_callback = None
 
-        if self._keepalive_task and not self._keepalive_task.done():
-            self._keepalive_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._keepalive_task
-            self._keepalive_task = None
+        keepalive_task, self._keepalive_task = self._keepalive_task, None
+        if keepalive_task is not None and not keepalive_task.done():
+            keepalive_task.cancel()
+        # Same contract as aclose(): a CancelledError here belongs to the
+        # disconnect() caller and must propagate, not be suppressed.
+        await _await_shutdown_task(keepalive_task)
 
         if protocol is not None:
             aclose = getattr(protocol, "aclose", None)
