@@ -3370,27 +3370,65 @@ class TestTransactionalStart:
         assert controller._connection is None
 
     @pytest.mark.asyncio
-    async def test_model_start_partial_failure_closes_connection(self):
-        """A model-phase failure closes the connection, leaks no tasks."""
-        controller = ICModelController("192.168.1.100", PoolModel(), 6681)
+    async def test_model_start_partial_failure_closes_connection(self, monkeypatch):
+        """A model-phase failure closes the connection, leaks no tasks.
+
+        The model layer now skips malformed entries instead of raising
+        (issue #56), so an unexpected model-load failure is injected directly
+        to prove the transactional guarantee for the post-connect phase.
+        """
+        model = PoolModel()
+        controller = ICModelController("192.168.1.100", model, 6681)
         connection = self._mock_connection()
         connection.send_request = AsyncMock(
             side_effect=[
                 self._system_info_response(),
-                # get_all_objects: entry missing "objnam" -> KeyError in model load
-                {"response": "200", "objectList": [{"params": {"OBJTYP": "BODY"}}]},
+                {"response": "200", "objectList": []},  # get_all_objects
             ]
         )
 
+        def exploding_add_objects(obj_list):
+            raise RuntimeError("unexpected model-load bug")
+
+        monkeypatch.setattr(model, "add_objects", exploding_add_objects)
+
         with (
             patch("pyintellicenter.controller.ICConnection", return_value=connection),
-            pytest.raises(KeyError),
+            pytest.raises(RuntimeError, match="unexpected model-load bug"),
         ):
             await controller.start()
 
         connection.disconnect.assert_awaited_once()
         assert controller._connection is None
         assert controller._monitor_tasks == set()
+
+    @pytest.mark.asyncio
+    async def test_model_start_skips_malformed_object_entries(self):
+        """A malformed objectList entry is skipped; start() still succeeds.
+
+        Since issue #56 the model skips entries missing objnam/params instead
+        of raising, so a bad entry must not abort startup or close the socket.
+        """
+        model = PoolModel()
+        controller = ICModelController("192.168.1.100", model, 6681)
+        connection = self._mock_connection()
+        connection.send_request = AsyncMock(
+            side_effect=[
+                self._system_info_response(),
+                # get_all_objects: entry missing "objnam" is skipped by the model
+                {"response": "200", "objectList": [{"params": {"OBJTYP": "BODY"}}]},
+            ]
+        )
+
+        with patch("pyintellicenter.controller.ICConnection", return_value=connection):
+            await controller.start()
+
+        assert model.num_objects == 0
+        assert controller._connection is connection
+        connection.disconnect.assert_not_awaited()
+
+        await controller.stop()
+        connection.disconnect.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_model_start_monitoring_batches_never_exceed_limit(self, monkeypatch):
