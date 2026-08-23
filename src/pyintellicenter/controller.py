@@ -256,7 +256,7 @@ from .connection import DEFAULT_TCP_PORT, DEFAULT_WEBSOCKET_PORT, ICConnection, 
 from .exceptions import ICCommandError, ICConnectionError, ICError, ICResponseError, ICTimeoutError
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Callable, Mapping
     from contextlib import AbstractAsyncContextManager
 
     from .model import PoolModel, PoolObject
@@ -818,7 +818,7 @@ class ICModelController(
         super().__init__(host, port, keepalive_interval, transport)
         self._model = model
         self._updated_callback: (
-            Callable[[ICModelController, dict[str, dict[str, Any]]], None] | None
+            Callable[[ICModelController, Mapping[str, dict[str, Any] | None]], None] | None
         ) = None
 
         # Request coalescing state
@@ -845,13 +845,28 @@ class ICModelController(
         return self._model
 
     def set_updated_callback(
-        self, callback: Callable[[ICModelController, dict[str, dict[str, Any]]], None] | None
+        self,
+        callback: Callable[[ICModelController, Mapping[str, dict[str, Any] | None]], None] | None,
     ) -> None:
-        """Set callback for model updates."""
+        """Set callback for model updates.
+
+        The callback receives a mapping of objnam to its changed attributes.
+        A value of ``None`` marks a *removal*: the object was pruned from the
+        model because it disappeared from the authoritative snapshot fetched
+        on (re)connect (equipment deleted at the panel). Consumers should tear
+        down anything (e.g. Home Assistant entities) they created for that
+        objnam. Attribute-change entries are always non-``None`` dicts.
+        """
         self._updated_callback = callback
 
     async def start(self) -> None:
         """Connect, fetch objects, and start monitoring.
+
+        The GetParamList object snapshot fetched here is authoritative: the
+        model is reconciled against it, so equipment deleted at the panel is
+        pruned from the model (and from the subscription queries built below)
+        on every connect and reconnect. Removals are logged at INFO and
+        reported to the updated callback as ``{objnam: None}`` entries.
 
         Startup is transactional: if anything fails after the connection is
         established (object fetch, model load, monitoring subscription), the
@@ -870,12 +885,43 @@ class ICModelController(
             if self._connection:
                 self._connection.set_notification_callback(self._on_notification)
 
-            # Fetch all objects
+            # Fetch the authoritative snapshot of all objects
             all_objects = await self.get_all_objects(
                 [OBJTYP_ATTR, SUBTYP_ATTR, SNAME_ATTR, PARENT_ATTR]
             )
-            self._model.add_objects(all_objects)
-            _LOGGER.info("Model contains %d objects", self._model.num_objects)
+
+            # Reconcile BEFORE loading and building subscription queries:
+            # equipment deleted at the panel never appears in a NotifyList
+            # again, so this snapshot is the only signal that an object is
+            # gone. Pruning first keeps ghosts out of the tracking queries.
+            removed = self._model.reconcile(all_objects)
+            ingested = self._model.add_objects(all_objects)
+
+            # Partial-snapshot visibility comes from the ingest result:
+            # add_objects() returns the ingested objnams and itself emits one
+            # WARNING for malformed entries, while expected skips (missing or
+            # untracked OBJTYP, e.g. the firmware 3.008+ pruned-params
+            # artifacts like _FDR) deliberately stay DEBUG-only. The
+            # controller reports the counts at INFO rather than duplicating
+            # or escalating the model's diagnostics.
+            _LOGGER.info(
+                "Model contains %d objects (%d of %d snapshot entries ingested)",
+                self._model.num_objects,
+                len(ingested),
+                len(all_objects),
+            )
+
+            if removed:
+                _LOGGER.info(
+                    "Removed %d object(s) no longer present on the panel: %s",
+                    len(removed),
+                    ", ".join(removed),
+                )
+                # Report removals through the updated callback using the
+                # documented {objnam: None} convention so consumers can tear
+                # down entities for deleted equipment.
+                removal_changes: dict[str, dict[str, Any] | None] = dict.fromkeys(removed)
+                self._notify_updated(removal_changes)
 
             # Request monitoring of attributes in batches
             attributes = self._model.attributes_to_track()
@@ -962,16 +1008,24 @@ class ICModelController(
                 task.add_done_callback(self._on_monitor_task_done)
 
         # Notify callback (newly-added objects are included in updates, so the
-        # existing callback path surfaces them to consumers). A consumer
-        # callback raising must never break update processing, monitoring or
-        # the reconnect machinery that dispatches updates.
+        # existing callback path surfaces them to consumers).
+        self._notify_updated(updates)
+
+        return updates
+
+    def _notify_updated(self, updates: Mapping[str, dict[str, Any] | None]) -> None:
+        """Invoke the consumer updated callback, containing any exception.
+
+        A consumer callback raising must never break update processing,
+        monitoring, startup or the reconnect machinery that dispatches
+        updates. An entry with value ``None`` marks an object removed from
+        the model (reconnect reconciliation); attribute changes are dicts.
+        """
         if updates and self._updated_callback:
             try:
                 self._updated_callback(self, updates)
             except Exception:
                 _LOGGER.exception("Error in model updated callback")
-
-        return updates
 
     def _on_monitor_task_done(self, task: asyncio.Task[None]) -> None:
         """Discard a finished monitor task and surface any unexpected error.
@@ -1380,8 +1434,14 @@ class ICConnectionHandlerCallbacks(Protocol):
         """Called before each retry attempt."""
         ...
 
-    def on_updated(self, controller: ICModelController, updates: dict[str, dict[str, Any]]) -> None:
-        """Called when model is updated (only for ICModelController)."""
+    def on_updated(
+        self, controller: ICModelController, updates: Mapping[str, dict[str, Any] | None]
+    ) -> None:
+        """Called when model is updated (only for ICModelController).
+
+        An entry with value ``None`` marks an object removed from the model
+        during reconnect reconciliation (equipment deleted at the panel).
+        """
         ...
 
 
@@ -1478,9 +1538,10 @@ class ICConnectionHandler:
         # Serialize with an in-flight teardown from a previous stop(): the old
         # controller.stop() must fully release its connection before a new one
         # is opened, or the resumed teardown could disown the fresh socket.
-        if self._stop_task is not None:
-            await asyncio.wait({self._stop_task})
-            self._stop_task = None
+        # _finish_stop_task() awaits the teardown's ACTUAL completion - a
+        # teardown that was cancelled mid-flight is re-run, never treated as
+        # done - so a reconnect can never race a half-closed connection.
+        await self._finish_stop_task()
         self._stopped = False
 
         attempt = self._start_attempt
@@ -1540,11 +1601,53 @@ class ICConnectionHandler:
 
         Async counterpart of :meth:`stop` for consumers that must not proceed
         until the connection is completely closed.
+
+        The teardown is shielded from caller cancellation: cancelling an
+        ``astop()`` caller re-raises ``CancelledError`` to that caller while
+        the teardown task keeps running in the background, and the task
+        reference is retained so a later :meth:`start` or :meth:`astop` waits
+        for its actual completion.
         """
         self.stop()
-        if self._stop_task is not None:
-            await self._stop_task
-            self._stop_task = None
+        await self._finish_stop_task()
+
+    async def _finish_stop_task(self) -> None:
+        """Wait for the tracked controller teardown to actually complete.
+
+        The teardown task is awaited through ``asyncio.shield`` so cancelling
+        the *caller* cannot cancel the teardown mid-flight (which would leave
+        the connection detached but the socket possibly not closed). On caller
+        cancellation the ``CancelledError`` propagates while the shielded task
+        runs on, and ``self._stop_task`` is retained so the next
+        ``start()``/``astop()`` awaits its real completion.
+
+        The old task's outcome is inspected rather than assumed: a teardown
+        task that was itself cancelled (e.g. at loop shutdown, or by a
+        pre-shield caller) is re-run, because completion of the wait is not
+        completion of the teardown. Unexpected teardown failures propagate
+        (``_stop_controller`` already contains ordinary exceptions, so only
+        ``BaseException`` escapes here).
+        """
+        while (stop_task := self._stop_task) is not None:
+            try:
+                await asyncio.shield(stop_task)
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    # The caller was cancelled: propagate, keeping the
+                    # shielded teardown running and its reference retained.
+                    raise
+                if stop_task.cancelled():
+                    # The teardown task itself was cancelled before finishing:
+                    # the controller may still hold a half-closed connection,
+                    # so run the teardown again and await the fresh task.
+                    _LOGGER.warning("Controller teardown was cancelled; re-running it")
+                    if self._stop_task is stop_task:
+                        self._stop_task = asyncio.create_task(self._stop_controller())
+                    continue
+                raise
+            if self._stop_task is stop_task:
+                self._stop_task = None
 
     async def _stop_controller(self) -> None:
         """Stop the controller asynchronously."""
@@ -1715,7 +1818,7 @@ class ICConnectionHandler:
             self._invoke_callback(self.on_disconnected, controller, exc)
 
     def _on_model_updated(
-        self, controller: ICModelController, updates: dict[str, dict[str, Any]]
+        self, controller: ICModelController, updates: Mapping[str, dict[str, Any] | None]
     ) -> None:
         """Internal callback that forwards to user callback."""
         self._invoke_callback(self.on_updated, controller, updates)
@@ -1734,5 +1837,11 @@ class ICConnectionHandler:
         """Called before retry attempt. Override or replace to handle."""
         _LOGGER.info("Retrying in %ds", delay)
 
-    def on_updated(self, controller: ICModelController, updates: dict[str, dict[str, Any]]) -> None:
-        """Called when model is updated. Override or replace to handle."""
+    def on_updated(
+        self, controller: ICModelController, updates: Mapping[str, dict[str, Any] | None]
+    ) -> None:
+        """Called when model is updated. Override or replace to handle.
+
+        An entry with value ``None`` marks an object removed from the model
+        during reconnect reconciliation (equipment deleted at the panel).
+        """
