@@ -819,6 +819,51 @@ class TestDeepIngestAndSnapshotObservability:
 
         assert obj["META"] == {"limits": {"min": "0", "max": "100"}}
 
+    def test_nested_list_mutation_after_re_add_does_not_affect_model(self):
+        """Re-adding an existing objnam is nested-mutation isolated too.
+
+        add_object routes an existing object through PoolObject.update(),
+        which assigns values directly — bypassing the constructor's deep
+        copy. The update-through-add cold ingest path must deep-copy as
+        well, or the model stays aliased to the caller's nested list.
+        """
+        model = PoolModel()
+        first: dict[str, Any] = {
+            OBJTYP_ATTR: CIRCUIT_TYPE,
+            SUBTYP_ATTR: "LITSHO",
+            "USE": ["C1"],
+        }
+        obj = model.add_object("SHOW1", first)
+        assert obj is not None
+
+        second: dict[str, Any] = {"USE": ["C1", "C2"]}
+        re_added = model.add_object("SHOW1", second)
+        assert re_added is obj
+
+        second["USE"].append("HACKED")
+        second["USE"][0] = "MUTATED"
+
+        assert obj["USE"] == ["C1", "C2"]
+
+    def test_nested_dict_mutation_after_re_add_via_add_objects_does_not_affect_model(self):
+        """The batch path (add_objects) is isolated when updating existing objects."""
+        model = PoolModel()
+        model.add_object("CIRC9", {OBJTYP_ATTR: CIRCUIT_TYPE, SNAME_ATTR: "Circuit"})
+
+        entries: list[Any] = [
+            {
+                "objnam": "CIRC9",
+                "params": {"META": {"limits": {"min": "0", "max": "100"}}},
+            },
+        ]
+        assert model.add_objects(entries) == ["CIRC9"]
+
+        entries[0]["params"]["META"]["limits"]["max"] = "9999"
+
+        circuit = model["CIRC9"]
+        assert circuit is not None
+        assert circuit["META"] == {"limits": {"min": "0", "max": "100"}}
+
     def test_nested_mutation_after_add_objects_does_not_affect_model(self):
         """The batch ingest path (add_objects) is nested-mutation isolated too."""
         model = PoolModel()

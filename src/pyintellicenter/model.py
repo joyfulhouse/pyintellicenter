@@ -339,7 +339,13 @@ class PoolModel:
             else:
                 return None
         else:
-            pool_obj.update(params)
+            # Cold ingest UPDATE path: update() assigns values directly (no
+            # copy), so deep-copy here to keep caller-supplied nested values
+            # isolated from model state, matching the constructor's deep copy
+            # on first insertion. process_updates() calls update() directly
+            # and intentionally stays copy-free: its orjson-decoded frames
+            # are trusted (not caller-aliased).
+            pool_obj.update(copy.deepcopy(params))
         return pool_obj
 
     def add_objects(self, obj_list: list[ObjectEntry]) -> list[str]:
