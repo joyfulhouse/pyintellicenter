@@ -237,6 +237,13 @@ Semantics:
 - Each subscriber invocation is exception-guarded — one subscriber raising
   is logged and never affects other subscribers, the legacy callback, or
   update processing.
+- All applicable listener lists are snapshotted before any callback runs, so
+  subscribing or unsubscribing from within a callback only affects future
+  dispatches, never the one in flight.
+- Callback payloads (including the attribute dicts) are **read-only**: they
+  are shared between the legacy updated callback and all subscribers, so
+  mutating them would be visible to every other listener. Copy first if you
+  need to modify.
 - `ICConnectionHandler.subscribe(objnam, callback)` forwards to the managed
   `ICModelController`, so consumers holding only the handler can subscribe
   directly (raises `TypeError` if the handler manages a non-model controller).

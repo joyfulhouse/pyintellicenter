@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import logging
 import time
 from dataclasses import asdict, dataclass, field
@@ -410,6 +411,7 @@ class ICBaseController:
         port: int | None = None,
         keepalive_interval: float | None = None,
         transport: TransportType = "tcp",
+        notification_batching: bool = True,
     ) -> None:
         """Initialize the controller.
 
@@ -418,9 +420,13 @@ class ICBaseController:
             port: Port number (default: 6681 for TCP, 6680 for WebSocket)
             keepalive_interval: Seconds between keepalive requests
             transport: Transport type - "tcp" or "websocket" (default: "tcp")
+            notification_batching: Forwarded to ``ICConnection``. ``True``
+                (default) batches NotifyList notifications; pass ``False`` to
+                opt back into per-frame delivery.
         """
         self._host = host
         self._transport = transport
+        self._notification_batching = notification_batching
         self._port = (
             port
             if port is not None
@@ -507,13 +513,17 @@ class ICBaseController:
                 await self._connection.disconnect()
             self._connection = None
 
-        # Create connection
-        connection = ICConnection(
-            self._host,
-            self._port,
-            keepalive_interval=self._keepalive_interval,
-            transport=self._transport,
-        )
+        # Create connection. notification_batching is forwarded whenever
+        # ICConnection accepts it (PR #84); the signature check keeps this
+        # branch working - and its full test suite passing - until #84 merges,
+        # after which the flag is always forwarded.
+        connection_kwargs: dict[str, Any] = {
+            "keepalive_interval": self._keepalive_interval,
+            "transport": self._transport,
+        }
+        if "notification_batching" in inspect.signature(ICConnection.__init__).parameters:
+            connection_kwargs["notification_batching"] = self._notification_batching
+        connection = ICConnection(self._host, self._port, **connection_kwargs)
 
         # Set disconnect callback. The identity check ignores events from a
         # connection this controller has since replaced - a stale socket dying
@@ -805,6 +815,7 @@ class ICModelController(
         port: int | None = None,
         keepalive_interval: float | None = None,
         transport: TransportType = "tcp",
+        notification_batching: bool = True,
     ) -> None:
         """Initialize the controller.
 
@@ -814,8 +825,11 @@ class ICModelController(
             port: Port number (default: 6681 for TCP, 6680 for WebSocket)
             keepalive_interval: Seconds between keepalive requests
             transport: Transport type - "tcp" or "websocket" (default: "tcp")
+            notification_batching: Forwarded to ``ICConnection``. ``True``
+                (default) batches NotifyList notifications; pass ``False`` to
+                opt back into per-frame delivery.
         """
-        super().__init__(host, port, keepalive_interval, transport)
+        super().__init__(host, port, keepalive_interval, transport, notification_batching)
         self._model = model
         self._updated_callback: (
             Callable[[ICModelController, Mapping[str, dict[str, Any] | None]], None] | None
@@ -863,6 +877,10 @@ class ICModelController(
         on (re)connect (equipment deleted at the panel). Consumers should tear
         down anything (e.g. Home Assistant entities) they created for that
         objnam. Attribute-change entries are always non-``None`` dicts.
+
+        The payload is shared with per-object subscribers (see
+        :meth:`subscribe`) and must be treated as read-only: mutating it would
+        be visible to every other listener.
         """
         self._updated_callback = callback
 
@@ -886,7 +904,10 @@ class ICModelController(
                 full update mapping. As with the updated callback, an entry
                 value of ``None`` marks the object's *removal* from the model
                 (equipment deleted at the panel); attribute-change entries are
-                always non-``None`` dicts.
+                always non-``None`` dicts. Payloads (including the attribute
+                dicts) are shared between the legacy callback and all
+                subscribers and must be treated as read-only - never mutate
+                them; copy first if you need to modify.
 
         Returns:
             A zero-argument callable that removes this subscription. Calling it
@@ -913,8 +934,13 @@ class ICModelController(
             current = self._subscriptions.get(objnam)
             if current is None:
                 return
-            with contextlib.suppress(ValueError):
-                current.remove(callback)
+            # Remove by identity, not equality: two distinct listeners that
+            # happen to compare equal must not remove each other's entry
+            # (mirrors ICConnection.add_notification_observer's remover).
+            for index, candidate in enumerate(current):
+                if candidate is callback:
+                    del current[index]
+                    break
             if not current:
                 del self._subscriptions[objnam]
 
@@ -1099,29 +1125,40 @@ class ICModelController(
         """Fan updates out to per-object and all-object subscribers.
 
         Each invocation is exception-guarded so one subscriber raising cannot
-        affect other subscribers or the reader path. Listener lists are
-        snapshotted before iteration so a callback unsubscribing (itself or a
-        peer) during dispatch is safe.
+        affect other subscribers or the reader path. The all-object list AND
+        every applicable per-object list are snapshotted up front, before any
+        callback is invoked, so subscribing or unsubscribing from within a
+        callback (its own key or any other) only affects *future* dispatches -
+        never the one in flight.
         """
         if not self._subscriptions:
             return
 
-        for callback in list(self._subscriptions.get(None, ())):
-            try:
-                callback(self, updates)
-            except Exception:
-                _LOGGER.exception("Error in model update subscriber (all objects)")
+        # (callback, payload, objnam-or-None-for-all) triples, captured before
+        # any callback runs.
+        dispatch: list[
+            tuple[
+                Callable[[ICModelController, Mapping[str, dict[str, Any] | None]], None],
+                Mapping[str, dict[str, Any] | None],
+                str | None,
+            ]
+        ] = [(callback, updates, None) for callback in self._subscriptions.get(None, ())]
 
         for objnam, changes in updates.items():
             listeners = self._subscriptions.get(objnam)
             if not listeners:
                 continue
             entry: Mapping[str, dict[str, Any] | None] = {objnam: changes}
-            for callback in list(listeners):
-                try:
-                    callback(self, entry)
-                except Exception:
-                    _LOGGER.exception("Error in model update subscriber for %s", objnam)
+            dispatch.extend((callback, entry, objnam) for callback in listeners)
+
+        for callback, payload, scope in dispatch:
+            try:
+                callback(self, payload)
+            except Exception:
+                if scope is None:
+                    _LOGGER.exception("Error in model update subscriber (all objects)")
+                else:
+                    _LOGGER.exception("Error in model update subscriber for %s", scope)
 
     def _on_monitor_task_done(self, task: asyncio.Task[None]) -> None:
         """Discard a finished monitor task and surface any unexpected error.

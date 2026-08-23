@@ -22,9 +22,18 @@ pass (#68).
   `ICConnectionHandler`), share its `(controller, changes)` signature and
   `{objnam: None}` removal contract, and are individually exception-guarded
   so one raising never affects other subscribers, the legacy callback, or
-  update processing. Unsubscribing during dispatch is safe.
+  update processing. Removal is identity-based (a remover deletes exactly
+  its own registration, never a distinct-but-equal callable's), all
+  applicable listener lists are snapshotted before any callback runs (so
+  (un)subscribing during dispatch only affects future dispatches), and
+  payloads are shared between the legacy callback and all subscribers and
+  must be treated as read-only.
   `ICConnectionHandler.subscribe()` forwards to the managed controller so
   consumers holding only the handler can subscribe directly.
+- `notification_batching: bool = True` keyword on `ICBaseController` /
+  `ICModelController`, forwarded to the underlying `ICConnection` (when its
+  constructor accepts it) so consumers can opt back into per-frame
+  NotifyList delivery with `notification_batching=False`.
 - **Ghost-equipment fix, end-to-end** (#56, #68): `PoolModel` gains
   `remove_object(objnam)` and `reconcile(obj_list)` (which prunes objects
   absent from an authoritative snapshot and returns the removed objnams), and

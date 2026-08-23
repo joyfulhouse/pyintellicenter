@@ -163,7 +163,9 @@ The callback signature is identical to `set_updated_callback`, including the
 `None`-for-removal contract; a per-objnam subscriber receives only its
 object's entry, still as a mapping (`{objnam: attrs}`). Any number of
 subscriptions can coexist with the legacy callback, and a subscriber raising
-is logged without affecting other subscribers or update processing. See
+is logged without affecting other subscribers or update processing. Treat the
+`changes` payload as read-only — it is shared between the legacy callback and
+all subscribers, so never mutate it (copy first if needed). See
 [API.md](API.md#per-object-subscriptions) for full semantics.
 
 ### Discovery

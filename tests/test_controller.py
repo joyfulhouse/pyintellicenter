@@ -4133,3 +4133,149 @@ class TestSubscriptions:
         handler = ICConnectionHandler(base)
         with pytest.raises(TypeError, match="ICModelController"):
             handler.subscribe("C0001", lambda ctrl, changes: None)
+
+    def test_remover_uses_identity_not_equality(self, controller):
+        """A remover deletes its exact entry, not the first equal-comparing one."""
+
+        class EqualCallable:
+            """Callable that compares equal to any other EqualCallable."""
+
+            def __init__(self, log, tag):
+                self._log = log
+                self._tag = tag
+
+            def __call__(self, ctrl, changes):
+                self._log.append(self._tag)
+
+            def __eq__(self, other):
+                return isinstance(other, EqualCallable)
+
+            def __hash__(self):
+                return hash(EqualCallable)
+
+        log = []
+        first = EqualCallable(log, "first")
+        second = EqualCallable(log, "second")
+        assert first == second and first is not second
+
+        controller.subscribe("C0001", first)
+        remove_second = controller.subscribe("C0001", second)
+
+        # Removing the second registration must not delete the first, even
+        # though the two callables compare equal.
+        remove_second()
+        self._notify(controller, "C0001", {"STATUS": "ON"})
+        assert log == ["first"]
+
+    def test_all_object_subscriber_adding_listener_not_dispatched_same_update(self, controller):
+        """A per-object listener subscribed during dispatch only sees future updates."""
+        late = []
+
+        def all_objects_cb(ctrl, changes):
+            ctrl.subscribe("C0001", lambda c, ch: late.append(dict(ch)))
+
+        controller.subscribe(None, all_objects_cb)
+
+        self._notify(controller, "C0001", {"STATUS": "ON"})
+        # Subscribed mid-dispatch: must NOT receive the in-flight update.
+        assert late == []
+
+        self._notify(controller, "C0001", {"STATUS": "OFF"})
+        # The listener added during the first dispatch receives the next one
+        # (and the all-object callback registered another copy, hence two).
+        assert {"C0001": {"STATUS": "OFF"}} in late
+
+    def test_all_object_subscriber_removing_listener_still_dispatched_same_update(self, controller):
+        """A per-object listener unsubscribed during dispatch still gets the in-flight update."""
+        received = []
+        removers = {}
+
+        def all_objects_cb(ctrl, changes):
+            removers["per_object"]()
+
+        controller.subscribe(None, all_objects_cb)
+        removers["per_object"] = controller.subscribe(
+            "C0001", lambda ctrl, changes: received.append(dict(changes))
+        )
+
+        self._notify(controller, "C0001", {"STATUS": "ON"})
+        # Snapshot taken before any callback ran: still delivered this dispatch.
+        assert received == [{"C0001": {"STATUS": "ON"}}]
+
+        self._notify(controller, "C0001", {"STATUS": "OFF"})
+        # But not the next one.
+        assert received == [{"C0001": {"STATUS": "ON"}}]
+
+
+class TestNotificationBatchingForwarding:
+    """Test the notification_batching kwarg forwarding to ICConnection."""
+
+    class _CapturingConnection:
+        """Stand-in ICConnection that records constructor kwargs and aborts."""
+
+        captured: dict = {}
+
+        def __init__(
+            self,
+            host,
+            port,
+            keepalive_interval=None,
+            transport="tcp",
+            notification_batching=True,
+        ):
+            type(self).captured = {
+                "host": host,
+                "port": port,
+                "keepalive_interval": keepalive_interval,
+                "transport": transport,
+                "notification_batching": notification_batching,
+            }
+            raise RuntimeError("constructed")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("batching", [True, False])
+    async def test_base_controller_forwards_notification_batching(self, batching):
+        """ICBaseController forwards notification_batching when ICConnection accepts it."""
+        self._CapturingConnection.captured = {}
+        controller = ICBaseController("192.168.1.100", 6681, notification_batching=batching)
+        with (
+            patch("pyintellicenter.controller.ICConnection", self._CapturingConnection),
+            pytest.raises(RuntimeError, match="constructed"),
+        ):
+            await controller.start()
+        assert self._CapturingConnection.captured["notification_batching"] is batching
+
+    @pytest.mark.asyncio
+    async def test_model_controller_forwards_notification_batching(self):
+        """ICModelController forwards notification_batching through to ICConnection."""
+        self._CapturingConnection.captured = {}
+        controller = ICModelController(
+            "192.168.1.100", PoolModel(), 6681, notification_batching=False
+        )
+        with (
+            patch("pyintellicenter.controller.ICConnection", self._CapturingConnection),
+            pytest.raises(RuntimeError, match="constructed"),
+        ):
+            await controller.start()
+        assert self._CapturingConnection.captured["notification_batching"] is False
+
+    @pytest.mark.asyncio
+    async def test_kwarg_not_forwarded_when_connection_lacks_parameter(self):
+        """Pre-#84 ICConnection (no such parameter) is constructed without the kwarg."""
+        captured = {}
+
+        class LegacyConnection:
+            def __init__(self, host, port, keepalive_interval=None, transport="tcp"):
+                captured.update(
+                    host=host, keepalive_interval=keepalive_interval, transport=transport
+                )
+                raise RuntimeError("constructed")
+
+        controller = ICBaseController("192.168.1.100", 6681, notification_batching=False)
+        with (
+            patch("pyintellicenter.controller.ICConnection", LegacyConnection),
+            pytest.raises(RuntimeError, match="constructed"),
+        ):
+            await controller.start()
+        # No TypeError from an unexpected kwarg; construction reached __init__.
+        assert captured["host"] == "192.168.1.100"
