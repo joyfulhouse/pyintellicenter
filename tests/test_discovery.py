@@ -8,11 +8,14 @@ import pytest
 from zeroconf import ServiceStateChange
 
 from pyintellicenter.discovery import (
+    _MAX_RESOLUTION_ATTEMPTS,
+    _RESOLUTION_WORKERS,
     DEFAULT_DISCOVERY_TIMEOUT,
     INTELLICENTER_SERVICE_TYPE,
     ICDiscoveryListener,
     ICUnit,
     _is_intellicenter,
+    _process_candidates,
     _resolve_service,
     discover_intellicenter_units,
     find_unit_by_host,
@@ -153,10 +156,13 @@ class TestICDiscoveryListener:
             state_change=ServiceStateChange.Added,
         )
 
-        zc, service_type, name = await asyncio.wait_for(listener.async_get_candidate(), 1.0)
+        zc, service_type, name, generation = await asyncio.wait_for(
+            listener.async_get_candidate(), 1.0
+        )
         assert zc is mock_zc
         assert service_type == HTTP_TYPE
         assert name == PENTAIR_NAME
+        assert generation == 0
 
     @pytest.mark.asyncio
     async def test_updated_event_queues_candidate(self, listener):
@@ -169,10 +175,13 @@ class TestICDiscoveryListener:
             state_change=ServiceStateChange.Updated,
         )
 
-        zc, service_type, name = await asyncio.wait_for(listener.async_get_candidate(), 1.0)
+        zc, service_type, name, generation = await asyncio.wait_for(
+            listener.async_get_candidate(), 1.0
+        )
         assert zc is mock_zc
         assert service_type == HTTP_TYPE
         assert name == PENTAIR_NAME
+        assert generation == 0
 
     def test_added_then_updated_deduplicated(self, listener):
         """Test Added followed by Updated only queues one candidate."""
@@ -248,6 +257,167 @@ class TestICDiscoveryListener:
         assert len(listener.units) == 1
         assert listener.units[0] == unit
 
+    def _fire(self, listener, state_change, name=PENTAIR_NAME):
+        listener.async_on_service_state_change(
+            zeroconf=MagicMock(),
+            service_type=HTTP_TYPE,
+            name=name,
+            state_change=state_change,
+        )
+
+    @pytest.mark.asyncio
+    async def test_stale_generation_result_is_discarded(self, listener):
+        """Regression #76: a result from before a Removed event must not add a unit."""
+        self._fire(listener, ServiceStateChange.Added)
+        _, service_type, name, generation = await asyncio.wait_for(
+            listener.async_get_candidate(), 1.0
+        )
+
+        # Service removed while its resolution is still in flight
+        self._fire(listener, ServiceStateChange.Removed)
+
+        unit = ICUnit(name="Pentair", host="192.168.1.100", port=6681, ws_port=6680)
+        listener.mark_resolved(service_type, name, generation, unit)
+
+        assert listener.units == []
+
+    @pytest.mark.asyncio
+    async def test_stale_generation_failure_does_not_clobber_readded_service(self, listener):
+        """Regression #76: a stale failure must not mark a re-added service failed."""
+        self._fire(listener, ServiceStateChange.Added)
+        _, service_type, name, stale_generation = await asyncio.wait_for(
+            listener.async_get_candidate(), 1.0
+        )
+        self._fire(listener, ServiceStateChange.Removed)
+        self._fire(listener, ServiceStateChange.Added)
+        _, _, _, new_generation = await asyncio.wait_for(listener.async_get_candidate(), 1.0)
+        assert new_generation > stale_generation
+
+        # The stale resolver reports failure; the new resolution then succeeds.
+        listener.mark_failed(service_type, name, stale_generation)
+        unit = ICUnit(name="Pentair", host="192.168.1.100", port=6681, ws_port=6680)
+        listener.mark_resolved(service_type, name, new_generation, unit)
+
+        assert listener.units == [unit]
+
+    @pytest.mark.asyncio
+    async def test_updated_after_failed_resolution_requeues(self, listener):
+        """Regression #76: an Updated event after a failed resolution retries."""
+        self._fire(listener, ServiceStateChange.Added)
+        _, service_type, name, generation = await asyncio.wait_for(
+            listener.async_get_candidate(), 1.0
+        )
+        listener.mark_failed(service_type, name, generation)
+
+        self._fire(listener, ServiceStateChange.Updated)
+
+        assert listener._candidates.qsize() == 1
+        _, _, requeued_name, requeued_generation = await asyncio.wait_for(
+            listener.async_get_candidate(), 1.0
+        )
+        assert requeued_name == PENTAIR_NAME
+        # No Removed event occurred, so the generation is unchanged.
+        assert requeued_generation == generation
+
+    @pytest.mark.asyncio
+    async def test_updated_after_successful_resolution_deduplicated(self, listener):
+        """Test an Updated event after a successful resolution is not re-queued."""
+        self._fire(listener, ServiceStateChange.Added)
+        _, service_type, name, generation = await asyncio.wait_for(
+            listener.async_get_candidate(), 1.0
+        )
+        unit = ICUnit(name="Pentair", host="192.168.1.100", port=6681, ws_port=6680)
+        listener.mark_resolved(service_type, name, generation, unit)
+
+        self._fire(listener, ServiceStateChange.Updated)
+
+        assert listener._candidates.qsize() == 0
+        assert listener.units == [unit]
+
+    @pytest.mark.asyncio
+    async def test_updated_after_non_intellicenter_resolution_deduplicated(self, listener):
+        """Test a service resolved as non-IntelliCenter is not re-resolved on Updated."""
+        self._fire(listener, ServiceStateChange.Added, name=DECOY_NAME)
+        _, service_type, name, generation = await asyncio.wait_for(
+            listener.async_get_candidate(), 1.0
+        )
+        listener.mark_resolved(service_type, name, generation, None)
+
+        self._fire(listener, ServiceStateChange.Updated, name=DECOY_NAME)
+
+        assert listener._candidates.qsize() == 0
+        assert listener.units == []
+
+    @pytest.mark.asyncio
+    async def test_updated_during_pending_resolution_retries_after_failure(self, listener):
+        """Regression (PR #79 review): Added -> resolving -> Updated -> fail must retry.
+
+        An Updated event arriving while a resolution is in flight is
+        remembered; when that attempt fails transiently, one retry is
+        enqueued immediately instead of the update being lost.
+        """
+        self._fire(listener, ServiceStateChange.Added)
+        _, service_type, name, generation = await asyncio.wait_for(
+            listener.async_get_candidate(), 1.0
+        )
+
+        # Update arrives while the attempt is in flight: not double-queued.
+        self._fire(listener, ServiceStateChange.Updated)
+        assert listener._candidates.qsize() == 0
+
+        # The in-flight attempt then fails: the retry replays immediately.
+        listener.mark_failed(service_type, name, generation)
+        assert listener._candidates.qsize() == 1
+        _, _, retried_name, retried_generation = await asyncio.wait_for(
+            listener.async_get_candidate(), 1.0
+        )
+        assert retried_name == PENTAIR_NAME
+        assert retried_generation == generation
+
+    @pytest.mark.asyncio
+    async def test_successful_resolution_clears_pending_retry_request(self, listener):
+        """Test an update during a resolution that succeeds does not requeue."""
+        self._fire(listener, ServiceStateChange.Added)
+        _, service_type, name, generation = await asyncio.wait_for(
+            listener.async_get_candidate(), 1.0
+        )
+        self._fire(listener, ServiceStateChange.Updated)
+
+        unit = ICUnit(name="Pentair", host="192.168.1.100", port=6681, ws_port=6680)
+        listener.mark_resolved(service_type, name, generation, unit)
+
+        assert listener._candidates.qsize() == 0
+        # A later failure report (stale duplicate) must not replay the
+        # already-consumed retry request either.
+        assert listener.units == [unit]
+
+    @pytest.mark.asyncio
+    async def test_retry_attempts_capped_per_generation(self, listener):
+        """Regression (PR #79 review): a persistently failing service cannot requeue forever."""
+        for attempt in range(_MAX_RESOLUTION_ATTEMPTS):
+            self._fire(
+                listener,
+                ServiceStateChange.Added if attempt == 0 else ServiceStateChange.Updated,
+            )
+            assert listener._candidates.qsize() == 1
+            _, service_type, name, generation = await asyncio.wait_for(
+                listener.async_get_candidate(), 1.0
+            )
+            listener.mark_failed(service_type, name, generation)
+
+        # Budget for this generation is exhausted: further events are ignored.
+        self._fire(listener, ServiceStateChange.Updated)
+        assert listener._candidates.qsize() == 0
+
+        # Repeated Added announcements are bounded by the same budget.
+        self._fire(listener, ServiceStateChange.Added)
+        assert listener._candidates.qsize() == 0
+
+        # Removal starts a fresh generation with a fresh budget.
+        self._fire(listener, ServiceStateChange.Removed)
+        self._fire(listener, ServiceStateChange.Added)
+        assert listener._candidates.qsize() == 1
+
 
 class TestIsIntelliCenter:
     """Test _is_intellicenter function."""
@@ -321,9 +491,7 @@ class TestResolveService:
                 return_value=True,
             ) as mock_probe,
         ):
-            await _resolve_service(
-                listener, MagicMock(), asyncio.Semaphore(1), HTTP_TYPE, PENTAIR_NAME
-            )
+            await _resolve_service(listener, MagicMock(), HTTP_TYPE, PENTAIR_NAME, 0)
 
         mock_probe.assert_awaited_once_with("fe80::1%en0", 6681)
         info.parsed_addresses.assert_not_called()
@@ -349,9 +517,7 @@ class TestResolveService:
                 return_value=True,
             ),
         ):
-            await _resolve_service(
-                listener, MagicMock(), asyncio.Semaphore(1), HTTP_TYPE, PENTAIR_NAME
-            )
+            await _resolve_service(listener, MagicMock(), HTTP_TYPE, PENTAIR_NAME, 0)
 
         assert listener.units[0].model == "i10PS"
         assert listener.units[0].port == 6681
@@ -365,9 +531,7 @@ class TestResolveService:
         info.async_request = AsyncMock(return_value=False)
 
         with patch("pyintellicenter.discovery.AsyncServiceInfo", return_value=info):
-            await _resolve_service(
-                listener, MagicMock(), asyncio.Semaphore(1), HTTP_TYPE, PENTAIR_NAME
-            )
+            await _resolve_service(listener, MagicMock(), HTTP_TYPE, PENTAIR_NAME, 0)
 
         assert listener.units == []
 
@@ -383,9 +547,7 @@ class TestResolveService:
         info.parsed_scoped_addresses.return_value = ["192.168.1.60"]
 
         with patch("pyintellicenter.discovery.AsyncServiceInfo", return_value=info):
-            await _resolve_service(
-                listener, MagicMock(), asyncio.Semaphore(1), HTTP_TYPE, DECOY_NAME
-            )
+            await _resolve_service(listener, MagicMock(), HTTP_TYPE, DECOY_NAME, 0)
 
         assert listener.units == []
 
@@ -408,9 +570,139 @@ class TestResolveService:
                 return_value=False,
             ),
         ):
-            await _resolve_service(
-                listener, MagicMock(), asyncio.Semaphore(1), HTTP_TYPE, PENTAIR_NAME
+            await _resolve_service(listener, MagicMock(), HTTP_TYPE, PENTAIR_NAME, 0)
+
+        assert listener.units == []
+
+    @pytest.mark.asyncio
+    async def test_resolve_probes_addresses_in_order_until_reachable(self):
+        """Regression #76: a unit is discovered when only a later address is reachable.
+
+        A dual-stack panel may advertise an unreachable scoped IPv6 address
+        first; the resolver must fall through to the next advertised address.
+        """
+        listener = ICDiscoveryListener()
+        info = MagicMock()
+        info.name = PENTAIR_NAME
+        info.port = 6680
+        info.properties = {}
+        info.async_request = AsyncMock(return_value=True)
+        info.parsed_scoped_addresses.return_value = ["fe80::1%en0", "192.168.1.50"]
+
+        async def probe(host, port):
+            return host == "192.168.1.50"
+
+        with (
+            patch("pyintellicenter.discovery.AsyncServiceInfo", return_value=info),
+            patch(
+                "pyintellicenter.discovery._check_tcp_port",
+                new_callable=AsyncMock,
+                side_effect=probe,
+            ) as mock_probe,
+        ):
+            await _resolve_service(listener, MagicMock(), HTTP_TYPE, PENTAIR_NAME, 0)
+
+        assert [call.args for call in mock_probe.await_args_list] == [
+            ("fe80::1%en0", 6681),
+            ("192.168.1.50", 6681),
+        ]
+        assert len(listener.units) == 1
+        assert listener.units[0].host == "192.168.1.50"
+
+    @pytest.mark.asyncio
+    async def test_resolve_all_addresses_unreachable_marks_failed_for_retry(self):
+        """Regression #76: an all-addresses-unreachable probe is retried on Updated."""
+        listener = ICDiscoveryListener()
+        listener.async_on_service_state_change(
+            zeroconf=MagicMock(),
+            service_type=HTTP_TYPE,
+            name=PENTAIR_NAME,
+            state_change=ServiceStateChange.Added,
+        )
+        zc, service_type, name, generation = await asyncio.wait_for(
+            listener.async_get_candidate(), 1.0
+        )
+
+        info = MagicMock()
+        info.name = PENTAIR_NAME
+        info.port = 6680
+        info.properties = {}
+        info.async_request = AsyncMock(return_value=True)
+        info.parsed_scoped_addresses.return_value = ["fe80::1%en0", "192.168.1.50"]
+
+        with (
+            patch("pyintellicenter.discovery.AsyncServiceInfo", return_value=info),
+            patch(
+                "pyintellicenter.discovery._check_tcp_port",
+                new_callable=AsyncMock,
+                return_value=False,
+            ) as mock_probe,
+        ):
+            await _resolve_service(listener, zc, service_type, name, generation)
+
+        assert mock_probe.await_count == 2
+        assert listener.units == []
+
+        # The TCP probe failure is transient: an Updated event must retry.
+        listener.async_on_service_state_change(
+            zeroconf=MagicMock(),
+            service_type=HTTP_TYPE,
+            name=PENTAIR_NAME,
+            state_change=ServiceStateChange.Updated,
+        )
+        assert listener._candidates.qsize() == 1
+
+    @pytest.mark.asyncio
+    async def test_late_resolution_does_not_resurrect_removed_service(self):
+        """Regression #76: a Removed service must not be re-added by a late resolution."""
+        listener = ICDiscoveryListener()
+        listener.async_on_service_state_change(
+            zeroconf=MagicMock(),
+            service_type=HTTP_TYPE,
+            name=PENTAIR_NAME,
+            state_change=ServiceStateChange.Added,
+        )
+        zc, service_type, name, generation = await asyncio.wait_for(
+            listener.async_get_candidate(), 1.0
+        )
+
+        release = asyncio.Event()
+
+        class SlowServiceInfo:
+            def __init__(self, service_type, name):
+                self.type = service_type
+                self.name = name
+                self.port = 6680
+                self.properties = {}
+
+            async def async_request(self, zc, timeout_ms):
+                await release.wait()
+                return True
+
+            def parsed_scoped_addresses(self):
+                return ["192.168.1.50"]
+
+        with (
+            patch("pyintellicenter.discovery.AsyncServiceInfo", SlowServiceInfo),
+            patch(
+                "pyintellicenter.discovery._check_tcp_port",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+        ):
+            resolver = asyncio.create_task(
+                _resolve_service(listener, zc, service_type, name, generation)
             )
+            await asyncio.sleep(0)
+            # Service goes away while its resolution is still in flight
+            listener.async_on_service_state_change(
+                zeroconf=MagicMock(),
+                service_type=HTTP_TYPE,
+                name=PENTAIR_NAME,
+                state_change=ServiceStateChange.Removed,
+            )
+            release.set()
+            await asyncio.wait_for(resolver, 1.0)
 
         assert listener.units == []
 
@@ -676,6 +968,230 @@ class TestDiscoverIntellicenterUnits:
 
         assert resolved == [PENTAIR_NAME]
         assert len(units) == 1
+
+    @pytest.mark.asyncio
+    async def test_discover_updated_event_retries_failed_resolution(self):
+        """Regression #76: an Updated event after a failed resolution retries and succeeds."""
+        created = []
+        attempts = []
+        first_attempt_done = asyncio.Event()
+
+        class FlakyServiceInfo:
+            def __init__(self, service_type, name):
+                self.type = service_type
+                self.name = name
+                self.port = 6680
+                self.properties = {}
+
+            async def async_request(self, zc, timeout_ms):
+                attempts.append(self.name)
+                if len(attempts) == 1:
+                    # First resolution fails (e.g. incomplete records)
+                    first_attempt_done.set()
+                    return False
+                return True
+
+            def parsed_scoped_addresses(self):
+                return ["192.168.1.50"]
+
+        with (
+            patch(
+                "pyintellicenter.discovery.AsyncServiceBrowser",
+                side_effect=_browser_factory(created),
+            ),
+            patch("pyintellicenter.discovery.AsyncServiceInfo", FlakyServiceInfo),
+            patch(
+                "pyintellicenter.discovery._check_tcp_port",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+        ):
+            task = asyncio.create_task(
+                discover_intellicenter_units(discovery_timeout=0.5, zeroconf=MagicMock())
+            )
+            await asyncio.sleep(0)
+            assert created
+            created[0].fire(HTTP_TYPE, PENTAIR_NAME, ServiceStateChange.Added)
+            await asyncio.wait_for(first_attempt_done.wait(), 1.0)
+            await asyncio.sleep(0)
+            # The record update arrives after the failed resolution
+            created[0].fire(HTTP_TYPE, PENTAIR_NAME, ServiceStateChange.Updated)
+            units = await task
+
+        assert attempts == [PENTAIR_NAME, PENTAIR_NAME]
+        assert len(units) == 1
+        assert units[0].name == PENTAIR_NAME
+
+    @pytest.mark.asyncio
+    async def test_worker_pool_bounds_concurrent_tasks(self):
+        """Regression #76: a noisy network must not accumulate unbounded tasks.
+
+        Candidates are drained by a fixed pool of workers instead of one task
+        per queued service; excess candidates stay in the queue.
+        """
+        listener = ICDiscoveryListener()
+        started = []
+
+        class BlockingServiceInfo:
+            def __init__(self, service_type, name):
+                self.type = service_type
+                self.name = name
+                self.port = 6680
+                self.properties = {}
+
+            async def async_request(self, zc, timeout_ms):
+                started.append(self.name)
+                await asyncio.Event().wait()  # never resolves
+                return False
+
+            def parsed_scoped_addresses(self):
+                return []
+
+        total = _RESOLUTION_WORKERS * 5
+        with patch("pyintellicenter.discovery.AsyncServiceInfo", BlockingServiceInfo):
+            for index in range(total):
+                listener.async_on_service_state_change(
+                    zeroconf=MagicMock(),
+                    service_type=HTTP_TYPE,
+                    name=f"Noisy {index}._http._tcp.local.",
+                    state_change=ServiceStateChange.Added,
+                )
+            task = asyncio.create_task(_process_candidates(listener, 0.2))
+            for _ in range(10):
+                await asyncio.sleep(0)
+
+            # Only the worker pool is in flight; the rest remain queued.
+            assert len(started) == _RESOLUTION_WORKERS
+            assert listener._candidates.qsize() == total - _RESOLUTION_WORKERS
+            resolution_tasks = [
+                running
+                for running in asyncio.all_tasks()
+                if "_resolve" in getattr(running.get_coro(), "__qualname__", "")
+                or "_resolution_worker" in getattr(running.get_coro(), "__qualname__", "")
+            ]
+            assert len(resolution_tasks) == _RESOLUTION_WORKERS
+
+            await task
+
+    @pytest.mark.asyncio
+    async def test_discover_update_during_inflight_failed_resolution_retries(self):
+        """Regression (PR #79 review): Added -> resolving -> Updated -> fail retries.
+
+        The Updated event lands while the first (ultimately failing)
+        resolution attempt is still in flight; the retry must replay it.
+        """
+        created = []
+        attempts = []
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+
+        class InterleavedServiceInfo:
+            def __init__(self, service_type, name):
+                self.type = service_type
+                self.name = name
+                self.port = 6680
+                self.properties = {}
+
+            async def async_request(self, zc, timeout_ms):
+                attempts.append(self.name)
+                if len(attempts) == 1:
+                    first_started.set()
+                    await release_first.wait()
+                    return False
+                return True
+
+            def parsed_scoped_addresses(self):
+                return ["192.168.1.50"]
+
+        with (
+            patch(
+                "pyintellicenter.discovery.AsyncServiceBrowser",
+                side_effect=_browser_factory(created),
+            ),
+            patch("pyintellicenter.discovery.AsyncServiceInfo", InterleavedServiceInfo),
+            patch(
+                "pyintellicenter.discovery._check_tcp_port",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+        ):
+            task = asyncio.create_task(
+                discover_intellicenter_units(discovery_timeout=0.5, zeroconf=MagicMock())
+            )
+            await asyncio.sleep(0)
+            assert created
+            created[0].fire(HTTP_TYPE, PENTAIR_NAME, ServiceStateChange.Added)
+            await asyncio.wait_for(first_started.wait(), 1.0)
+            # Update arrives while the first attempt is still resolving
+            created[0].fire(HTTP_TYPE, PENTAIR_NAME, ServiceStateChange.Updated)
+            release_first.set()
+            units = await task
+
+        assert attempts == [PENTAIR_NAME, PENTAIR_NAME]
+        assert len(units) == 1
+        assert units[0].name == PENTAIR_NAME
+
+    @pytest.mark.asyncio
+    async def test_stale_candidates_discarded_before_resolution_work(self):
+        """Regression (PR #79 review): remove/re-add churn must not resolve stale candidates.
+
+        Every superseded candidate is discarded at dequeue time, before any
+        record request or TCP probe, so churn cannot burn the worker pool
+        and the discovery window on wasted network work.
+        """
+        listener = ICDiscoveryListener()
+        requested = []
+
+        class CountingServiceInfo:
+            def __init__(self, service_type, name):
+                self.type = service_type
+                self.name = name
+                self.port = 6680
+                self.properties = {}
+
+            async def async_request(self, zc, timeout_ms):
+                requested.append(self.name)
+                return True
+
+            def parsed_scoped_addresses(self):
+                return ["192.168.1.50"]
+
+        # Churn: repeated add/remove cycles queue candidates that are all
+        # invalidated by the next Removed; only the final Added is current.
+        for _ in range(20):
+            listener.async_on_service_state_change(
+                zeroconf=MagicMock(),
+                service_type=HTTP_TYPE,
+                name=PENTAIR_NAME,
+                state_change=ServiceStateChange.Added,
+            )
+            listener.async_on_service_state_change(
+                zeroconf=MagicMock(),
+                service_type=HTTP_TYPE,
+                name=PENTAIR_NAME,
+                state_change=ServiceStateChange.Removed,
+            )
+        listener.async_on_service_state_change(
+            zeroconf=MagicMock(),
+            service_type=HTTP_TYPE,
+            name=PENTAIR_NAME,
+            state_change=ServiceStateChange.Added,
+        )
+        assert listener._candidates.qsize() == 21
+
+        with (
+            patch("pyintellicenter.discovery.AsyncServiceInfo", CountingServiceInfo),
+            patch(
+                "pyintellicenter.discovery._check_tcp_port",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+        ):
+            await _process_candidates(listener, 0.2)
+
+        # Only the one current candidate performed resolution work.
+        assert requested == [PENTAIR_NAME]
+        assert len(listener.units) == 1
 
 
 class TestFindUnitByName:
