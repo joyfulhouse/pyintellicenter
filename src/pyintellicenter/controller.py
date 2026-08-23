@@ -895,21 +895,21 @@ class ICModelController(
             # again, so this snapshot is the only signal that an object is
             # gone. Pruning first keeps ghosts out of the tracking queries.
             removed = self._model.reconcile(all_objects)
-            self._model.add_objects(all_objects)
-            _LOGGER.info("Model contains %d objects", self._model.num_objects)
+            ingested = self._model.add_objects(all_objects)
 
-            # Partial-snapshot visibility: after reconcile the model holds
-            # only objects present in the snapshot, so a count mismatch means
-            # entries were skipped (missing or untracked OBJTYP - e.g. the
-            # firmware 3.008+ pruned-away-params artifacts).
-            if len(all_objects) > self._model.num_objects:
-                _LOGGER.warning(
-                    "Object snapshot contained %d entries but only %d were loaded "
-                    "into the model (entries with a missing or untracked OBJTYP "
-                    "are skipped)",
-                    len(all_objects),
-                    self._model.num_objects,
-                )
+            # Partial-snapshot visibility comes from the ingest result:
+            # add_objects() returns the ingested objnams and itself emits one
+            # WARNING for malformed entries, while expected skips (missing or
+            # untracked OBJTYP, e.g. the firmware 3.008+ pruned-params
+            # artifacts like _FDR) deliberately stay DEBUG-only. The
+            # controller reports the counts at INFO rather than duplicating
+            # or escalating the model's diagnostics.
+            _LOGGER.info(
+                "Model contains %d objects (%d of %d snapshot entries ingested)",
+                self._model.num_objects,
+                len(ingested),
+                len(all_objects),
+            )
 
             if removed:
                 _LOGGER.info(
@@ -1538,9 +1538,10 @@ class ICConnectionHandler:
         # Serialize with an in-flight teardown from a previous stop(): the old
         # controller.stop() must fully release its connection before a new one
         # is opened, or the resumed teardown could disown the fresh socket.
-        if self._stop_task is not None:
-            await asyncio.wait({self._stop_task})
-            self._stop_task = None
+        # _finish_stop_task() awaits the teardown's ACTUAL completion - a
+        # teardown that was cancelled mid-flight is re-run, never treated as
+        # done - so a reconnect can never race a half-closed connection.
+        await self._finish_stop_task()
         self._stopped = False
 
         attempt = self._start_attempt
@@ -1600,11 +1601,53 @@ class ICConnectionHandler:
 
         Async counterpart of :meth:`stop` for consumers that must not proceed
         until the connection is completely closed.
+
+        The teardown is shielded from caller cancellation: cancelling an
+        ``astop()`` caller re-raises ``CancelledError`` to that caller while
+        the teardown task keeps running in the background, and the task
+        reference is retained so a later :meth:`start` or :meth:`astop` waits
+        for its actual completion.
         """
         self.stop()
-        if self._stop_task is not None:
-            await self._stop_task
-            self._stop_task = None
+        await self._finish_stop_task()
+
+    async def _finish_stop_task(self) -> None:
+        """Wait for the tracked controller teardown to actually complete.
+
+        The teardown task is awaited through ``asyncio.shield`` so cancelling
+        the *caller* cannot cancel the teardown mid-flight (which would leave
+        the connection detached but the socket possibly not closed). On caller
+        cancellation the ``CancelledError`` propagates while the shielded task
+        runs on, and ``self._stop_task`` is retained so the next
+        ``start()``/``astop()`` awaits its real completion.
+
+        The old task's outcome is inspected rather than assumed: a teardown
+        task that was itself cancelled (e.g. at loop shutdown, or by a
+        pre-shield caller) is re-run, because completion of the wait is not
+        completion of the teardown. Unexpected teardown failures propagate
+        (``_stop_controller`` already contains ordinary exceptions, so only
+        ``BaseException`` escapes here).
+        """
+        while (stop_task := self._stop_task) is not None:
+            try:
+                await asyncio.shield(stop_task)
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    # The caller was cancelled: propagate, keeping the
+                    # shielded teardown running and its reference retained.
+                    raise
+                if stop_task.cancelled():
+                    # The teardown task itself was cancelled before finishing:
+                    # the controller may still hold a half-closed connection,
+                    # so run the teardown again and await the fresh task.
+                    _LOGGER.warning("Controller teardown was cancelled; re-running it")
+                    if self._stop_task is stop_task:
+                        self._stop_task = asyncio.create_task(self._stop_controller())
+                    continue
+                raise
+            if self._stop_task is stop_task:
+                self._stop_task = None
 
     async def _stop_controller(self) -> None:
         """Stop the controller asynchronously."""

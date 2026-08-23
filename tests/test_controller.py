@@ -2959,6 +2959,108 @@ class TestHandlerLifecycle:
         assert order == ["stopped", "started"]
 
     @pytest.mark.asyncio
+    async def test_cancelled_astop_still_completes_teardown(self, handler, mock_controller):
+        """Cancelling an astop() caller must not cancel the teardown itself.
+
+        Previously astop() awaited _stop_task directly, so cancelling the
+        astop() caller cancelled the teardown mid-flight - with the connection
+        already detached but the socket possibly never closed.
+        """
+        release = asyncio.Event()
+        completed = asyncio.Event()
+
+        async def slow_stop():
+            await release.wait()
+            completed.set()
+
+        mock_controller.stop = slow_stop
+
+        astop_task = asyncio.create_task(handler.astop())
+        await asyncio.sleep(0.01)  # astop is now awaiting the teardown
+        stop_task = handler._stop_task
+        assert stop_task is not None
+
+        astop_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await astop_task
+
+        # The shielded teardown task is still alive, and its reference is
+        # retained for a later start()/astop() to await.
+        assert not stop_task.cancelled()
+        assert not stop_task.done()
+        assert handler._stop_task is stop_task
+
+        # The teardown still completes in the background.
+        release.set()
+        await asyncio.wait_for(stop_task, 1)
+        assert completed.is_set()
+
+    @pytest.mark.asyncio
+    async def test_start_after_cancelled_astop_waits_for_real_teardown(
+        self, handler, mock_controller
+    ):
+        """start() after a cancelled astop() awaits the ACTUAL teardown end.
+
+        The still-running (shielded) teardown must fully release the old
+        connection before start() opens a new one.
+        """
+        release = asyncio.Event()
+        order: list[str] = []
+
+        async def slow_stop():
+            await release.wait()
+            order.append("stopped")
+
+        async def tracked_start():
+            order.append("started")
+
+        mock_controller.stop = slow_stop
+        mock_controller.start = tracked_start
+
+        astop_task = asyncio.create_task(handler.astop())
+        await asyncio.sleep(0.01)
+        astop_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await astop_task
+
+        restart = asyncio.create_task(handler.start())
+        await asyncio.sleep(0.01)
+        # start() must still be waiting on the surviving teardown.
+        assert not restart.done()
+        assert order == []
+
+        release.set()
+        await asyncio.wait_for(restart, 1)
+        assert order == ["stopped", "started"]
+
+    @pytest.mark.asyncio
+    async def test_start_reruns_teardown_cancelled_mid_flight(self, handler, mock_controller):
+        """A teardown task cancelled before finishing is re-run by start().
+
+        Completion of the wait on the old stop task is not completion of the
+        teardown: a cancelled/failed outcome must be inspected and the
+        teardown re-run before a new connection is opened.
+        """
+        handler.stop()
+        stop_task = handler._stop_task
+        assert stop_task is not None
+        # Cancel the teardown before it ever runs (e.g. loop shutdown race).
+        stop_task.cancel()
+        await asyncio.gather(stop_task, return_exceptions=True)
+        assert stop_task.cancelled()
+        mock_controller.stop.assert_not_awaited()
+
+        await handler.start()
+
+        # start() re-ran the teardown to completion before connecting.
+        mock_controller.stop.assert_awaited_once()
+        mock_controller.start.assert_awaited_once()
+        assert handler._stop_task is None
+        assert handler.connected is True
+
+        await handler.astop()
+
+    @pytest.mark.asyncio
     async def test_connected_property_lifecycle(self, handler, mock_controller):
         """connected reflects the debounced handler-level availability."""
         assert handler.connected is False
@@ -3661,12 +3763,14 @@ class TestStartReconcile:
         await controller.stop()
 
     @pytest.mark.asyncio
-    async def test_partial_snapshot_logs_warning_with_counts(self, caplog):
-        """A snapshot with skipped entries logs a WARNING with both counts.
+    async def test_partial_snapshot_counts_logged_at_info_not_warning(self, caplog):
+        """Expected snapshot skips surface as INFO counts, never a WARNING.
 
-        Entries without OBJTYP (firmware 3.008+ pruning artifacts) or with an
-        untracked type are silently skipped by the model; the controller must
-        surface the delta so a partially-loaded model is visible.
+        Entries without OBJTYP (firmware 3.008+ pruning artifacts like _FDR)
+        or with an untracked type are deliberately DEBUG-only in
+        PoolModel.add_objects() (#78); the controller must not double-report
+        or escalate them. It reports the ingested/snapshot counts at INFO
+        based on the add_objects() return value.
         """
         model = PoolModel()
         controller = ICModelController("192.168.1.100", model, 6681)
@@ -3676,9 +3780,9 @@ class TestStartReconcile:
                     "objnam": "POOL1",
                     "params": {"OBJTYP": "BODY", "SUBTYP": "POOL", "SNAME": "Pool"},
                 },
-                # Pruned-away params (no OBJTYP): skipped by add_objects.
+                # Pruned-away params (no OBJTYP): expected, skipped by add_objects.
                 {"objnam": "_FDR", "params": {}},
-                # Untracked object type: skipped by add_objects.
+                # Untracked object type: expected, skipped by add_objects.
                 {"objnam": "X001", "params": {"OBJTYP": "NOTATYPE", "SNAME": "Mystery"}},
             ]
         }
@@ -3687,23 +3791,33 @@ class TestStartReconcile:
 
         with (
             patch("pyintellicenter.controller.ICConnection", return_value=connection),
-            caplog.at_level(logging.WARNING, logger="pyintellicenter.controller"),
+            caplog.at_level(logging.INFO, logger="pyintellicenter"),
         ):
             await controller.start()
 
         assert model.num_objects == 1
-        warnings = [
+        # No WARNING from controller or model for these expected skips.
+        assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+        # The controller INFO line carries the ingested/snapshot counts.
+        info_counts = [
             r
             for r in caplog.records
-            if r.levelno == logging.WARNING and "3" in r.getMessage() and "1" in r.getMessage()
+            if r.name == "pyintellicenter.controller"
+            and r.levelno == logging.INFO
+            and "1 of 3 snapshot entries ingested" in r.getMessage()
         ]
-        assert warnings, "expected a WARNING with the snapshot (3) and loaded (1) counts"
+        assert info_counts, "expected an INFO log with the ingested (1) and snapshot (3) counts"
 
         await controller.stop()
 
     @pytest.mark.asyncio
-    async def test_full_snapshot_no_removals_no_warning(self, caplog):
-        """A clean, fully-loaded snapshot produces no removals and no WARNING."""
+    async def test_malformed_snapshot_entry_warns_once_via_model(self, caplog):
+        """A malformed entry is warned about by the model only - no duplicate.
+
+        PoolModel.add_objects() (#78) already emits one WARNING with per-call
+        counts for malformed entries; the controller must not add a second,
+        conflicting warning of its own.
+        """
         model = PoolModel()
         controller = ICModelController("192.168.1.100", model, 6681)
         snapshot = {
@@ -3712,8 +3826,39 @@ class TestStartReconcile:
                     "objnam": "POOL1",
                     "params": {"OBJTYP": "BODY", "SUBTYP": "POOL", "SNAME": "Pool"},
                 },
+                # Malformed: params is not a dict.
+                {"objnam": "BROKEN", "params": "nope"},
             ]
         }
+        batches: list[list[dict]] = []
+        connection = self._scripted_connection(snapshot, batches)
+
+        with (
+            patch("pyintellicenter.controller.ICConnection", return_value=connection),
+            caplog.at_level(logging.WARNING, logger="pyintellicenter"),
+        ):
+            await controller.start()
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1, "expected exactly one WARNING (from the model)"
+        assert warnings[0].name == "pyintellicenter.model"
+
+        await controller.stop()
+
+    @pytest.mark.asyncio
+    async def test_full_snapshot_no_removals_no_warning(self, caplog):
+        """A clean snapshot produces no removals and no WARNING.
+
+        Includes a duplicate valid entry: duplicates must not be treated as a
+        partial snapshot (the old cardinality check false-positived on them).
+        """
+        model = PoolModel()
+        controller = ICModelController("192.168.1.100", model, 6681)
+        pool_entry = {
+            "objnam": "POOL1",
+            "params": {"OBJTYP": "BODY", "SUBTYP": "POOL", "SNAME": "Pool"},
+        }
+        snapshot = {"objects": [pool_entry, dict(pool_entry)]}
         batches: list[list[dict]] = []
         connection = self._scripted_connection(snapshot, batches)
 
@@ -3722,15 +3867,15 @@ class TestStartReconcile:
 
         with (
             patch("pyintellicenter.controller.ICConnection", return_value=connection),
-            caplog.at_level(logging.WARNING, logger="pyintellicenter.controller"),
+            caplog.at_level(logging.WARNING, logger="pyintellicenter"),
         ):
             await controller.start()
             await controller.start()  # reconnect with an identical snapshot
 
+        assert model.num_objects == 1
         # No removal payloads: no callback entry ever maps an objnam to None.
         assert all(value is not None for updates in received for value in updates.values())
-        partial_warnings = [r for r in caplog.records if "snapshot" in r.getMessage().casefold()]
-        assert partial_warnings == []
+        assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
 
         await controller.stop()
 

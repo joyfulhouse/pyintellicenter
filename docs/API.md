@@ -227,8 +227,13 @@ Attribute-change entries passed to the callback are always non-`None` dicts;
 `None` is reserved for removals. The callback payload is typed
 `Mapping[str, dict[str, Any] | None]`.
 
-If the snapshot contains entries the model cannot load (a missing or untracked
-`OBJTYP`), a WARNING is logged with the snapshot and loaded object counts.
+Partial snapshots are surfaced by the model layer: `PoolModel.add_objects()`
+returns the ingested objnams and logs one WARNING when a snapshot contains
+malformed entries, while expected skips (a missing or untracked `OBJTYP`,
+such as the firmware 3.008+ `_FDR` artifacts) are logged at DEBUG only. The
+controller reports the ingested/snapshot counts in its INFO startup line
+(`Model contains N objects (I of S snapshot entries ingested)`) instead of
+emitting a separate warning.
 
 For compatibility, a legacy standalone `CIRCGRP` object with a direct
 space-separated `CIRCUIT` list can still be passed to
@@ -301,7 +306,11 @@ Methods and properties:
   `None` (it is not awaitable) and is safe to call from callbacks.
 - `await handler.astop()` — stops the handler and waits for the full
   controller teardown to complete. Use this where shutdown must be finished
-  before proceeding (e.g. Home Assistant's `async_unload_entry`).
+  before proceeding (e.g. Home Assistant's `async_unload_entry`). The
+  teardown is shielded from caller cancellation: cancelling an `astop()`
+  caller raises `CancelledError` to that caller while the teardown keeps
+  running in the background, and a later `start()`/`astop()` waits for its
+  actual completion.
 - `handler.connected` — `True` while the handler considers the connection
   established (the debounced handler-level view): it turns `True` after a
   successful connect or reconnect and `False` on disconnect or

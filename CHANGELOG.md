@@ -8,7 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 This release integrates the adversarial-review fix wave covering issues
-#53–#65 (PRs #69–#74) plus the integration pass (#68).
+#53–#65 (PRs #69–#74), the model ingest follow-up (#78) and the integration
+pass (#68).
 
 ### Added
 
@@ -29,14 +30,23 @@ This release integrates the adversarial-review fix wave covering issues
   `async_unload_entry`). `stop()` remains the synchronous best-effort form:
   it now runs the teardown in a *tracked* background task (previously the
   fire-and-forget task could be garbage-collected before running) and the
-  handler can be started again after a stop.
+  handler can be started again after a stop. The teardown is shielded from
+  caller cancellation: cancelling an `astop()` caller propagates
+  `CancelledError` while the teardown keeps running, its task reference is
+  retained, and a later `start()`/`astop()` awaits the teardown's *actual*
+  completion - a teardown cancelled mid-flight is re-run rather than treated
+  as finished, so a restart can never reconnect over a half-closed
+  connection (#68).
 - `ICConnectionHandler.connected` (#61): debounced handler-level availability
   property (`True` after a successful connect/reconnect, `False` on
   disconnect or stop).
-- Partial-snapshot visibility (#68): if the connect snapshot contains entries
-  the model cannot load (missing or untracked `OBJTYP`), a WARNING is logged
-  with the snapshot and loaded object counts instead of silently loading a
-  partial model.
+- Partial-snapshot visibility (#68, #78): `PoolModel.add_objects()` now
+  returns the ingested objnams and logs one WARNING when a snapshot contains
+  malformed entries (expected skips - a missing or untracked `OBJTYP`, such
+  as the firmware 3.008+ `_FDR` artifacts - stay DEBUG-only), and
+  `ICModelController.start()` reports the ingested/snapshot counts in its
+  INFO startup line, so a partially-loaded model is visible without noisy or
+  duplicated warnings.
 - `PoolModel.__contains__` (#56): `"OBJNAM" in model` now works (it
   previously iterated `PoolObject` values and always returned `False`).
 - Discovery: `find_unit_by_name()` and `find_unit_by_host()` accept a
