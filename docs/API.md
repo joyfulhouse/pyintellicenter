@@ -26,6 +26,7 @@ conn = ICConnection(
     response_timeout=30.0,  # Request timeout in seconds
     keepalive_interval=90.0,  # Keepalive interval in seconds
     notification_queue_size=100,  # Max queued notifications
+    notification_batching=True,  # Merge queued notification bursts (see below)
 )
 
 # Usage as context manager
@@ -41,6 +42,26 @@ await conn.disconnect()
 conn.set_notification_callback(lambda msg: print(msg))
 conn.set_disconnect_callback(lambda exc: print(f"Disconnected: {exc}"))
 ```
+
+### Notification batching
+
+The panel emits NotifyList bursts (e.g. a scene change produces several
+back-to-back frames). With `notification_batching=True` (the default), any
+messages already queued behind the one just received are drained — at most
+25 per callback invocation, so a lone message is still delivered immediately —
+and merged into a single synthetic NotifyList. Its `objectList` is coalesced
+per `objnam`: an object updated by several frames of the burst contributes one
+entry whose params are folded in arrival order (newest value wins per
+attribute), so the merged frame yields exactly the same final model state as
+per-message delivery — and the changed-attributes callback payload carries
+every attribute the burst touched — with one callback invocation per burst
+instead of one per message. Set `notification_batching=False` to restore
+strict per-message delivery.
+
+On notification-queue overflow, the oldest queued frame is no longer dropped
+wholesale: its `objectList` entries are coalesced by `objnam` into the
+incoming frame (newest attribute values win), so attribute deltas from
+overflowed partial frames are not silently lost.
 
 ## ICModelController
 

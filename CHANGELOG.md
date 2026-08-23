@@ -13,6 +13,22 @@ pass (#68).
 
 ### Added
 
+- **Notification burst batching and overflow coalescing** (#67):
+  `ICConnection` (and both transports) gain `notification_batching`
+  (default `True`). The notification consumer now drains messages already
+  queued behind the one it just received (bounded at 25 per invocation) and
+  delivers the burst as one merged synthetic NotifyList — `objectList`
+  entries are coalesced per `objnam` with params folded in arrival order
+  (newest value wins per attribute), so the model reaches the same final
+  state and the changed-attributes callback payload keeps every attribute
+  the burst touched, with one callback per burst instead of
+  one per message; a lone message is still dispatched immediately and
+  as-is. Set `notification_batching=False` for strict per-message delivery.
+  On queue overflow, the oldest frame's `objectList` is now coalesced by
+  `objnam` into the incoming frame (newest attribute values win) instead of
+  being dropped wholesale, so attribute deltas from overflowed partial
+  frames are no longer silently lost; the rate-limited overflow warning and
+  `task_done` accounting are unchanged.
 - **Ghost-equipment fix, end-to-end** (#56, #68): `PoolModel` gains
   `remove_object(objnam)` and `reconcile(obj_list)` (which prunes objects
   absent from an authoritative snapshot and returns the removed objnams), and

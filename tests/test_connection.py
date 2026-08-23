@@ -9,7 +9,13 @@ import orjson
 import pytest
 
 import pyintellicenter.connection as connection_module
-from pyintellicenter import ICConnection, ICConnectionError, ICResponseError, ICTimeoutError
+from pyintellicenter import (
+    ICConnection,
+    ICConnectionError,
+    ICResponseError,
+    ICTimeoutError,
+    PoolModel,
+)
 from pyintellicenter.connection import (
     CONNECTION_TIMEOUT,
     DEFAULT_PORT,
@@ -156,13 +162,18 @@ class TestICProtocol:
 
     @pytest.mark.asyncio
     async def test_data_received_multiple_messages(self):
-        """Test data_received handles multiple messages in one buffer."""
+        """Test data_received handles multiple messages in one buffer.
+
+        Batching is disabled: this test asserts framing (two frames parsed),
+        so per-message delivery keeps the assertion direct. Batched delivery
+        of a burst is covered by TestNotificationBurstBatching.
+        """
         notifications = []
 
         def on_notification(msg):
             notifications.append(msg)
 
-        protocol = ICProtocol(notification_callback=on_notification)
+        protocol = ICProtocol(notification_callback=on_notification, notification_batching=False)
         mock_transport = MagicMock()
         protocol.connection_made(mock_transport)
 
@@ -1724,9 +1735,12 @@ class TestTcpFraming:
     """Issue #60: cursor-based framing must stay correct across chunk boundaries."""
 
     @staticmethod
-    def _protocol_with_notifications():
+    def _protocol_with_notifications(batching=True):
         notifications = []
-        protocol = ICProtocol(notification_callback=notifications.append)
+        protocol = ICProtocol(
+            notification_callback=notifications.append,
+            notification_batching=batching,
+        )
         protocol.connection_made(MagicMock())
         return protocol, notifications
 
@@ -1772,7 +1786,9 @@ class TestTcpFraming:
 
     @pytest.mark.asyncio
     async def test_batched_messages_with_trailing_partial(self):
-        protocol, notifications = self._protocol_with_notifications()
+        # Batching disabled: this test asserts framing boundaries via
+        # per-message delivery; burst merging is covered elsewhere.
+        protocol, notifications = self._protocol_with_notifications(batching=False)
         partial = b'{"command":"NotifyList","objectList":[{"objnam":"P3"'
 
         protocol.data_received(
@@ -2102,3 +2118,338 @@ class TestRepeatedSyncClose:
         await asyncio.wait_for(acloser, timeout=1.0)
         assert ws.close_calls == 1
         assert ws.close_awaited is True
+
+
+class TestNotificationBurstBatching:
+    """Issue #67: bursts already queued are merged into one callback call."""
+
+    @staticmethod
+    def _notify_msg(objnam, params=None):
+        entry = {"objnam": objnam}
+        if params is not None:
+            entry["params"] = params
+        return {"command": "NotifyList", "objectList": [entry]}
+
+    @pytest.mark.asyncio
+    async def test_burst_is_delivered_as_one_merged_callback(self):
+        """A held consumer wakes to a full burst and dispatches it once."""
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        payloads = []
+
+        async def callback(msg):
+            payloads.append(msg)
+            entered.set()
+            await release.wait()
+
+        protocol = ICProtocol(notification_callback=callback)
+        protocol.connection_made(MagicMock())
+        queue = protocol._notification_queue
+        assert queue is not None
+
+        protocol._handle_notification(self._notify_msg("HELD"))
+        await asyncio.wait_for(entered.wait(), timeout=1.0)
+
+        for objnam in ("P1", "P2", "P3"):
+            protocol._handle_notification(self._notify_msg(objnam, {"STATUS": objnam}))
+
+        release.set()
+        await asyncio.wait_for(queue.join(), timeout=1.0)
+
+        assert len(payloads) == 2
+        merged = payloads[1]
+        assert merged["command"] == "NotifyList"
+        # Order-preserving concatenation: last-write-wins downstream sees
+        # the same final state as per-message delivery.
+        assert [e["objnam"] for e in merged["objectList"]] == ["P1", "P2", "P3"]
+        protocol.connection_lost(None)
+
+    @pytest.mark.asyncio
+    async def test_single_message_dispatched_immediately_and_unwrapped(self):
+        """A lone message is delivered as-is (identity preserved), at once."""
+        payloads = []
+        protocol = ICProtocol(notification_callback=payloads.append)
+        protocol.connection_made(MagicMock())
+
+        message = self._notify_msg("PUMP1", {"RPM": "2500"})
+        protocol._handle_notification(message)
+        await asyncio.sleep(0)
+
+        assert payloads == [message]
+        assert payloads[0] is message
+        protocol.connection_lost(None)
+
+    @pytest.mark.asyncio
+    async def test_batch_bound_is_respected(self):
+        """A drain never exceeds NOTIFICATION_BATCH_MAX messages."""
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        sizes = []
+
+        async def callback(msg):
+            sizes.append(len(msg["objectList"]))
+            entered.set()
+            await release.wait()
+
+        protocol = ICProtocol(
+            notification_callback=callback,
+            notification_queue_size=100,
+        )
+        protocol.connection_made(MagicMock())
+        queue = protocol._notification_queue
+        assert queue is not None
+
+        protocol._handle_notification(self._notify_msg("HELD"))
+        await asyncio.wait_for(entered.wait(), timeout=1.0)
+
+        total = connection_module.NOTIFICATION_BATCH_MAX + 5
+        for i in range(total):
+            protocol._handle_notification(self._notify_msg(f"OBJ{i:02d}"))
+
+        release.set()
+        await asyncio.wait_for(queue.join(), timeout=1.0)
+
+        assert sizes == [1, connection_module.NOTIFICATION_BATCH_MAX, 5]
+        protocol.connection_lost(None)
+
+    @pytest.mark.asyncio
+    async def test_batching_opt_out_delivers_per_message(self):
+        """notification_batching=False keeps the per-message contract."""
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        payloads = []
+
+        async def callback(msg):
+            payloads.append(msg)
+            entered.set()
+            await release.wait()
+
+        protocol = ICProtocol(notification_callback=callback, notification_batching=False)
+        protocol.connection_made(MagicMock())
+        queue = protocol._notification_queue
+        assert queue is not None
+
+        protocol._handle_notification(self._notify_msg("HELD"))
+        await asyncio.wait_for(entered.wait(), timeout=1.0)
+        protocol._handle_notification(self._notify_msg("P1"))
+        protocol._handle_notification(self._notify_msg("P2"))
+
+        release.set()
+        await asyncio.wait_for(queue.join(), timeout=1.0)
+
+        assert [m["objectList"][0]["objnam"] for m in payloads] == ["HELD", "P1", "P2"]
+        protocol.connection_lost(None)
+
+    @pytest.mark.asyncio
+    async def test_stop_set_before_drain_never_dispatches(self):
+        """Messages drained after stop get task_done without dispatch."""
+        callback = MagicMock()
+        protocol = ICProtocol(notification_callback=callback)
+        queue = asyncio.Queue()
+        stop = asyncio.Event()
+
+        for objnam in ("S1", "S2", "S3"):
+            queue.put_nowait(self._notify_msg(objnam))
+        stop.set()
+        queue.put_nowait(None)
+
+        task = asyncio.create_task(protocol._notification_consumer(queue, stop))
+        await asyncio.wait_for(task, timeout=1.0)
+        await asyncio.wait_for(queue.join(), timeout=1.0)
+
+        callback.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_sentinel_mid_drain_dispatches_prior_batch_then_exits(self):
+        """The None sentinel ends the batch after dispatching what preceded it."""
+        payloads = []
+        protocol = ICProtocol(notification_callback=payloads.append)
+        queue = asyncio.Queue()
+        stop = asyncio.Event()
+
+        queue.put_nowait(self._notify_msg("A"))
+        queue.put_nowait(self._notify_msg("B"))
+        queue.put_nowait(None)
+        queue.put_nowait(self._notify_msg("NEVER"))
+
+        task = asyncio.create_task(protocol._notification_consumer(queue, stop))
+        # The consumer must exit at the sentinel, leaving "NEVER" unclaimed.
+        await asyncio.wait_for(task, timeout=1.0)
+
+        assert len(payloads) == 1
+        assert [e["objnam"] for e in payloads[0]["objectList"]] == ["A", "B"]
+        assert queue.qsize() == 1  # "NEVER" was behind the sentinel
+
+    @pytest.mark.asyncio
+    async def test_merge_notification_batch_coalesces_repeated_objnams(self):
+        merged = ICProtocol._merge_notification_batch(
+            [
+                {
+                    "command": "NotifyList",
+                    "objectList": [{"objnam": "A", "params": {"X": "1", "Y": "5"}}],
+                },
+                {"command": "NotifyList", "objectList": "bogus"},
+                {"command": "NotifyList"},
+                {"command": "NotifyList", "objectList": [{"objnam": "B", "params": {"Z": "9"}}]},
+                {"command": "NotifyList", "objectList": [{"objnam": "A", "params": {"X": "2"}}]},
+            ]
+        )
+        assert merged["command"] == "NotifyList"
+        # A repeated objnam appears once, carrying all of its changed
+        # attributes with the newest value winning per attribute:
+        # PoolModel.process_updates replaces the per-objnam callback delta
+        # per entry, so duplicates would silently drop earlier attributes.
+        assert merged["objectList"] == [
+            {"objnam": "A", "params": {"X": "2", "Y": "5"}},
+            {"objnam": "B", "params": {"Z": "9"}},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_burst_with_repeated_objnam_keeps_all_callback_deltas(self):
+        """End-to-end: two frames for one objnam yield one callback whose
+        payload carries BOTH attributes and a correct model state."""
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        payloads = []
+        model = PoolModel()
+        model.add_object("C1", {"OBJTYP": "CIRCUIT", "SNAME": "Spa", "STATUS": "OFF", "TEMP": "70"})
+        deltas = []
+
+        async def callback(msg):
+            payloads.append(msg)
+            if msg is not payloads[0]:  # skip the HELD priming frame
+                deltas.append(model.process_updates(msg["objectList"]))
+            entered.set()
+            await release.wait()
+
+        protocol = ICProtocol(notification_callback=callback)
+        protocol.connection_made(MagicMock())
+        queue = protocol._notification_queue
+        assert queue is not None
+
+        protocol._handle_notification({"command": "NotifyList", "objectList": []})
+        await asyncio.wait_for(entered.wait(), timeout=1.0)
+
+        protocol._handle_notification(
+            {"command": "NotifyList", "objectList": [{"objnam": "C1", "params": {"STATUS": "ON"}}]}
+        )
+        protocol._handle_notification(
+            {"command": "NotifyList", "objectList": [{"objnam": "C1", "params": {"TEMP": "82"}}]}
+        )
+
+        release.set()
+        await asyncio.wait_for(queue.join(), timeout=1.0)
+
+        # One merged callback: C1 appears once with both changed attributes.
+        assert len(payloads) == 2
+        assert payloads[1]["objectList"] == [
+            {"objnam": "C1", "params": {"STATUS": "ON", "TEMP": "82"}}
+        ]
+        # The callback delta from process_updates carries BOTH attributes...
+        assert deltas == [{"C1": {"STATUS": "ON", "TEMP": "82"}}]
+        # ...and the model state is correct.
+        obj = model["C1"]
+        assert obj["STATUS"] == "ON"
+        assert obj["TEMP"] == "82"
+        protocol.connection_lost(None)
+
+
+class TestNotificationOverflowCoalescing:
+    """Issue #67: overflow folds the oldest frame's deltas into its successor."""
+
+    @pytest.mark.asyncio
+    async def test_overflow_preserves_attribute_deltas(self):
+        """Attributes from an overflowed frame survive, newest values win."""
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        payloads = []
+
+        async def callback(msg):
+            payloads.append(msg)
+            entered.set()
+            await release.wait()
+
+        protocol = ICProtocol(notification_callback=callback, notification_queue_size=1)
+        protocol.connection_made(MagicMock())
+        queue = protocol._notification_queue
+        assert queue is not None
+
+        def notify(objnam, params):
+            protocol._handle_notification(
+                {"command": "NotifyList", "objectList": [{"objnam": objnam, "params": params}]}
+            )
+
+        notify("HELD", {})
+        await asyncio.wait_for(entered.wait(), timeout=1.0)
+        notify("B1", {"HTMODE": "1", "TEMP": "80"})  # queued
+        notify("B1", {"TEMP": "82"})  # overflow: coalesced into this frame
+        notify("PMP1", {"RPM": "2500"})  # overflow again
+
+        release.set()
+        await asyncio.wait_for(queue.join(), timeout=1.0)
+
+        assert len(payloads) == 2
+        entries = {e["objnam"]: e["params"] for e in payloads[1]["objectList"]}
+        # HTMODE from the overflowed frame is not lost; TEMP takes the
+        # newest value (last-write-wins).
+        assert entries == {
+            "B1": {"HTMODE": "1", "TEMP": "82"},
+            "PMP1": {"RPM": "2500"},
+        }
+        protocol.connection_lost(None)
+
+    @pytest.mark.asyncio
+    async def test_overflow_join_accounting_remains_exact(self):
+        """queue.join() completes after coalescing drops (no lost task_done)."""
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def callback(_msg):
+            entered.set()
+            await release.wait()
+
+        protocol = ICProtocol(notification_callback=callback, notification_queue_size=1)
+        protocol.connection_made(MagicMock())
+        queue = protocol._notification_queue
+        assert queue is not None
+
+        protocol._handle_notification({"command": "NotifyList", "objectList": []})
+        await asyncio.wait_for(entered.wait(), timeout=1.0)
+        for _ in range(10):
+            protocol._handle_notification({"command": "NotifyList", "objectList": []})
+
+        assert protocol._notification_drops == 9
+        release.set()
+        await asyncio.wait_for(queue.join(), timeout=1.0)
+        protocol.connection_lost(None)
+
+    def test_coalesce_merges_params_and_keeps_newest_first(self):
+        older = {
+            "command": "NotifyList",
+            "objectList": [
+                {"objnam": "B1", "params": {"HTMODE": "1", "TEMP": "80"}},
+                {"objnam": "C1", "params": {"STATUS": "ON"}},
+                "malformed-entry",
+            ],
+        }
+        newer = {
+            "command": "NotifyList",
+            "objectList": [{"objnam": "B1", "params": {"TEMP": "82"}}],
+        }
+        merged = ICProtocol._coalesce_notifications(older, newer)
+
+        assert merged["command"] == "NotifyList"
+        assert merged["objectList"] == [
+            {"objnam": "B1", "params": {"HTMODE": "1", "TEMP": "82"}},
+            {"objnam": "C1", "params": {"STATUS": "ON"}},
+            "malformed-entry",
+        ]
+        # Inputs are not mutated.
+        assert older["objectList"][0]["params"] == {"HTMODE": "1", "TEMP": "80"}
+        assert newer["objectList"][0]["params"] == {"TEMP": "82"}
+
+    def test_coalesce_with_malformed_object_list_keeps_newest(self):
+        older = {"command": "NotifyList", "objectList": "bogus"}
+        newer = {"command": "NotifyList", "objectList": [{"objnam": "A", "params": {}}]}
+        assert ICProtocol._coalesce_notifications(older, newer) is newer
+        assert ICProtocol._coalesce_notifications(newer, older) is older
