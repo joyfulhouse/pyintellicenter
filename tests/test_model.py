@@ -1,7 +1,9 @@
 """Tests for PoolModel and PoolObject classes."""
 
-from collections.abc import KeysView
+from collections.abc import KeysView, Mapping
 from typing import Any
+
+import pytest
 
 from pyintellicenter import (
     BODY_TYPE,
@@ -136,9 +138,9 @@ class TestPoolObject:
         assert STATUS_ATTR in keys
 
     def test_pool_object_properties_property(self, pool_object_light: PoolObject):
-        """Test properties property returns dict."""
+        """Test properties property returns a mapping of the attributes."""
         props = pool_object_light.properties
-        assert isinstance(props, dict)
+        assert isinstance(props, Mapping)
         assert SNAME_ATTR in props
         assert props[SNAME_ATTR] == "Pool Light"
 
@@ -245,9 +247,9 @@ class TestPoolModel:
         assert all(isinstance(obj, PoolObject) for obj in objects)
 
     def test_pool_model_objects_dict(self, pool_model: PoolModel):
-        """Test objects property returns dict."""
+        """Test objects property returns a mapping keyed by objnam."""
         objects_dict = pool_model.objects
-        assert isinstance(objects_dict, dict)
+        assert isinstance(objects_dict, Mapping)
         assert "LIGHT1" in objects_dict
         assert objects_dict["LIGHT1"].objtype == CIRCUIT_TYPE
 
@@ -551,3 +553,225 @@ class TestPoolModel:
         assert model["VALID1"] is not None
         assert model["_FDR"] is None
         assert model["VALID2"] is not None
+
+
+class TestObjtypSubtypChangeTracking:
+    """Regression tests for issue #55: false OBJTYP/SUBTYP change reports."""
+
+    def test_update_with_identical_objtyp_subtyp_reports_no_change(self):
+        """Re-sending the current OBJTYP/SUBTYP must not be reported as a change."""
+        obj = PoolObject(
+            "B1",
+            {OBJTYP_ATTR: BODY_TYPE, SUBTYP_ATTR: "POOL", SNAME_ATTR: "Pool"},
+        )
+
+        changed = obj.update({OBJTYP_ATTR: BODY_TYPE, SUBTYP_ATTR: "POOL"})
+
+        assert changed == {}
+
+    def test_identical_snapshot_replay_produces_empty_change_set(
+        self, pool_model: PoolModel, pool_model_data: list[dict[str, Any]]
+    ):
+        """Replaying the full snapshot (as on reconnect) yields no changes.
+
+        ICModelController.start() replays the RequestParamList snapshot through
+        process_updates on every connect/reconnect; identical data must not
+        fire the update callback for the whole model.
+        """
+        changed = pool_model.process_updates(pool_model_data)
+
+        assert changed == {}
+
+        # A second replay is just as quiet.
+        assert pool_model.process_updates(pool_model_data) == {}
+
+    def test_real_subtyp_transition_reported_exactly_once(self):
+        """A genuine SUBTYP change is applied and reported once, then quiet."""
+        obj = PoolObject("C1", {OBJTYP_ATTR: CIRCUIT_TYPE, SUBTYP_ATTR: "GENERIC"})
+
+        changed = obj.update({SUBTYP_ATTR: "INTELLI"})
+        assert changed == {SUBTYP_ATTR: "INTELLI"}
+        assert obj.subtype == "INTELLI"
+
+        # Re-sending the same value reports nothing.
+        assert obj.update({SUBTYP_ATTR: "INTELLI"}) == {}
+
+    def test_real_objtyp_transition_reported_exactly_once(self):
+        """A genuine OBJTYP change is applied and reported once, then quiet."""
+        obj = PoolObject("X1", {OBJTYP_ATTR: CIRCUIT_TYPE})
+
+        changed = obj.update({OBJTYP_ATTR: PUMP_TYPE})
+        assert changed == {OBJTYP_ATTR: PUMP_TYPE}
+        assert obj.objtype == PUMP_TYPE
+
+        assert obj.update({OBJTYP_ATTR: PUMP_TYPE}) == {}
+
+    def test_subtyp_clear_to_none_applies_and_reports(self):
+        """Explicitly clearing SUBTYP to None is applied and reported."""
+        obj = PoolObject("C1", {OBJTYP_ATTR: CIRCUIT_TYPE, SUBTYP_ATTR: "GENERIC"})
+
+        changed = obj.update({SUBTYP_ATTR: None})
+
+        assert changed == {SUBTYP_ATTR: None}
+        assert obj.subtype is None
+
+        # Clearing again is a no-op.
+        assert obj.update({SUBTYP_ATTR: None}) == {}
+
+
+class TestModelHardening:
+    """Regression tests for issue #56: aliasing, __contains__, exposure, reconcile."""
+
+    def test_same_object_list_feeds_two_models(self, pool_model_data: list[dict[str, Any]]):
+        """Feeding the same objectList into two models populates both.
+
+        PoolObject.__init__ used to pop OBJTYP/SUBTYP out of the caller's dict,
+        leaving the second model silently empty.
+        """
+        model_a = PoolModel()
+        model_b = PoolModel()
+
+        model_a.add_objects(pool_model_data)
+        model_b.add_objects(pool_model_data)
+
+        assert model_a.num_objects == len(pool_model_data)
+        assert model_b.num_objects == len(pool_model_data)
+        assert model_b["LIGHT1"] is not None
+        assert model_b["LIGHT1"].objtype == CIRCUIT_TYPE
+        assert model_b["LIGHT1"].subtype == "INTELLI"
+
+        # The caller's dicts are left intact.
+        assert all(OBJTYP_ATTR in entry["params"] for entry in pool_model_data)
+
+    def test_post_add_external_mutation_does_not_corrupt_model(self):
+        """Mutating the params dict after add_object leaves the model untouched."""
+        model = PoolModel()
+        params = {
+            OBJTYP_ATTR: CIRCUIT_TYPE,
+            SUBTYP_ATTR: "INTELLI",
+            SNAME_ATTR: "Pool Light",
+            STATUS_ATTR: "OFF",
+        }
+        obj = model.add_object("LIGHT1", params)
+        assert obj is not None
+
+        params[STATUS_ATTR] = "ON"
+        params[SNAME_ATTR] = "Hacked"
+        params["EXTRA"] = "value"
+
+        assert obj.status == "OFF"
+        assert obj.sname == "Pool Light"
+        assert obj["EXTRA"] is None
+
+    def test_untracked_type_rejection_leaves_params_intact(self):
+        """A rejected add_object must not strip OBJTYP from the caller's dict."""
+        model = PoolModel(attribute_map={CIRCUIT_TYPE: {STATUS_ATTR}})
+        params = {OBJTYP_ATTR: PUMP_TYPE, SUBTYP_ATTR: "VS", STATUS_ATTR: "10"}
+
+        assert model.add_object("PUMP1", params) is None
+        assert params == {OBJTYP_ATTR: PUMP_TYPE, SUBTYP_ATTR: "VS", STATUS_ATTR: "10"}
+
+    def test_contains_by_objnam(self, pool_model: PoolModel):
+        """The in operator is keyed by objnam."""
+        assert "LIGHT1" in pool_model
+        assert "PUMP1" in pool_model
+        assert "NOPE" not in pool_model
+
+    def test_pool_object_properties_are_read_only(self, pool_object_light: PoolObject):
+        """PoolObject.properties cannot be mutated to bypass change tracking."""
+        props = pool_object_light.properties
+
+        with pytest.raises(TypeError):
+            props[STATUS_ATTR] = "ON"
+
+        assert pool_object_light.status == "OFF"
+
+    def test_pool_model_objects_are_read_only(self, pool_model: PoolModel):
+        """PoolModel.objects cannot be mutated to bypass the model API."""
+        objects = pool_model.objects
+
+        with pytest.raises(TypeError):
+            del objects["LIGHT1"]
+
+        assert "LIGHT1" in pool_model
+
+    def test_remove_object(self, pool_model: PoolModel):
+        """remove_object deletes by objnam and returns the removed object."""
+        original_count = pool_model.num_objects
+
+        removed = pool_model.remove_object("LIGHT1")
+
+        assert removed is not None
+        assert removed.objnam == "LIGHT1"
+        assert "LIGHT1" not in pool_model
+        assert pool_model["LIGHT1"] is None
+        assert pool_model.num_objects == original_count - 1
+
+        # Removing an unknown objnam is a safe no-op.
+        assert pool_model.remove_object("LIGHT1") is None
+        assert pool_model.remove_object("NOPE") is None
+
+    def test_reconcile_prunes_ghosts_and_reports_removals(
+        self, pool_model: PoolModel, pool_model_data: list[dict[str, Any]]
+    ):
+        """reconcile removes objects absent from an authoritative snapshot."""
+        # Snapshot no longer contains PUMP1 (deleted at the panel).
+        snapshot = [entry for entry in pool_model_data if entry["objnam"] != "PUMP1"]
+
+        removed = pool_model.reconcile(snapshot)
+
+        assert removed == ["PUMP1"]
+        assert "PUMP1" not in pool_model
+        assert pool_model["PUMP1"] is None
+        assert pool_model.num_objects == len(snapshot)
+
+        # Survivors are untouched.
+        assert pool_model["LIGHT1"] is not None
+        assert pool_model["POOL1"] is not None
+        assert pool_model["SPA01"] is not None
+
+    def test_reconcile_full_snapshot_removes_nothing(
+        self, pool_model: PoolModel, pool_model_data: list[dict[str, Any]]
+    ):
+        """reconcile against a complete snapshot is a no-op."""
+        original_count = pool_model.num_objects
+
+        removed = pool_model.reconcile(pool_model_data)
+
+        assert removed == []
+        assert pool_model.num_objects == original_count
+
+    def test_reconcile_ignores_malformed_entries(self, pool_model: PoolModel):
+        """Malformed snapshot entries are skipped, not treated as removals."""
+        snapshot: list[Any] = [
+            {"params": {}},  # missing objnam
+            "not-a-dict",  # wrong type entirely
+            {"objnam": 42, "params": {}},  # objnam not a string
+            *[{"objnam": objnam} for objnam in ("LIGHT1", "POOL1", "SPA01", "PUMP1")],
+        ]
+
+        removed = pool_model.reconcile(snapshot)
+
+        assert removed == []
+        assert pool_model.num_objects == 4
+
+    def test_add_objects_skips_malformed_entries(self):
+        """add_objects tolerates entries missing objnam/params."""
+        model = PoolModel()
+        objects: list[Any] = [
+            {"params": {OBJTYP_ATTR: CIRCUIT_TYPE}},  # missing objnam
+            {"objnam": "NOPARAMS"},  # missing params
+            "not-a-dict",  # wrong type entirely
+            {"objnam": "BADPARAMS", "params": "garbage"},  # params not a dict
+            {
+                "objnam": "VALID1",
+                "params": {OBJTYP_ATTR: CIRCUIT_TYPE, SNAME_ATTR: "Valid"},
+            },
+        ]
+
+        # Must not raise.
+        model.add_objects(objects)
+
+        assert model.num_objects == 1
+        assert model["VALID1"] is not None
+        assert model["BADPARAMS"] is None

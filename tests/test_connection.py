@@ -1,9 +1,11 @@
 """Tests for pyintellicenter connection module (Protocol-based)."""
 
 import asyncio
+import logging
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call, patch
 
+import orjson
 import pytest
 
 import pyintellicenter.connection as connection_module
@@ -1337,3 +1339,529 @@ class TestClosedFutureGenerations:
 
         await connection.disconnect()
         assert second_closed.done()
+
+
+class _ScriptedWebSocket:
+    """Async-iterable WebSocket fake driven by a frame queue.
+
+    Feed str frames to deliver them to the reader, an Exception instance to
+    raise it from the iterator, or ``_ScriptedWebSocket.CLOSE`` to end
+    iteration (clean server close).
+    """
+
+    CLOSE = object()
+
+    def __init__(self) -> None:
+        self.frames: asyncio.Queue[object] = asyncio.Queue()
+        self.sent: list[str] = []
+        self.close_awaited = False
+
+    def feed(self, frame: object) -> None:
+        self.frames.put_nowait(frame)
+
+    def __aiter__(self) -> "_ScriptedWebSocket":
+        return self
+
+    async def __anext__(self) -> object:
+        frame = await self.frames.get()
+        if frame is self.CLOSE:
+            raise StopAsyncIteration
+        if isinstance(frame, Exception):
+            raise frame
+        return frame
+
+    async def send(self, packet: str) -> None:
+        self.sent.append(packet)
+
+    async def close(self) -> None:
+        await asyncio.sleep(0)
+        self.close_awaited = True
+
+
+def _start_ws_transport(ws, **kwargs) -> ICWebSocketTransport:
+    """Wire a fake WebSocket into a transport and start its reader loop."""
+    transport = ICWebSocketTransport(**kwargs)
+    transport._ws = ws
+    transport._connected = True
+    transport._disconnect_handled = False
+    if transport._notification_callback:
+        transport._start_notification_consumer()
+    transport._reader_task = asyncio.create_task(transport._reader_loop())
+    return transport
+
+
+class TestQueuedRequestDisconnectRace:
+    """Issue #57: a request queued behind the lock must fail cleanly.
+
+    A request that passes the connected pre-check and then parks on the
+    request lock must raise ICConnectionError - never AttributeError - when
+    the connection is torn down (or replaced) before the lock is granted.
+    """
+
+    @pytest.mark.asyncio
+    async def test_request_queued_during_disconnect_raises_connection_error(self):
+        connection = ICConnection("host", keepalive_interval=3600)
+        await _connect_tcp_for_closed_future(connection)
+
+        await connection._request_lock.acquire()
+        task = asyncio.create_task(connection.send_request("GetParamList", request_timeout=1.0))
+        await asyncio.sleep(0)  # passes the pre-check, parks on the lock
+        assert not task.done()
+
+        await connection.disconnect()
+        connection._request_lock.release()
+
+        with pytest.raises(ICConnectionError):
+            await task
+
+    @pytest.mark.asyncio
+    async def test_request_queued_during_keepalive_abort_raises_connection_error(self):
+        connection = ICConnection("host", keepalive_interval=3600)
+        await _connect_tcp_for_closed_future(connection)
+
+        await connection._request_lock.acquire()
+        task = asyncio.create_task(connection.send_request("GetParamList", request_timeout=1.0))
+        await asyncio.sleep(0)
+        assert not task.done()
+
+        connection._abort_connection(ICConnectionError("keepalive declared the link dead"))
+        connection._request_lock.release()
+
+        with pytest.raises(ICConnectionError):
+            await task
+        await connection.disconnect()
+
+    @pytest.mark.asyncio
+    async def test_queued_request_is_not_sent_on_a_new_generation(self):
+        """A reconnect during the wait must not receive the stale request."""
+        connection = ICConnection("host", keepalive_interval=3600)
+        loop = asyncio.get_running_loop()
+        transports = []
+
+        async def create_connection(protocol_factory, _host, _port):
+            protocol = protocol_factory()
+            transport = MagicMock()
+            protocol.connection_made(transport)
+            transports.append(transport)
+            return transport, protocol
+
+        with patch.object(loop, "create_connection", side_effect=create_connection):
+            await connection.connect()
+
+            await connection._request_lock.acquire()
+            task = asyncio.create_task(connection.send_request("GetParamList", request_timeout=1.0))
+            await asyncio.sleep(0)
+            assert not task.done()
+
+            await connection.disconnect()
+            await connection.connect()  # new generation
+            connection._request_lock.release()
+
+            with pytest.raises(ICConnectionError):
+                await task
+
+        transports[1].write.assert_not_called()
+        await connection.disconnect()
+
+
+class TestNonObjectJsonFrames:
+    """Issue #58: valid JSON with a non-object root must be skipped, not fatal."""
+
+    NON_OBJECT_FRAMES = [b"123", b'"response"', b"[]", b"null", b"true"]
+
+    @pytest.mark.asyncio
+    async def test_tcp_survives_non_object_frames(self):
+        notifications = []
+        protocol = ICProtocol(notification_callback=notifications.append)
+        transport = MagicMock()
+        protocol.connection_made(transport)
+
+        for frame in self.NON_OBJECT_FRAMES:
+            protocol.data_received(frame + b"\r\n")
+
+        transport.close.assert_not_called()
+        assert protocol.connected is True
+        assert protocol._buffer == bytearray()
+
+        # The connection still works: a request round-trips...
+        task = asyncio.create_task(protocol.send_request("GetParamList", request_timeout=1.0))
+        await asyncio.sleep(0.01)
+        protocol.data_received(b'{"command":"SendParamList","messageID":"1","response":"200"}\r\n')
+        result = await task
+        assert result["response"] == "200"
+
+        # ...and notifications still flow.
+        protocol.data_received(b'{"command":"NotifyList","objectList":[]}\r\n')
+        await asyncio.sleep(0.01)
+        assert len(notifications) == 1
+        protocol.connection_lost(None)
+
+    @pytest.mark.asyncio
+    async def test_websocket_survives_non_object_frames(self):
+        disconnects = []
+        ws = _ScriptedWebSocket()
+        transport = _start_ws_transport(ws, disconnect_callback=disconnects.append)
+
+        for frame in self.NON_OBJECT_FRAMES:
+            ws.feed(frame.decode())
+        await asyncio.sleep(0.01)
+
+        assert transport.connected is True
+        assert transport._reader_task is not None
+        assert not transport._reader_task.done()
+        assert disconnects == []
+
+        # A subsequent request still round-trips through the live reader.
+        task = asyncio.create_task(transport.send_request("GetParamList", request_timeout=1.0))
+        await asyncio.sleep(0.01)
+        ws.feed('{"command":"SendParamList","messageID":"1","response":"200"}')
+        result = await task
+        assert result["response"] == "200"
+
+        await transport.aclose()
+
+    @pytest.mark.asyncio
+    async def test_websocket_unexpected_reader_error_runs_disconnect_path(self):
+        """A dispatch surprise must not leave a silent zombie connection."""
+        disconnects = []
+        ws = _ScriptedWebSocket()
+        transport = _start_ws_transport(ws, disconnect_callback=disconnects.append)
+
+        error = RuntimeError("dispatch surprise")
+        ws.feed(error)
+        await asyncio.sleep(0.01)
+
+        assert disconnects == [error]
+        assert transport.connected is False
+
+
+class TestWebSocketShutdown:
+    """Issue #59: deliberate close must fail in-flight requests and await close."""
+
+    @pytest.mark.asyncio
+    async def test_aclose_fails_in_flight_request_fast(self):
+        ws = _ScriptedWebSocket()
+        transport = _start_ws_transport(ws)
+
+        task = asyncio.create_task(transport.send_request("GetParamList", request_timeout=30.0))
+        await asyncio.sleep(0.01)
+        assert transport._pending_message_id is not None
+
+        await transport.aclose()
+
+        with pytest.raises(ICConnectionError):
+            await asyncio.wait_for(task, timeout=1.0)
+        assert ws.close_awaited is True
+
+    @pytest.mark.asyncio
+    async def test_sync_close_fails_in_flight_request_fast(self):
+        ws = _ScriptedWebSocket()
+        transport = _start_ws_transport(ws)
+
+        task = asyncio.create_task(transport.send_request("GetParamList", request_timeout=30.0))
+        await asyncio.sleep(0.01)
+
+        transport.close()
+
+        with pytest.raises(ICConnectionError):
+            await asyncio.wait_for(task, timeout=1.0)
+
+        assert transport._close_task is not None
+        await transport._close_task
+        assert ws.close_awaited is True
+
+    @pytest.mark.asyncio
+    async def test_connection_disconnect_awaits_websocket_close(self):
+        connection = ICConnection("host", transport="websocket", keepalive_interval=3600)
+        ws = _ScriptedWebSocket()
+
+        async def fake_connect(_uri):
+            return ws
+
+        with patch("websockets.connect", side_effect=fake_connect):
+            await connection.connect()
+
+        assert isinstance(connection._protocol, ICWebSocketTransport)
+        task = asyncio.create_task(connection.send_request("GetParamList", request_timeout=30.0))
+        await asyncio.sleep(0.01)
+        assert not task.done()
+
+        await connection.disconnect()
+
+        with pytest.raises(ICConnectionError):
+            await asyncio.wait_for(task, timeout=1.0)
+        assert ws.close_awaited is True
+        assert connection.connected is False
+
+
+class TestNotificationConsumerLifecycle:
+    """Issue #59: consumer teardown races and async-callable callbacks."""
+
+    @pytest.mark.asyncio
+    async def test_cancellation_during_async_callback_is_clean(self):
+        """Teardown mid-callback must end in CancelledError, not AttributeError."""
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def callback(_msg):
+            entered.set()
+            await release.wait()
+
+        protocol = ICProtocol(notification_callback=callback)
+        protocol.connection_made(MagicMock())
+        protocol._handle_notification({"command": "NotifyList", "objectList": []})
+        await asyncio.wait_for(entered.wait(), timeout=1.0)
+
+        consumer_task = protocol._consumer_task
+        assert consumer_task is not None
+        protocol._stop_notification_consumer()
+
+        with pytest.raises(asyncio.CancelledError):
+            await consumer_task
+
+    @pytest.mark.asyncio
+    async def test_async_callable_object_callback_is_awaited(self):
+        received = []
+
+        class AsyncCallable:
+            async def __call__(self, msg):
+                await asyncio.sleep(0)
+                received.append(msg)
+
+        protocol = ICProtocol(notification_callback=AsyncCallable())
+        protocol.connection_made(MagicMock())
+        protocol._handle_notification({"command": "NotifyList", "objectList": []})
+        await asyncio.sleep(0.01)
+
+        assert len(received) == 1
+        protocol.connection_lost(None)
+
+    @pytest.mark.asyncio
+    async def test_sync_callback_returning_awaitable_is_awaited(self):
+        received = []
+
+        async def _record(msg):
+            received.append(msg)
+
+        def callback(msg):
+            return _record(msg)
+
+        protocol = ICProtocol(notification_callback=callback)
+        protocol.connection_made(MagicMock())
+        protocol._handle_notification({"command": "NotifyList", "objectList": []})
+        await asyncio.sleep(0.01)
+
+        assert len(received) == 1
+        protocol.connection_lost(None)
+
+
+class TestReservedRequestFields:
+    """Issue #59: protocol-owned request fields cannot be clobbered via kwargs.
+
+    ``messageID`` is caught by the reserved-field guard (ValueError);
+    ``command`` cannot even reach **kwargs because it is a named positional
+    parameter, so Python itself rejects the duplicate with TypeError.
+    """
+
+    RESERVED_CASES = [({"messageID": "999"}, ValueError), ({"command": "Evil"}, TypeError)]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("reserved_kwargs", "expected_error"), RESERVED_CASES)
+    async def test_tcp_rejects_reserved_kwargs(self, reserved_kwargs, expected_error):
+        protocol = ICProtocol()
+        transport = MagicMock()
+        protocol.connection_made(transport)
+
+        with pytest.raises(expected_error):
+            await protocol.send_request("GetParamList", request_timeout=1.0, **reserved_kwargs)
+
+        transport.write.assert_not_called()
+        assert protocol._pending_message_id is None
+        assert protocol._response_future is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("reserved_kwargs", "expected_error"), RESERVED_CASES)
+    async def test_websocket_rejects_reserved_kwargs(self, reserved_kwargs, expected_error):
+        transport = ICWebSocketTransport()
+        ws = _ScriptedWebSocket()
+        transport._ws = ws
+        transport._connected = True
+
+        with pytest.raises(expected_error):
+            await transport.send_request("GetParamList", request_timeout=1.0, **reserved_kwargs)
+
+        assert ws.sent == []
+        assert transport._pending_message_id is None
+
+    @pytest.mark.asyncio
+    async def test_connection_rejects_reserved_kwargs_and_releases_lock(self):
+        connection = ICConnection("host", keepalive_interval=3600)
+        protocol = await _connect_tcp_for_closed_future(connection)
+
+        def write(_packet):
+            protocol._handle_response(
+                {
+                    "command": "SendParamList",
+                    "messageID": protocol._pending_message_id,
+                    "response": "200",
+                }
+            )
+
+        protocol._transport.write.side_effect = write
+
+        with pytest.raises(ValueError, match="eserved"):
+            await connection.send_request("GetParamList", request_timeout=1.0, messageID="7")
+
+        assert not connection._request_lock.locked()
+        response = await connection.send_request("GetParamList", request_timeout=1.0)
+        assert response["response"] == "200"
+        await connection.disconnect()
+
+
+class TestTcpFraming:
+    """Issue #60: cursor-based framing must stay correct across chunk boundaries."""
+
+    @staticmethod
+    def _protocol_with_notifications():
+        notifications = []
+        protocol = ICProtocol(notification_callback=notifications.append)
+        protocol.connection_made(MagicMock())
+        return protocol, notifications
+
+    @pytest.mark.asyncio
+    async def test_crlf_split_across_chunks(self):
+        protocol, notifications = self._protocol_with_notifications()
+
+        protocol.data_received(b'{"command":"NotifyList","objectList":[]}\r')
+        await asyncio.sleep(0)
+        assert notifications == []
+
+        protocol.data_received(b"\n")
+        await asyncio.sleep(0.01)
+        assert len(notifications) == 1
+        assert protocol._buffer == bytearray()
+        protocol.connection_lost(None)
+
+    @pytest.mark.asyncio
+    async def test_message_delivered_byte_by_byte(self):
+        protocol, notifications = self._protocol_with_notifications()
+        message = b'{"command":"NotifyList","objectList":[{"objnam":"PUMP1"}]}\r\n'
+
+        for i in range(len(message)):
+            protocol.data_received(message[i : i + 1])
+
+        await asyncio.sleep(0.01)
+        assert len(notifications) == 1
+        assert notifications[0]["objectList"] == [{"objnam": "PUMP1"}]
+        assert protocol._buffer == bytearray()
+        protocol.connection_lost(None)
+
+    @pytest.mark.asyncio
+    async def test_message_split_at_every_boundary(self):
+        message = b'{"command":"NotifyList","objectList":[{"objnam":"PUMP1"}]}\r\n'
+        for split in range(1, len(message)):
+            protocol, notifications = self._protocol_with_notifications()
+            protocol.data_received(message[:split])
+            protocol.data_received(message[split:])
+            await asyncio.sleep(0.01)
+            assert len(notifications) == 1, f"failed at split {split}"
+            assert protocol._buffer == bytearray()
+            protocol.connection_lost(None)
+
+    @pytest.mark.asyncio
+    async def test_batched_messages_with_trailing_partial(self):
+        protocol, notifications = self._protocol_with_notifications()
+        partial = b'{"command":"NotifyList","objectList":[{"objnam":"P3"'
+
+        protocol.data_received(
+            b'{"command":"NotifyList","objectList":[{"objnam":"P1"}]}\r\n'
+            b'{"command":"NotifyList","objectList":[{"objnam":"P2"}]}\r\n' + partial
+        )
+        await asyncio.sleep(0.01)
+        assert len(notifications) == 2
+        assert protocol._buffer == bytearray(partial)
+
+        protocol.data_received(b"}]}\r\n")
+        await asyncio.sleep(0.01)
+        assert len(notifications) == 3
+        assert [n["objectList"][0]["objnam"] for n in notifications] == ["P1", "P2", "P3"]
+        assert protocol._buffer == bytearray()
+        protocol.connection_lost(None)
+
+    @pytest.mark.asyncio
+    async def test_large_frame_across_many_chunks(self):
+        protocol, notifications = self._protocol_with_notifications()
+        objects = [{"objnam": f"OBJ{i:05d}", "params": {"SNAME": "x" * 50}} for i in range(500)]
+        message = orjson.dumps({"command": "NotifyList", "objectList": objects}) + b"\r\n"
+
+        chunk_size = 1024
+        for offset in range(0, len(message), chunk_size):
+            protocol.data_received(message[offset : offset + chunk_size])
+
+        await asyncio.sleep(0.01)
+        assert len(notifications) == 1
+        assert len(notifications[0]["objectList"]) == 500
+        assert protocol._buffer == bytearray()
+        protocol.connection_lost(None)
+
+
+class TestNotificationQueueOverflow:
+    """Issue #60: overflow drops keep task_done accounting and do not spam logs."""
+
+    @pytest.mark.asyncio
+    async def test_dropped_items_are_accounted_for_queue_join(self):
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        processed = []
+
+        async def callback(msg):
+            entered.set()
+            await release.wait()
+            processed.append(msg)
+
+        protocol = ICProtocol(notification_callback=callback, notification_queue_size=1)
+        protocol.connection_made(MagicMock())
+        queue = protocol._notification_queue
+        assert queue is not None
+
+        def notify(objnam):
+            protocol._handle_notification(
+                {"command": "NotifyList", "objectList": [{"objnam": objnam}]}
+            )
+
+        notify("N1")
+        await asyncio.wait_for(entered.wait(), timeout=1.0)  # consumer holds N1
+        notify("N2")  # queued
+        notify("N3")  # overflow: drops N2
+        notify("N4")  # overflow: drops N3
+
+        release.set()
+        await asyncio.wait_for(queue.join(), timeout=1.0)
+
+        assert [m["objectList"][0]["objnam"] for m in processed] == ["N1", "N4"]
+        protocol.connection_lost(None)
+
+    @pytest.mark.asyncio
+    async def test_overflow_logging_is_summarized(self, caplog):
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def callback(_msg):
+            entered.set()
+            await release.wait()
+
+        protocol = ICProtocol(notification_callback=callback, notification_queue_size=1)
+        protocol.connection_made(MagicMock())
+
+        protocol._handle_notification({"command": "NotifyList", "objectList": []})
+        await asyncio.wait_for(entered.wait(), timeout=1.0)
+
+        with caplog.at_level(logging.WARNING, logger="pyintellicenter.connection"):
+            for _ in range(10):
+                protocol._handle_notification({"command": "NotifyList", "objectList": []})
+
+        drop_warnings = [r for r in caplog.records if "queue full" in r.getMessage()]
+        assert len(drop_warnings) == 1
+
+        release.set()
+        protocol.connection_lost(None)

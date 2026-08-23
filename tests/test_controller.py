@@ -1,6 +1,7 @@
 """Tests for pyintellicenter controller module."""
 
 import asyncio
+import contextlib
 import inspect
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -14,6 +15,7 @@ from pyintellicenter import (
     ICConnectionMetrics,
     ICError,
     ICModelController,
+    ICResponseError,
     ICSystemInfo,
     PoolModel,
 )
@@ -620,14 +622,22 @@ class TestICModelController:
 
     @pytest.mark.asyncio
     async def test_request_monitoring_for_respects_batch_limit(self, controller, monkeypatch):
-        """No single RequestParamList batch exceeds MAX_ATTRIBUTES_PER_QUERY keys."""
+        """No single RequestParamList batch exceeds MAX_ATTRIBUTES_PER_QUERY keys.
+
+        Updated for issue #63: monitoring queries are now built directly from
+        the model's attribute map (not by filtering attributes_to_track()), so
+        the oversized tracking set is crafted through the map itself.
+        """
         from pyintellicenter.controller import MAX_ATTRIBUTES_PER_QUERY
 
-        # Craft tracked queries whose combined key count far exceeds the limit
-        # (5 objects x 20 keys = 100 > 50), forcing a split into batches.
+        # Craft a tracked type whose key count forces a split into batches
+        # (5 objects x 20 keys = 100 > 50).
+        monkeypatch.setattr(
+            controller._model, "_attribute_map", {"CHEM": {f"K{j}" for j in range(20)}}
+        )
         objnams = {f"OBJ{i}" for i in range(5)}
-        crafted = [{"objnam": f"OBJ{i}", "keys": ["K"] * 20} for i in range(5)]
-        monkeypatch.setattr(controller._model, "attributes_to_track", lambda: crafted)
+        for objnam in objnams:
+            controller._model.add_object(objnam, {"OBJTYP": "CHEM", "SNAME": objnam})
 
         batches: list[list[dict]] = []
 
@@ -646,6 +656,36 @@ class TestICModelController:
         # Every object is still covered exactly once across the batches.
         covered = [item["objnam"] for batch in batches for item in batch]
         assert sorted(covered) == sorted(objnams)
+
+    @pytest.mark.asyncio
+    async def test_request_monitoring_targets_only_new_objnams(self, controller, model):
+        """Monitoring requests for new objects cover only the new objnams.
+
+        Regression test for issue #63: the queries are built directly for the
+        added objects; the whole-model attributes_to_track() walk is not used
+        and pre-existing objects are not re-subscribed.
+        """
+        model.add_object("POOL1", {"OBJTYP": "BODY", "SUBTYP": "POOL", "SNAME": "Pool"})
+        model.add_object("C001", {"OBJTYP": "CIRCUIT", "SUBTYP": "LIGHT", "SNAME": "Light"})
+        model.add_object("CHM02", {"OBJTYP": "CHEM", "SUBTYP": "ICHEM", "SNAME": "IntelliChem 2"})
+
+        def fail_attributes_to_track():
+            pytest.fail("attributes_to_track() must not be used for new-object monitoring")
+
+        model.attributes_to_track = fail_attributes_to_track
+
+        batches: list[list[dict]] = []
+
+        async def fake_send_cmd(cmd, extra=None):
+            if cmd == "RequestParamList":
+                batches.append(extra["objectList"])
+            return {"objectList": []}
+
+        controller.send_cmd = AsyncMock(side_effect=fake_send_cmd)
+        await controller._request_monitoring_for({"CHM02"})
+
+        targeted = [item["objnam"] for batch in batches for item in batch]
+        assert targeted == ["CHM02"]
 
     @pytest.mark.asyncio
     async def test_set_circuit_state(self, controller):
@@ -2503,8 +2543,16 @@ class TestICConnectionHandler:
 
     @pytest.mark.asyncio
     async def test_circuit_breaker_triggers_after_failures(self, mock_controller):
-        """Test circuit breaker opens after repeated failures."""
-        from pyintellicenter.controller import CIRCUIT_BREAKER_FAILURES
+        """Test circuit breaker opens after repeated failures.
+
+        Updated for issue #62: retry delays no longer degenerate into a
+        zero-delay hot loop, so sleeps are fast-forwarded instead of relying
+        on the (fixed) backoff staying at zero in real time.
+        """
+        from pyintellicenter.controller import (
+            CIRCUIT_BREAKER_FAILURES,
+            CIRCUIT_BREAKER_RESET_TIME,
+        )
 
         handler = ICConnectionHandler(mock_controller, time_between_reconnects=0)
         call_count = 0
@@ -2516,20 +2564,25 @@ class TestICConnectionHandler:
 
         mock_controller.start = always_fail
 
-        # First attempt will fail and raise, but reconnection continues in background
-        with pytest.raises(ICConnectionError):
-            await handler.start()
+        real_sleep = asyncio.sleep
+        sleep_calls: list[float] = []
 
-        # Allow time for failures to accumulate (short delay between retries)
-        await asyncio.sleep(0.5)
+        async def fast_sleep(delay, *args, **kwargs):
+            sleep_calls.append(delay)
+            await real_sleep(0)
 
-        handler.stop()
+        with patch("asyncio.sleep", new=fast_sleep):
+            task = asyncio.create_task(handler._starter())
+            while CIRCUIT_BREAKER_RESET_TIME not in sleep_calls and call_count < 50:
+                await real_sleep(0.001)
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
-        # Should have triggered circuit breaker
-        assert (
-            handler._failure_count >= CIRCUIT_BREAKER_FAILURES
-            or call_count >= CIRCUIT_BREAKER_FAILURES
-        )
+        # The breaker opened after the documented number of failures and
+        # paused for the reset time.
+        assert call_count >= CIRCUIT_BREAKER_FAILURES
+        assert CIRCUIT_BREAKER_RESET_TIME in sleep_calls
 
     @pytest.mark.asyncio
     async def test_exponential_backoff(self, mock_controller):
@@ -2577,7 +2630,9 @@ class TestICConnectionHandler:
         with pytest.raises(ICConnectionError):
             await handler.start()
 
-        await asyncio.sleep(0.5)
+        # With the fixed backoff (issue #62) the delays are 0s then 1s instead
+        # of a zero-delay hot loop, so wait long enough for the third attempt.
+        await asyncio.sleep(1.5)
 
         handler.stop()
 
@@ -2779,3 +2834,684 @@ class TestICConnectionHandler:
         # Should not have started any tasks
         assert handler._starter_task is None
         assert handler._disconnect_debounce_task is None
+
+
+class TestHandlerLifecycle:
+    """Regression tests for issue #61: tracked teardown, astop(), restart."""
+
+    @pytest.fixture
+    def mock_controller(self):
+        """Create mock controller."""
+        controller = MagicMock()
+        controller.start = AsyncMock()
+        controller.stop = AsyncMock()
+        controller.host = "192.168.1.100"
+        controller._metrics = ICConnectionMetrics()
+        controller.set_disconnected_callback = MagicMock()
+        return controller
+
+    @pytest.fixture
+    def handler(self, mock_controller):
+        """Create a fast handler (no reconnect delay, no debounce)."""
+        return ICConnectionHandler(
+            mock_controller, time_between_reconnects=0, disconnect_debounce_time=0
+        )
+
+    @pytest.mark.asyncio
+    async def test_astop_completes_full_teardown(self, handler, mock_controller):
+        """astop() waits until controller.stop() has fully run."""
+        await handler.start()
+
+        await handler.astop()
+
+        mock_controller.stop.assert_awaited_once()
+        assert handler._stop_task is None
+        assert handler._stopped is True
+        assert handler.connected is False
+
+    @pytest.mark.asyncio
+    async def test_stop_creates_tracked_stop_task(self, handler, mock_controller):
+        """stop() keeps a strong reference to the teardown task (no GC orphan)."""
+        await handler.start()
+
+        handler.stop()
+
+        task = handler._stop_task
+        assert isinstance(task, asyncio.Task)
+        await task
+        mock_controller.stop.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_repeated_stop_reuses_inflight_stop_task(self, handler, mock_controller):
+        """A second stop() while teardown runs must not spawn a second teardown."""
+        release = asyncio.Event()
+
+        async def slow_stop():
+            await release.wait()
+
+        mock_controller.stop = slow_stop
+
+        handler.stop()
+        first = handler._stop_task
+        await asyncio.sleep(0)
+        handler.stop()
+
+        assert handler._stop_task is first
+        release.set()
+        await first
+
+    @pytest.mark.asyncio
+    async def test_stop_then_start_restart_supports_reconnect(self, handler, mock_controller):
+        """The handler can be restarted after stop(), including reconnection.
+
+        Previously _stopped was never reset by start(), so a restarted handler
+        silently dropped every later disconnect (permanent dead state), and a
+        stop() racing a restart could disown the fresh connection.
+        """
+        await handler.start()
+        assert handler.connected is True
+
+        await handler.astop()
+        assert handler.connected is False
+        assert mock_controller.stop.await_count == 1
+
+        # Restart
+        await handler.start()
+        assert handler._stopped is False
+        assert handler.connected is True
+        assert mock_controller.start.await_count == 2
+
+        # Reconnect after restart must not be dropped by a stale stopped flag.
+        handler._on_disconnect(mock_controller, Exception("link dropped"))
+        assert handler._starter_task is not None
+        await asyncio.sleep(0.05)
+        assert handler.connected is True
+        assert mock_controller.start.await_count == 3
+
+        await handler.astop()
+
+    @pytest.mark.asyncio
+    async def test_start_waits_for_inflight_teardown(self, handler, mock_controller):
+        """start() after stop() serializes with the still-running teardown."""
+        release = asyncio.Event()
+        order: list[str] = []
+
+        async def slow_stop():
+            await release.wait()
+            order.append("stopped")
+
+        async def tracked_start():
+            order.append("started")
+
+        mock_controller.stop = slow_stop
+        mock_controller.start = tracked_start
+
+        handler.stop()
+        restart = asyncio.create_task(handler.start())
+        await asyncio.sleep(0.01)
+        # start() must still be waiting on the teardown.
+        assert not restart.done()
+        assert order == []
+
+        release.set()
+        await asyncio.wait_for(restart, 1)
+        assert order == ["stopped", "started"]
+
+    @pytest.mark.asyncio
+    async def test_connected_property_lifecycle(self, handler, mock_controller):
+        """connected reflects the debounced handler-level availability."""
+        assert handler.connected is False
+
+        await handler.start()
+        assert handler.connected is True
+
+        handler._on_disconnect(mock_controller, Exception("dropped"))
+        assert handler.connected is False
+
+        await asyncio.sleep(0.05)  # zero-delay reconnect succeeds
+        assert handler.connected is True
+
+        await handler.astop()
+        assert handler.connected is False
+
+    @pytest.mark.asyncio
+    async def test_model_controller_stop_cancels_monitor_tasks(self):
+        """ICModelController.stop() cancels pending monitor tasks."""
+        controller = ICModelController("192.168.1.100", PoolModel(), 6681)
+        started = asyncio.Event()
+
+        async def hang():
+            started.set()
+            await asyncio.Event().wait()
+
+        task = asyncio.create_task(hang())
+        controller._monitor_tasks.add(task)
+        task.add_done_callback(controller._on_monitor_task_done)
+        await started.wait()
+
+        await controller.stop()
+
+        assert task.cancelled()
+        assert controller._monitor_tasks == set()
+
+
+class TestHandlerCallbackResilience:
+    """Regression tests for issue #62: a raising user callback never kills
+    the reconnect machinery or turns a successful startup into a failure."""
+
+    @pytest.fixture
+    def mock_controller(self):
+        """Create mock controller."""
+        controller = MagicMock()
+        controller.start = AsyncMock()
+        controller.stop = AsyncMock()
+        controller.host = "192.168.1.100"
+        controller._metrics = ICConnectionMetrics()
+        controller.set_disconnected_callback = MagicMock()
+        return controller
+
+    @pytest.fixture
+    def handler(self, mock_controller):
+        """Create a fast handler (no reconnect delay, no debounce)."""
+        return ICConnectionHandler(
+            mock_controller, time_between_reconnects=0, disconnect_debounce_time=0
+        )
+
+    @pytest.mark.asyncio
+    async def test_on_started_raising_does_not_fail_start(self, handler):
+        """A raising on_started must not make a successful start() raise."""
+
+        def bad_on_started(ctrl):
+            raise KeyError("entity not ready")
+
+        handler.on_started = bad_on_started
+
+        await handler.start()  # must not raise
+        assert handler.connected is True
+
+        await handler.astop()
+
+    @pytest.mark.asyncio
+    async def test_on_retrying_raising_does_not_kill_reconnection(self, handler, mock_controller):
+        """A raising on_retrying must not end the retry loop."""
+        calls = 0
+
+        async def fail_twice():
+            nonlocal calls
+            calls += 1
+            if calls < 3:
+                raise ICConnectionError("still down")
+
+        mock_controller.start = fail_twice
+
+        def bad_on_retrying(delay):
+            raise RuntimeError("consumer bug")
+
+        handler.on_retrying = bad_on_retrying
+
+        with pytest.raises(ICConnectionError):
+            await handler.start()
+
+        # Backoff after the first failure is 0s then 1s.
+        await asyncio.sleep(1.5)
+        assert calls >= 3
+        assert handler.connected is True
+
+        await handler.astop()
+
+    @pytest.mark.asyncio
+    async def test_on_reconnected_raising_still_marks_connected(self, handler):
+        """A raising on_reconnected must not lose the reconnected state."""
+        handler._first_time = False
+        handler._is_connected = False
+
+        def bad_on_reconnected(ctrl):
+            raise RuntimeError("consumer bug")
+
+        handler.on_reconnected = bad_on_reconnected
+
+        task = asyncio.create_task(handler._starter())
+        await asyncio.wait_for(task, 1)
+
+        assert handler.connected is True
+        await handler.astop()
+
+    @pytest.mark.asyncio
+    async def test_on_disconnected_raising_is_contained(self, handler, mock_controller):
+        """A raising on_disconnected must not kill the debounce task."""
+        handler._first_time = False
+        # Prevent an instant zero-delay reconnect from cancelling the debounce.
+        mock_controller.start = AsyncMock(side_effect=ICConnectionError("down"))
+
+        def bad_on_disconnected(ctrl, exc):
+            raise RuntimeError("consumer bug")
+
+        handler.on_disconnected = bad_on_disconnected
+
+        handler._on_disconnect(mock_controller, Exception("dropped"))
+        debounce = handler._disconnect_debounce_task
+        assert debounce is not None
+        await asyncio.sleep(0.05)
+
+        assert debounce.done()
+        assert not debounce.cancelled() and debounce.exception() is None
+        await handler.astop()
+
+    @pytest.mark.asyncio
+    async def test_on_updated_raising_is_contained(self):
+        """A raising on_updated must not propagate out of update dispatch."""
+        model = PoolModel()
+        controller = ICModelController("192.168.1.100", model, 6681)
+        handler = ICConnectionHandler(controller, time_between_reconnects=0)
+
+        def bad_on_updated(ctrl, updates):
+            raise KeyError("entity")
+
+        handler.on_updated = bad_on_updated
+
+        model.add_object(
+            "C001", {"OBJTYP": "CIRCUIT", "SUBTYP": "LIGHT", "SNAME": "Light", "STATUS": "OFF"}
+        )
+        # Must not raise despite the consumer callback raising.
+        updates = controller._apply_updates([{"objnam": "C001", "params": {"STATUS": "ON"}}])
+        assert updates["C001"]["STATUS"] == "ON"
+        assert model["C001"]["STATUS"] == "ON"
+
+        await handler.astop()
+
+    @pytest.mark.asyncio
+    async def test_updated_callback_raise_does_not_abort_new_object_monitoring(self):
+        """New-object monitoring is scheduled before the update callback runs."""
+        model = PoolModel()
+        controller = ICModelController("192.168.1.100", model, 6681)
+        controller.send_cmd = AsyncMock(return_value={"response": "200", "objectList": []})
+
+        def bad_callback(ctrl, updates):
+            raise KeyError("entity")
+
+        controller.set_updated_callback(bad_callback)
+
+        msg = {
+            "command": "NotifyList",
+            "objectList": [
+                {
+                    "objnam": "CHM02",
+                    "params": {"OBJTYP": "CHEM", "SUBTYP": "ICHEM", "SNAME": "IntelliChem 2"},
+                }
+            ],
+        }
+        controller._on_notification(msg)
+
+        # Monitoring for the new object was scheduled despite the raise.
+        assert controller._monitor_tasks
+        await asyncio.gather(*controller._monitor_tasks)
+        request_calls = [
+            call
+            for call in controller.send_cmd.await_args_list
+            if call.args[0] == "RequestParamList"
+        ]
+        assert request_calls
+
+
+class TestHandlerStartContract:
+    """Regression tests for issue #62: start() truthfulness and resilience."""
+
+    @pytest.fixture
+    def mock_controller(self):
+        """Create mock controller."""
+        controller = MagicMock()
+        controller.start = AsyncMock()
+        controller.stop = AsyncMock()
+        controller.host = "192.168.1.100"
+        controller._metrics = ICConnectionMetrics()
+        controller.set_disconnected_callback = MagicMock()
+        return controller
+
+    @pytest.fixture
+    def handler(self, mock_controller):
+        """Create a fast handler (no reconnect delay, no debounce)."""
+        return ICConnectionHandler(
+            mock_controller, time_between_reconnects=0, disconnect_debounce_time=0
+        )
+
+    @pytest.mark.asyncio
+    async def test_starter_survives_unexpected_exception(self, handler, mock_controller):
+        """A non-connection exception from controller.start() keeps retrying.
+
+        Previously only a narrow tuple of errors was caught: anything else
+        (e.g. a KeyError escaping consumer code) killed the reconnect loop
+        permanently and silently.
+        """
+        calls = 0
+
+        async def buggy_then_ok():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise KeyError("unexpected bug")
+
+        mock_controller.start = buggy_then_ok
+
+        task = asyncio.create_task(handler._starter())
+        await asyncio.wait_for(task, 1)
+
+        assert calls == 2
+        assert handler.connected is True
+        await handler.astop()
+
+    @pytest.mark.asyncio
+    async def test_start_propagates_unexpected_first_attempt_error(self, handler, mock_controller):
+        """An unexpected first-attempt failure must not report success.
+
+        Previously only selected exception types were recorded; anything else
+        made start() return as if connected.
+        """
+        release = asyncio.Event()
+        calls = 0
+
+        async def buggy_start():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise KeyError("unexpected bug")
+            await release.wait()
+
+        mock_controller.start = buggy_start
+
+        with pytest.raises(KeyError):
+            await handler.start()
+        assert handler.connected is False
+
+        release.set()
+        await handler.astop()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_start_awaits_shared_attempt(self, handler, mock_controller):
+        """A concurrent start() awaits the shared first attempt.
+
+        Previously a second start() returned immediately (false success) while
+        the first attempt was still connecting.
+        """
+        release = asyncio.Event()
+        started_calls = 0
+
+        async def blocking_start():
+            nonlocal started_calls
+            started_calls += 1
+            await release.wait()
+
+        mock_controller.start = blocking_start
+
+        first = asyncio.create_task(handler.start())
+        await asyncio.sleep(0.01)
+        second = asyncio.create_task(handler.start())
+        await asyncio.sleep(0.01)
+
+        assert not first.done()
+        assert not second.done(), "second start() must await the shared attempt"
+
+        release.set()
+        await asyncio.wait_for(asyncio.gather(first, second), 1)
+        assert started_calls == 1
+        assert handler.connected is True
+
+        await handler.astop()
+
+    @pytest.mark.asyncio
+    async def test_cancelled_first_attempt_does_not_report_success(self, handler, mock_controller):
+        """stop() during the first attempt cancels start() - never a success."""
+        release = asyncio.Event()
+
+        async def blocking_start():
+            await release.wait()
+
+        mock_controller.start = blocking_start
+
+        starting = asyncio.create_task(handler.start())
+        await asyncio.sleep(0.01)
+        handler.stop()
+
+        with pytest.raises(asyncio.CancelledError):
+            await starting
+        assert handler.connected is False
+
+        await handler.astop()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("initial", "expected"),
+        [(0, [0, 1, 2, 3]), (1, [1, 2, 3, 4])],
+    )
+    async def test_backoff_growth_from_degenerate_delays(self, mock_controller, initial, expected):
+        """Backoff grows even from 0 and 1.
+
+        Previously min(int(delay * 1.5), MAX) kept a delay of 1 at 1 forever
+        and hot-looped a delay of 0.
+        """
+        handler = ICConnectionHandler(mock_controller, time_between_reconnects=initial)
+        mock_controller.start = AsyncMock(side_effect=ICConnectionError("down"))
+
+        delays: list[int] = []
+        handler.on_retrying = delays.append
+
+        real_sleep = asyncio.sleep
+
+        async def fast_sleep(delay, *args, **kwargs):
+            await real_sleep(0)
+
+        with patch("asyncio.sleep", new=fast_sleep):
+            task = asyncio.create_task(handler._starter())
+            while len(delays) < 4:
+                await real_sleep(0.001)
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        assert delays[:4] == expected
+
+
+class TestTransactionalStart:
+    """Regression tests for issue #62: partial-init failures leak nothing."""
+
+    def _mock_connection(self):
+        connection = AsyncMock()
+        connection.connected = True
+        connection.set_disconnect_callback = MagicMock()
+        connection.set_notification_callback = MagicMock()
+        return connection
+
+    @staticmethod
+    def _system_info_response():
+        return {
+            "response": "200",
+            "objectList": [
+                {
+                    "objnam": "INCR",
+                    "params": {
+                        "PROPNAME": "Test Pool",
+                        "VER": "1.0.0",
+                        "MODE": "ENGLISH",
+                        "SNAME": "TestSystem",
+                    },
+                }
+            ],
+        }
+
+    @pytest.mark.asyncio
+    async def test_base_start_malformed_system_info_closes_connection(self):
+        """A malformed system info response closes the socket and raises."""
+        controller = ICBaseController("192.168.1.100", 6681)
+        connection = self._mock_connection()
+        connection.send_request = AsyncMock(return_value={"response": "200"})  # no objectList
+
+        with (
+            patch("pyintellicenter.controller.ICConnection", return_value=connection),
+            pytest.raises(ICResponseError),
+        ):
+            await controller.start()
+
+        connection.disconnect.assert_awaited_once()
+        assert controller._connection is None
+
+    @pytest.mark.asyncio
+    async def test_base_start_request_failure_closes_connection(self):
+        """A failure after connect (system info request) closes the socket."""
+        controller = ICBaseController("192.168.1.100", 6681)
+        connection = self._mock_connection()
+        connection.send_request = AsyncMock(side_effect=ICConnectionError("reset"))
+
+        with (
+            patch("pyintellicenter.controller.ICConnection", return_value=connection),
+            pytest.raises(ICConnectionError),
+        ):
+            await controller.start()
+
+        connection.disconnect.assert_awaited_once()
+        assert controller._connection is None
+
+    @pytest.mark.asyncio
+    async def test_model_start_partial_failure_closes_connection(self, monkeypatch):
+        """A model-phase failure closes the connection, leaks no tasks.
+
+        The model layer now skips malformed entries instead of raising
+        (issue #56), so an unexpected model-load failure is injected directly
+        to prove the transactional guarantee for the post-connect phase.
+        """
+        model = PoolModel()
+        controller = ICModelController("192.168.1.100", model, 6681)
+        connection = self._mock_connection()
+        connection.send_request = AsyncMock(
+            side_effect=[
+                self._system_info_response(),
+                {"response": "200", "objectList": []},  # get_all_objects
+            ]
+        )
+
+        def exploding_add_objects(obj_list):
+            raise RuntimeError("unexpected model-load bug")
+
+        monkeypatch.setattr(model, "add_objects", exploding_add_objects)
+
+        with (
+            patch("pyintellicenter.controller.ICConnection", return_value=connection),
+            pytest.raises(RuntimeError, match="unexpected model-load bug"),
+        ):
+            await controller.start()
+
+        connection.disconnect.assert_awaited_once()
+        assert controller._connection is None
+        assert controller._monitor_tasks == set()
+
+    @pytest.mark.asyncio
+    async def test_model_start_skips_malformed_object_entries(self):
+        """A malformed objectList entry is skipped; start() still succeeds.
+
+        Since issue #56 the model skips entries missing objnam/params instead
+        of raising, so a bad entry must not abort startup or close the socket.
+        """
+        model = PoolModel()
+        controller = ICModelController("192.168.1.100", model, 6681)
+        connection = self._mock_connection()
+        connection.send_request = AsyncMock(
+            side_effect=[
+                self._system_info_response(),
+                # get_all_objects: entry missing "objnam" is skipped by the model
+                {"response": "200", "objectList": [{"params": {"OBJTYP": "BODY"}}]},
+            ]
+        )
+
+        with patch("pyintellicenter.controller.ICConnection", return_value=connection):
+            await controller.start()
+
+        assert model.num_objects == 0
+        assert controller._connection is connection
+        connection.disconnect.assert_not_awaited()
+
+        await controller.stop()
+        connection.disconnect.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_model_start_monitoring_batches_never_exceed_limit(self, monkeypatch):
+        """start() monitoring batches stay within MAX_ATTRIBUTES_PER_QUERY.
+
+        Previously the flush happened after appending, so a batch could exceed
+        the documented maximum by one object's keys.
+        """
+        from pyintellicenter.controller import MAX_ATTRIBUTES_PER_QUERY
+
+        model = PoolModel()
+        controller = ICModelController("192.168.1.100", model, 6681)
+        connection = self._mock_connection()
+
+        # 7 objects x 15 keys: the old post-append flush would send a 60-key
+        # batch; the pre-check flush must cap every batch at 45.
+        crafted = [{"objnam": f"OBJ{i}", "keys": [f"K{j}" for j in range(15)]} for i in range(7)]
+        monkeypatch.setattr(model, "attributes_to_track", lambda: crafted)
+
+        batches: list[list[dict]] = []
+        system_info_response = self._system_info_response()
+
+        async def scripted_send(cmd, **kwargs):
+            if cmd == "GetParamList" and kwargs.get("condition"):
+                return system_info_response
+            if cmd == "RequestParamList":
+                batches.append(kwargs["objectList"])
+            return {"response": "200", "objectList": []}
+
+        connection.send_request = AsyncMock(side_effect=scripted_send)
+
+        with patch("pyintellicenter.controller.ICConnection", return_value=connection):
+            await controller.start()
+
+        assert batches, "expected monitoring batches to be sent"
+        for batch in batches:
+            total_keys = sum(len(item["keys"]) for item in batch)
+            assert total_keys <= MAX_ATTRIBUTES_PER_QUERY
+        covered = [item["objnam"] for batch in batches for item in batch]
+        assert covered == [f"OBJ{i}" for i in range(7)]
+
+        await controller.stop()
+
+
+class TestCoalescedFlushResilience:
+    """Regression tests for issue #63: no stranded peer futures."""
+
+    @pytest.fixture
+    def controller(self):
+        """Create an ICModelController with a mock connection."""
+        ctrl = ICModelController("192.168.1.100", PoolModel(), 6681)
+        ctrl._connection = MagicMock()
+        ctrl._connection.connected = True
+        ctrl._connection.send_request = AsyncMock(
+            return_value={"response": "200", "objectList": []}
+        )
+        return ctrl
+
+    @pytest.mark.asyncio
+    async def test_unexpected_flush_exception_resolves_all_peer_futures(self, controller):
+        """A non-ICError flush failure reaches every waiter - nobody hangs.
+
+        Previously only (ICError, OSError) were fanned out; any other
+        exception escaped the flush owner and left peer futures pending
+        forever.
+        """
+
+        async def exploding_send(*args, **kwargs):
+            raise RuntimeError("bug in transport layer")
+
+        controller._connection.send_request = exploding_send
+
+        await controller._coalesce_lock.acquire()
+        owner = asyncio.create_task(controller.set_circuit_state("C001", True))
+        peer_one = asyncio.create_task(controller.set_circuit_state("C002", True))
+        peer_two = asyncio.create_task(controller.set_circuit_state("C003", True))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        controller._coalesce_lock.release()
+
+        results = await asyncio.wait_for(
+            asyncio.gather(owner, peer_one, peer_two, return_exceptions=True), timeout=1
+        )
+        assert all(isinstance(result, RuntimeError) for result in results)
+        assert controller._pending_requests == []
+        assert controller._pending_changes == {}

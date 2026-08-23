@@ -9,7 +9,7 @@ Example:
     from pyintellicenter.discovery import discover_intellicenter_units
 
     async def main():
-        units = await discover_intellicenter_units(timeout=5.0)
+        units = await discover_intellicenter_units(discovery_timeout=5.0)
         for unit in units:
             print(f"Found: {unit.name} at {unit.host}:{unit.port}")
 
@@ -23,9 +23,13 @@ import asyncio
 import contextlib
 import logging
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from zeroconf import ServiceBrowser, ServiceInfo, Zeroconf
-from zeroconf.asyncio import AsyncZeroconf
+from zeroconf import ServiceStateChange
+from zeroconf.asyncio import AsyncServiceBrowser, AsyncServiceInfo, AsyncZeroconf
+
+if TYPE_CHECKING:
+    from zeroconf import ServiceInfo, Zeroconf
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -33,8 +37,20 @@ _LOGGER = logging.getLogger(__name__)
 INTELLICENTER_SERVICE_TYPE = "_http._tcp.local."
 INTELLICENTER_SERVICE_NAME_PREFIX = "Pentair"
 
+# Additional service type some IntelliCenter firmwares advertise
+_PENTAIR_SERVICE_TYPE = "_pentair._tcp.local."
+
 # Default discovery timeout
 DEFAULT_DISCOVERY_TIMEOUT = 10.0
+
+# Timeout for resolving a single service's records (milliseconds)
+_RESOLVE_TIMEOUT_MS = 3000.0
+
+# Timeout for probing the raw TCP port of a candidate unit (seconds)
+_TCP_PROBE_TIMEOUT = 2.0
+
+# Upper bound on services resolved concurrently
+_MAX_CONCURRENT_RESOLUTIONS = 8
 
 
 @dataclass(frozen=True)
@@ -60,55 +76,47 @@ class ICUnit:
 
 
 class ICDiscoveryListener:
-    """Listener for IntelliCenter mDNS service discovery.
+    """Tracks services reported by an ``AsyncServiceBrowser``.
 
-    Uses a queue to communicate between zeroconf's sync callbacks
-    and async processing, avoiding deprecated event loop patterns.
+    The state-change handler runs on the event loop (no threads), so plain
+    ``asyncio`` primitives are safe here. Added/Updated events are
+    deduplicated per ``(service_type, name)`` pair and queued as candidates
+    for concurrent resolution.
     """
 
-    def __init__(self, queue: asyncio.Queue[tuple[str, str, str]]) -> None:
-        self._queue = queue
+    def __init__(self) -> None:
         self._units: dict[str, ICUnit] = {}
+        self._seen: set[tuple[str, str]] = set()
+        self._candidates: asyncio.Queue[tuple[Zeroconf, str, str]] = asyncio.Queue()
 
     @property
     def units(self) -> list[ICUnit]:
         """Return list of discovered units."""
         return list(self._units.values())
 
-    def add_service(
+    def async_on_service_state_change(
         self,
-        zc: Zeroconf,  # noqa: ARG002
+        zeroconf: Zeroconf,
         service_type: str,
         name: str,
+        state_change: ServiceStateChange,
     ) -> None:
-        """Called when a service is discovered (sync, from zeroconf thread)."""
-        # Queue for async processing - thread-safe
-        try:
-            self._queue.put_nowait(("add", service_type, name))
-        except asyncio.QueueFull:
-            _LOGGER.warning("Discovery queue full, dropping service: %s", name)
+        """Handle a service state change (runs in the event loop)."""
+        if state_change is ServiceStateChange.Removed:
+            self._units.pop(name, None)
+            self._seen.discard((service_type, name))
+            return
 
-    def remove_service(
-        self,
-        zc: Zeroconf,  # noqa: ARG002
-        service_type: str,  # noqa: ARG002
-        name: str,
-    ) -> None:
-        """Called when a service is removed (sync, from zeroconf thread)."""
-        if name in self._units:
-            del self._units[name]
+        key = (service_type, name)
+        if key in self._seen:
+            # Deduplicate repeated Added/Updated events
+            return
+        self._seen.add(key)
+        self._candidates.put_nowait((zeroconf, service_type, name))
 
-    def update_service(
-        self,
-        zc: Zeroconf,  # noqa: ARG002
-        service_type: str,
-        name: str,
-    ) -> None:
-        """Called when a service is updated (sync, from zeroconf thread)."""
-        try:
-            self._queue.put_nowait(("update", service_type, name))
-        except asyncio.QueueFull:
-            _LOGGER.warning("Discovery queue full, dropping update: %s", name)
+    async def async_get_candidate(self) -> tuple[Zeroconf, str, str]:
+        """Wait for the next candidate service to resolve."""
+        return await self._candidates.get()
 
     def add_unit(self, name: str, unit: ICUnit) -> None:
         """Add a discovered unit."""
@@ -135,37 +143,12 @@ def _is_intellicenter(name: str, info: ServiceInfo) -> bool:
     return False
 
 
-async def _process_discovery_queue(
-    queue: asyncio.Queue[tuple[str, str, str]],
-    listener: ICDiscoveryListener,
-    aiozc: AsyncZeroconf,
-    discovery_timeout: float,
-) -> None:
-    """Process discovery events from the queue."""
-    end_time = asyncio.get_running_loop().time() + discovery_timeout
-
-    while True:
-        remaining = end_time - asyncio.get_running_loop().time()
-        if remaining <= 0:
-            break
-
-        try:
-            action, service_type, name = await asyncio.wait_for(
-                queue.get(), timeout=min(remaining, 1.0)
-            )
-        except TimeoutError:
-            continue
-
-        if action in ("add", "update"):
-            await _resolve_service(listener, aiozc, service_type, name)
-
-
 async def _check_tcp_port(host: str, port: int) -> bool:
     """Check if a TCP port is connectable."""
     try:
         _, writer = await asyncio.wait_for(
             asyncio.open_connection(host, port),
-            timeout=2.0,
+            timeout=_TCP_PROBE_TIMEOUT,
         )
         writer.close()
         await writer.wait_closed()
@@ -176,63 +159,89 @@ async def _check_tcp_port(host: str, port: int) -> bool:
 
 async def _resolve_service(
     listener: ICDiscoveryListener,
-    aiozc: AsyncZeroconf,
+    zc: Zeroconf,
+    semaphore: asyncio.Semaphore,
     service_type: str,
     name: str,
 ) -> None:
     """Resolve service info and add to listener if it's an IntelliCenter."""
-    try:
-        info = await aiozc.async_get_service_info(service_type, name, timeout=3000)
-        if info is None:
-            return
+    async with semaphore:
+        try:
+            info = AsyncServiceInfo(service_type, name)
+            if not await info.async_request(zc, _RESOLVE_TIMEOUT_MS):
+                return
 
-        # Check if this is a Pentair/IntelliCenter device
-        service_name = info.name or name
-        if not _is_intellicenter(service_name, info):
-            return
+            # Check if this is a Pentair/IntelliCenter device
+            service_name = info.name or name
+            if not _is_intellicenter(service_name, info):
+                return
 
-        # Extract address
-        addresses = info.parsed_addresses()
-        if not addresses:
-            return
+            # Extract address; scoped addresses keep the scope id that
+            # link-local IPv6 needs to be connectable
+            addresses = info.parsed_scoped_addresses()
+            if not addresses:
+                return
 
-        host = addresses[0]
-        # mDNS advertises WebSocket port (typically 6680)
-        ws_port = info.port or 6680
-        # Raw TCP port is WebSocket port + 1 (typically 6681)
-        tcp_port = ws_port + 1
+            host = addresses[0]
+            # mDNS advertises WebSocket port (typically 6680)
+            ws_port = info.port or 6680
+            # Raw TCP port is WebSocket port + 1 (typically 6681)
+            tcp_port = ws_port + 1
 
-        # Verify TCP port is accessible
-        if not await _check_tcp_port(host, tcp_port):
-            _LOGGER.warning(
-                "IntelliCenter %s found at %s but TCP port %d not accessible",
+            # Verify TCP port is accessible
+            if not await _check_tcp_port(host, tcp_port):
+                _LOGGER.warning(
+                    "IntelliCenter %s found at %s but TCP port %d not accessible",
+                    service_name,
+                    host,
+                    tcp_port,
+                )
+                return
+
+            # Extract model from properties if available
+            model = None
+            if info.properties:
+                model_bytes = info.properties.get(b"model")
+                if model_bytes is not None:
+                    model = model_bytes.decode("utf-8", errors="ignore")
+
+            unit = ICUnit(
+                name=service_name, host=host, port=tcp_port, ws_port=ws_port, model=model or None
+            )
+            listener.add_unit(name, unit)
+            _LOGGER.debug(
+                "Discovered IntelliCenter: %s at %s (TCP:%d, WS:%d)",
                 service_name,
                 host,
                 tcp_port,
+                ws_port,
             )
-            return
 
-        # Extract model from properties if available
-        model = None
-        if info.properties:
-            model_bytes = info.properties.get(b"model")
-            if model_bytes is not None:
-                model = model_bytes.decode("utf-8", errors="ignore")
+        except Exception:
+            _LOGGER.exception("Error resolving service %s", name)
 
-        unit = ICUnit(
-            name=service_name, host=host, port=tcp_port, ws_port=ws_port, model=model or None
-        )
-        listener.add_unit(name, unit)
-        _LOGGER.debug(
-            "Discovered IntelliCenter: %s at %s (TCP:%d, WS:%d)",
-            service_name,
-            host,
-            tcp_port,
-            ws_port,
-        )
 
-    except Exception:
-        _LOGGER.exception("Error resolving service %s", name)
+async def _process_candidates(
+    listener: ICDiscoveryListener,
+    discovery_timeout: float,
+) -> None:
+    """Resolve candidate services concurrently until the deadline expires.
+
+    Resolutions run with bounded concurrency so a busy network full of
+    slow ``_http._tcp`` services cannot starve the IntelliCenter unit,
+    and the overall deadline is enforced on the whole batch.
+    """
+    semaphore = asyncio.Semaphore(_MAX_CONCURRENT_RESOLUTIONS)
+    try:
+        async with asyncio.timeout(discovery_timeout), asyncio.TaskGroup() as task_group:
+            while True:
+                zc, service_type, name = await listener.async_get_candidate()
+                task_group.create_task(
+                    _resolve_service(listener, zc, semaphore, service_type, name)
+                )
+    except TimeoutError:
+        # Discovery window elapsed; in-flight resolutions were cancelled.
+        pass
 
 
 async def discover_intellicenter_units(
@@ -247,88 +256,79 @@ async def discover_intellicenter_units(
     Args:
         discovery_timeout: How long to wait for discovery (seconds)
         zeroconf: Optional existing Zeroconf instance to use. If not provided,
-            a new instance will be created and closed after discovery.
+            a new instance will be created and closed after discovery. A
+            caller-provided instance is never closed by this function.
             When integrating with Home Assistant, pass the shared Zeroconf
             instance obtained via `async_get_instance(hass)`.
 
     Returns:
         List of discovered ICUnit instances
     """
-    # Queue for thread-safe communication between zeroconf callbacks and async code
-    queue: asyncio.Queue[tuple[str, str, str]] = asyncio.Queue(maxsize=100)
-
-    # Use provided zeroconf or create our own
-    own_zeroconf = zeroconf is None
-    if own_zeroconf:
+    # Only close a Zeroconf instance this function created (issue #53)
+    aiozc: AsyncZeroconf | None = None
+    if zeroconf is None:
         aiozc = AsyncZeroconf()
         zc = aiozc.zeroconf
     else:
-        aiozc = None
-        assert zeroconf is not None  # for type checker
         zc = zeroconf
 
-    listener = ICDiscoveryListener(queue)
-    browsers: list[ServiceBrowser] = []
-
-    # Track if we create a wrapper for external zeroconf
-    aiozc_wrapper: AsyncZeroconf | None = None
+    listener = ICDiscoveryListener()
+    browsers: list[AsyncServiceBrowser] = []
 
     try:
-        # Browse for HTTP services (IntelliCenter uses HTTP on port 6681)
-        browser = ServiceBrowser(
-            zc,
-            INTELLICENTER_SERVICE_TYPE,
-            listener,  # type: ignore[arg-type]
+        # Browse for HTTP services (IntelliCenter uses HTTP on port 6681).
+        # Handlers run in the event loop; no threads are involved.
+        browsers.append(
+            AsyncServiceBrowser(
+                zc,
+                INTELLICENTER_SERVICE_TYPE,
+                handlers=[listener.async_on_service_state_change],
+            )
         )
-        browsers.append(browser)
 
         # Also try to browse for any specific IntelliCenter service types
         with contextlib.suppress(Exception):
-            browser2 = ServiceBrowser(
-                zc,
-                "_pentair._tcp.local.",
-                listener,  # type: ignore[arg-type]
+            browsers.append(
+                AsyncServiceBrowser(
+                    zc,
+                    _PENTAIR_SERVICE_TYPE,
+                    handlers=[listener.async_on_service_state_change],
+                )
             )
-            browsers.append(browser2)
 
-        # Process discovery events from the queue
-        # Note: _process_discovery_queue needs AsyncZeroconf for resolution
-        # When using external zeroconf, wrap it
-        if aiozc is None:
-            aiozc_wrapper = AsyncZeroconf(zc=zc)
-            aiozc_for_resolution = aiozc_wrapper
-        else:
-            aiozc_for_resolution = aiozc
-
-        await _process_discovery_queue(queue, listener, aiozc_for_resolution, discovery_timeout)
+        await _process_candidates(listener, discovery_timeout)
 
         return listener.units
 
     finally:
-        # Cancel browsers before closing zeroconf
+        # Cancel browsers before (possibly) closing zeroconf; async_cancel
+        # does not block the event loop.
         for browser in browsers:
-            browser.cancel()
-        # Close wrapper if we created one for external zeroconf
-        if aiozc_wrapper is not None:
-            await aiozc_wrapper.async_close()
-        # Close our own zeroconf if we created it
-        elif own_zeroconf and aiozc is not None:
+            await browser.async_cancel()
+        # Close our own zeroconf if we created it; never touch a borrowed one
+        if aiozc is not None:
             await aiozc.async_close()
 
 
 async def find_unit_by_name(
-    name: str, discovery_timeout: float = DEFAULT_DISCOVERY_TIMEOUT
+    name: str,
+    discovery_timeout: float = DEFAULT_DISCOVERY_TIMEOUT,
+    zeroconf: Zeroconf | None = None,
 ) -> ICUnit | None:
     """Find a specific IntelliCenter unit by name.
 
     Args:
         name: Name or partial name to search for (case-insensitive)
         discovery_timeout: How long to wait for discovery
+        zeroconf: Optional existing Zeroconf instance to use; a
+            caller-provided instance is never closed
 
     Returns:
         ICUnit if found, None otherwise
     """
-    units = await discover_intellicenter_units(discovery_timeout)
+    units = await discover_intellicenter_units(
+        discovery_timeout=discovery_timeout, zeroconf=zeroconf
+    )
     name_lower = name.lower()
 
     for unit in units:
@@ -339,18 +339,24 @@ async def find_unit_by_name(
 
 
 async def find_unit_by_host(
-    host: str, discovery_timeout: float = DEFAULT_DISCOVERY_TIMEOUT
+    host: str,
+    discovery_timeout: float = DEFAULT_DISCOVERY_TIMEOUT,
+    zeroconf: Zeroconf | None = None,
 ) -> ICUnit | None:
     """Find a specific IntelliCenter unit by IP address.
 
     Args:
         host: IP address to search for
         discovery_timeout: How long to wait for discovery
+        zeroconf: Optional existing Zeroconf instance to use; a
+            caller-provided instance is never closed
 
     Returns:
         ICUnit if found, None otherwise
     """
-    units = await discover_intellicenter_units(discovery_timeout)
+    units = await discover_intellicenter_units(
+        discovery_timeout=discovery_timeout, zeroconf=zeroconf
+    )
 
     for unit in units:
         if unit.host == host:

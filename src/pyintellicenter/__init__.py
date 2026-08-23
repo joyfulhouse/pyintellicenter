@@ -27,12 +27,14 @@ from .attributes import (
     # Attribute name constants
     ACT_ATTR,
     ALK_ATTR,
+    ASSIGN_ATTR,
     AVAIL_ATTR,
     BODY_ATTR,
     # Type constants
     BODY_TYPE,
     BOOST_ATTR,
     CALC_ATTR,
+    CALIB_ATTR,
     CHEM_TYPE,
     CIRCGRP_TYPE,
     CIRCUIT_ATTR,
@@ -90,9 +92,11 @@ from .attributes import (
     PHVAL_ATTR,
     PHVOL_ATTR,
     PMPCIRC_TYPE,
+    PORT_ATTR,
     POSIT_ATTR,
     PRESS_TYPE,
     PRIM_ATTR,
+    PROBE_ATTR,
     PROPNAME_ATTR,
     PUMP_STATUS_OFF,
     PUMP_STATUS_ON,
@@ -109,6 +113,7 @@ from .attributes import (
     SELECT_ATTR,
     SENSE_TYPE,
     SERVICE_ATTR,
+    SETTMP_ATTR,
     SHOMNU_ATTR,
     SINDEX_ATTR,
     SMTSRT_ATTR,
@@ -155,6 +160,13 @@ from .controller import (
     ICModelController,
     ICSystemInfo,
 )
+from .discovery import (
+    DEFAULT_DISCOVERY_TIMEOUT,
+    ICUnit,
+    discover_intellicenter_units,
+    find_unit_by_host,
+    find_unit_by_name,
+)
 from .exceptions import (
     ICCommandError,
     ICConnectionError,
@@ -171,21 +183,6 @@ from .types import (
     ObjectParams,
     ResponseMessage,
 )
-
-# Discovery module (requires optional 'zeroconf' dependency)
-# Import conditionally to avoid ImportError when zeroconf is not installed
-try:
-    from .discovery import (  # noqa: F401
-        DEFAULT_DISCOVERY_TIMEOUT,
-        ICUnit,
-        discover_intellicenter_units,
-        find_unit_by_host,
-        find_unit_by_name,
-    )
-
-    _DISCOVERY_AVAILABLE = True
-except ImportError:
-    _DISCOVERY_AVAILABLE = False
 
 __version__ = "0.1.22"
 
@@ -218,6 +215,12 @@ __all__ = [
     # Model classes
     "PoolModel",
     "PoolObject",
+    # Discovery
+    "ICUnit",
+    "discover_intellicenter_units",
+    "find_unit_by_name",
+    "find_unit_by_host",
+    "DEFAULT_DISCOVERY_TIMEOUT",
     # Type definitions
     "NotificationMessage",
     "ObjectEntry",
@@ -260,10 +263,12 @@ __all__ = [
     # Attributes
     "ACT_ATTR",
     "ALK_ATTR",
+    "ASSIGN_ATTR",
     "AVAIL_ATTR",
     "BODY_ATTR",
     "BOOST_ATTR",
     "CALC_ATTR",
+    "CALIB_ATTR",
     "CIRCUIT_ATTR",
     "COMUART_ATTR",
     "COOL_ATTR",
@@ -305,8 +310,10 @@ __all__ = [
     "PHTNK_ATTR",
     "PHVAL_ATTR",
     "PHVOL_ATTR",
+    "PORT_ATTR",
     "POSIT_ATTR",
     "PRIM_ATTR",
+    "PROBE_ATTR",
     "PROPNAME_ATTR",
     "PWR_ATTR",
     "QUALTY_ATTR",
@@ -316,6 +323,7 @@ __all__ = [
     "SEC_ATTR",
     "SELECT_ATTR",
     "SERVICE_ATTR",
+    "SETTMP_ATTR",
     "SHOMNU_ATTR",
     "SINDEX_ATTR",
     "SMTSRT_ATTR",
@@ -337,15 +345,3 @@ __all__ = [
     "VER_ATTR",
     "VOL_ATTR",
 ]
-
-# Add discovery exports if available
-if _DISCOVERY_AVAILABLE:
-    __all__.extend(
-        [
-            "ICUnit",
-            "discover_intellicenter_units",
-            "find_unit_by_name",
-            "find_unit_by_host",
-            "DEFAULT_DISCOVERY_TIMEOUT",
-        ]
-    )
