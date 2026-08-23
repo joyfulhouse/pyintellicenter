@@ -91,7 +91,7 @@ from pyintellicenter import discover_intellicenter_units
 
 
 async def main():
-    units = await discover_intellicenter_units(timeout=5.0)
+    units = await discover_intellicenter_units(discovery_timeout=5.0)
     for unit in units:
         print(f"Found: {unit.name} at {unit.host}:{unit.port}")
         print(f"  Model: {unit.model}")
@@ -115,7 +115,7 @@ the main concepts.
 **Reconnection Strategy:**
 
 1. Debounce: 15-second grace period before marking disconnected
-2. Exponential Backoff: starts at 30 s, doubles each attempt (max 5 min)
+2. Exponential Backoff: starts at 30 s, increases 1.5x each attempt (max 10 min)
 3. Circuit Breaker: after 5 consecutive failures, pauses for 5 minutes
 4. Reset: successful connection resets failure counters
 
@@ -166,11 +166,14 @@ from pyintellicenter import HeaterType
 
 HeaterType.OFF  # Heater off
 HeaterType.HEATER  # Gas/electric heater only
-HeaterType.SOLAR_PREF  # Solar preferred, heater backup
+HeaterType.SOLAR_PREFERRED  # Solar preferred, heater backup
 HeaterType.SOLAR_ONLY  # Solar only
 HeaterType.ULTRA_TEMP  # UltraTemp heat pump only
-HeaterType.ULTRA_TEMP_PREF  # UltraTemp preferred
-HeaterType.HYBRID  # Hybrid mode
+HeaterType.ULTRA_TEMP_PREFERRED  # UltraTemp preferred
+HeaterType.HYBRID_GAS  # Hybrid heater, gas mode
+HeaterType.HYBRID_ULTRA_TEMP  # Hybrid heater, heat pump mode
+HeaterType.HYBRID_HYBRID  # Hybrid heater, hybrid mode
+HeaterType.HYBRID_DUAL  # Hybrid heater, dual mode
 # ... and more
 ```
 
