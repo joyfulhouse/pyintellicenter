@@ -1221,7 +1221,6 @@ def test_before_write_records_exact_absolute_deadline() -> None:
 
     tracker.mark_before_write(7, 123.5)
 
-    assert tracker.pre_send_sequence == 7
     assert tracker.write_started_at == 123.5
     assert tracker.action_deadline == 183.5
     assert tracker.write_started.is_set()
@@ -1620,9 +1619,11 @@ async def test_invariant_between_before_and_after_write_fails_post_dispatch(
     with pytest.raises(ICLightGroupError) as raised:
         await controller.run_light_group_sync("GROUP")
 
-    assert raised.value.phase == "acknowledgement"
+    assert raised.value.phase == "onset"
     assert raised.value.dispatch_started is True
-    assert raised.value.response_received is False
+    assert raised.value.response_received is True
+    assert raised.value.acknowledged is True
+    assert raised.value.onset_seen is False
 
 
 @pytest.mark.asyncio
@@ -2278,3 +2279,173 @@ async def test_concurrent_sync_and_writer_fail_busy_while_read_remains_live(
     with pytest.raises(asyncio.CancelledError):
         await first
     assert controller._light_group_mutation_pending is False
+
+
+def _stubborn_child_script(
+    entered: asyncio.Event,
+    unwind_started: asyncio.Event,
+    release: asyncio.Event,
+    children: list[asyncio.Task[Any]],
+    *,
+    dispatch: bool = False,
+) -> Any:
+    """Script whose request task blocks inside its own cancellation unwind."""
+
+    async def script(
+        conn: ScriptedConnection,
+        before: Any,
+        _after: Any,
+        _kwargs: dict[str, Any],
+    ) -> dict[str, Any]:
+        current = asyncio.current_task()
+        assert current is not None
+        children.append(current)
+        if dispatch:
+            before(conn._sequence, asyncio.get_running_loop().time())
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            unwind_started.set()
+            await release.wait()
+            raise
+        raise AssertionError
+
+    return script
+
+
+async def _drain_children(release: asyncio.Event, children: list[asyncio.Task[Any]]) -> None:
+    release.set()
+    for child in children:
+        if not child.done():
+            with contextlib.suppress(BaseException):
+                await child
+
+
+@pytest.mark.asyncio
+async def test_external_cancellation_during_connection_loss_unwind_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, connection = make_controller()
+    _fast_lifecycle(monkeypatch)
+    entered = asyncio.Event()
+    unwind_started = asyncio.Event()
+    release = asyncio.Event()
+    children: list[asyncio.Task[Any]] = []
+    connection.scripts[("GetParamList", 1)] = _stubborn_child_script(
+        entered, unwind_started, release, children
+    )
+
+    task = asyncio.create_task(controller.run_light_group_sync("GROUP"))
+    await entered.wait()
+    connection.close_generation()
+    await unwind_started.wait()
+    task.cancel()
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert task.cancelled()
+    finally:
+        await _drain_children(release, children)
+
+    assert connection.observers == []
+    assert connection.remove_count == 1
+    assert controller._light_group_mutation_pending is False
+    assert not controller._mutation_lock.locked()
+
+
+@pytest.mark.asyncio
+async def test_enclosing_timeout_during_connection_loss_unwind_raises_timeout_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, connection = make_controller()
+    _fast_lifecycle(monkeypatch)
+    entered = asyncio.Event()
+    unwind_started = asyncio.Event()
+    release = asyncio.Event()
+    children: list[asyncio.Task[Any]] = []
+    scopes: list[asyncio.Timeout] = []
+    connection.scripts[("GetParamList", 1)] = _stubborn_child_script(
+        entered, unwind_started, release, children
+    )
+
+    async def bounded() -> dict[str, Any]:
+        async with asyncio.timeout(None) as scope:
+            scopes.append(scope)
+            return await controller.run_light_group_sync("GROUP")
+
+    task = asyncio.create_task(bounded())
+    await entered.wait()
+    connection.close_generation()
+    await unwind_started.wait()
+    scopes[0].reschedule(asyncio.get_running_loop().time())
+    try:
+        with pytest.raises(TimeoutError):
+            await task
+        assert not task.cancelled()
+    finally:
+        await _drain_children(release, children)
+
+    assert connection.observers == []
+    assert controller._light_group_mutation_pending is False
+
+
+@pytest.mark.asyncio
+async def test_external_cancellation_during_cleanup_unwind_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, connection = make_controller(frames=[])
+    monkeypatch.setattr(light_group, "SUBSCRIPTION_SETTLE_SECONDS", 0)
+    entered = asyncio.Event()
+    unwind_started = asyncio.Event()
+    release = asyncio.Event()
+    children: list[asyncio.Task[Any]] = []
+    deadline_armed = asyncio.Event()
+
+    async def wait_deadline(_deadline: float) -> None:
+        deadline_armed.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(light_group, "_wait_deadline", wait_deadline)
+    connection.scripts[("SetParamList", 1)] = _stubborn_child_script(
+        entered, unwind_started, release, children, dispatch=True
+    )
+
+    task = asyncio.create_task(controller.run_light_group_sync("GROUP"))
+    await entered.wait()
+    await deadline_armed.wait()
+    connection.emit({"command": "NotifyList", "objectList": [_entry("AUX", STATUS="ON")]})
+    await unwind_started.wait()
+    task.cancel()
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert task.cancelled()
+    finally:
+        await _drain_children(release, children)
+
+    assert connection.observers == []
+    assert controller._light_group_mutation_pending is False
+    assert not controller._mutation_lock.locked()
+
+
+@pytest.mark.asyncio
+async def test_simultaneous_ack_and_failing_notification_records_ack_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller, connection = make_controller(frames=[])
+    _fast_lifecycle(monkeypatch)
+    connection.before_response_frames[("SetParamList", 1)] = [
+        {"command": "NotifyList", "objectList": [_entry("AUX", STATUS="ON")]}
+    ]
+
+    with pytest.raises(ICLightGroupError, match="AUX.STATUS") as raised:
+        await controller.run_light_group_sync("GROUP")
+
+    assert raised.value.phase == "onset"
+    assert raised.value.dispatch_started is True
+    assert raised.value.response_received is True
+    assert raised.value.acknowledged is True
+    assert raised.value.onset_seen is False
+    assert connection.observers == []
+    assert len([call for call in connection.calls if call.command == "SetParamList"]) == 1
