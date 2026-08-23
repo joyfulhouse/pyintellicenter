@@ -22,6 +22,10 @@ state updates, and is the underlying library powering the
 - **Dual Transport Support**: TCP (port 6681) and WebSocket (port 6680) connections
 - **Local Communication**: Direct connection to IntelliCenter — no cloud required
 - **Real-time Updates**: Push-based notifications via the NotifyList protocol
+- **Per-object Subscriptions**: `subscribe(objnam, callback)` on the model
+  controller (and forwarded by the connection handler) registers any number of
+  per-object or all-object listeners with an unsubscribe remover — see
+  [docs/API.md](docs/API.md#per-object-subscriptions)
 - **mDNS Discovery**: Automatically find IntelliCenter units on your network
 - **Async/Await**: Built on Python asyncio for efficient I/O
 - **Type Annotations**: Full type hints for IDE support and static analysis

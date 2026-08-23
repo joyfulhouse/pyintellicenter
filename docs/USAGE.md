@@ -147,6 +147,27 @@ attribute re-subscription queries), and reports each pruned objnam through
 this callback with value `None`. Consumers should tear down anything they
 created for a removed objnam (e.g. Home Assistant entities).
 
+`set_updated_callback` is a single slot — and `ICConnectionHandler` claims it
+for its `on_updated` hook — so consumers needing multiple listeners (e.g. one
+per Home Assistant entity) should use per-object subscriptions instead:
+
+```python
+# On the controller, or via the handler (handler.subscribe forwards):
+unsubscribe = handler.subscribe("B1101", on_update)  # one object
+unsub_all = handler.subscribe(None, on_update)  # all objects
+
+unsubscribe()  # stop listening (idempotent; safe even during dispatch)
+```
+
+The callback signature is identical to `set_updated_callback`, including the
+`None`-for-removal contract; a per-objnam subscriber receives only its
+object's entry, still as a mapping (`{objnam: attrs}`). Any number of
+subscriptions can coexist with the legacy callback, and a subscriber raising
+is logged without affecting other subscribers or update processing. Treat the
+`changes` payload as read-only — it is shared between the legacy callback and
+all subscribers, so never mutate it (copy first if needed). See
+[API.md](API.md#per-object-subscriptions) for full semantics.
+
 ### Discovery
 
 ```python

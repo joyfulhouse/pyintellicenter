@@ -13,6 +13,27 @@ pass (#68).
 
 ### Added
 
+- **Per-object subscription API** (#66):
+  `ICModelController.subscribe(objnam, callback)` registers any number of
+  per-object (or, with `objnam=None`, all-object) update listeners and
+  returns an unsubscribe callable (Home Assistant remover idiom).
+  Subscribers are dispatched from the same place as the legacy updated
+  callback (which is unchanged, and still claimed by
+  `ICConnectionHandler`), share its `(controller, changes)` signature and
+  `{objnam: None}` removal contract, and are individually exception-guarded
+  so one raising never affects other subscribers, the legacy callback, or
+  update processing. Removal is identity-based (a remover deletes exactly
+  its own registration, never a distinct-but-equal callable's), all
+  applicable listener lists are snapshotted before any callback runs (so
+  (un)subscribing during dispatch only affects future dispatches), and
+  payloads are shared between the legacy callback and all subscribers and
+  must be treated as read-only.
+  `ICConnectionHandler.subscribe()` forwards to the managed controller so
+  consumers holding only the handler can subscribe directly.
+- `notification_batching: bool = True` keyword on `ICBaseController` /
+  `ICModelController`, forwarded to the underlying `ICConnection` (when its
+  constructor accepts it) so consumers can opt back into per-frame
+  NotifyList delivery with `notification_batching=False`.
 - **Notification burst batching and overflow coalescing** (#67):
   `ICConnection` (and both transports) gain `notification_batching`
   (default `True`). The notification consumer now drains messages already

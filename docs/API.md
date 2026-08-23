@@ -230,6 +230,45 @@ controller.set_updated_callback(on_update)
 await controller.stop()
 ```
 
+### Per-object subscriptions
+
+`set_updated_callback` is a single overwrite-slot (and `ICConnectionHandler`
+claims it), so consumers that need many listeners — e.g. one per Home
+Assistant entity — should use `subscribe()` instead. Any number of
+subscriptions can coexist with the legacy callback, whose behavior is
+unchanged.
+
+```python
+# Listen for one object. The callback signature matches the updated
+# callback; a per-objnam subscriber receives only its object's entry,
+# still as a mapping ({objnam: attrs}).
+unsubscribe = controller.subscribe("B1101", lambda ctrl, changes: print(changes))
+
+# objnam=None receives updates for all objects (the full mapping).
+unsub_all = controller.subscribe(None, lambda ctrl, changes: print(changes))
+
+unsubscribe()  # remove the subscription (idempotent, safe during dispatch)
+```
+
+Semantics:
+
+- Subscribers are dispatched from the same place as the legacy updated
+  callback (after it), so ordering and the removal contract are identical:
+  an entry value of `None` marks the object's removal from the model.
+- Each subscriber invocation is exception-guarded — one subscriber raising
+  is logged and never affects other subscribers, the legacy callback, or
+  update processing.
+- All applicable listener lists are snapshotted before any callback runs, so
+  subscribing or unsubscribing from within a callback only affects future
+  dispatches, never the one in flight.
+- Callback payloads (including the attribute dicts) are **read-only**: they
+  are shared between the legacy updated callback and all subscribers, so
+  mutating them would be visible to every other listener. Copy first if you
+  need to modify.
+- `ICConnectionHandler.subscribe(objnam, callback)` forwards to the managed
+  `ICModelController`, so consumers holding only the handler can subscribe
+  directly (raises `TypeError` if the handler manages a non-model controller).
+
 ### Snapshot reconciliation and removals
 
 On every `start()` — the initial connect and each automatic reconnect — the
@@ -336,6 +375,10 @@ Methods and properties:
   established (the debounced handler-level view): it turns `True` after a
   successful connect or reconnect and `False` on disconnect or
   `stop()`/`astop()`.
+- `handler.subscribe(objnam, callback)` — forwards to
+  `ICModelController.subscribe()` on the managed controller and returns the
+  unsubscribe callable (see "Per-object subscriptions" above). Raises
+  `TypeError` if the managed controller is not an `ICModelController`.
 
 Callback signatures:
 
