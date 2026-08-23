@@ -54,6 +54,10 @@ _TCP_PROBE_TIMEOUT = 2.0
 # count and concurrent resolutions
 _RESOLUTION_WORKERS = 8
 
+# Maximum resolution attempts per service generation; caps how often a
+# persistently failing service that keeps emitting updates can re-queue
+_MAX_RESOLUTION_ATTEMPTS = 3
+
 
 class _ResolutionState(enum.Enum):
     """Resolution lifecycle of a browsed service."""
@@ -97,12 +101,20 @@ class ICDiscoveryListener:
     Each service carries a generation counter that ``Removed`` bumps, so a
     resolution that started before the removal reports a stale generation
     and cannot resurrect the removed service (issue #76).
+
+    An Added/Updated event arriving while a resolution is in flight is
+    remembered; if that attempt then fails transiently, one retry is
+    enqueued immediately so the update is not lost. Retries are capped at
+    ``_MAX_RESOLUTION_ATTEMPTS`` per generation so a persistently failing
+    chatty service cannot re-queue itself for the whole discovery window.
     """
 
     def __init__(self) -> None:
         self._units: dict[str, ICUnit] = {}
         self._states: dict[tuple[str, str], _ResolutionState] = {}
         self._generations: dict[tuple[str, str], int] = {}
+        self._attempts: dict[tuple[str, str], int] = {}
+        self._retry_requested: dict[tuple[str, str], Zeroconf] = {}
         self._candidates: asyncio.Queue[tuple[Zeroconf, str, str, int]] = asyncio.Queue()
 
     @property
@@ -125,23 +137,40 @@ class ICDiscoveryListener:
             self._generations[key] = self._generations.get(key, 0) + 1
             self._units.pop(name, None)
             self._states.pop(key, None)
+            self._attempts.pop(key, None)
+            self._retry_requested.pop(key, None)
             return
 
         state = self._states.get(key)
-        if state in (_ResolutionState.PENDING, _ResolutionState.RESOLVED):
-            # Deduplicate repeated Added/Updated events; only a service whose
-            # last resolution failed (or was removed) is worth retrying.
+        if state is _ResolutionState.RESOLVED:
+            # Definitively resolved; nothing to redo.
             return
+        if state is _ResolutionState.PENDING:
+            # A resolution is queued or in flight. Remember that fresh
+            # records arrived so a transient failure of that attempt
+            # immediately retries instead of discarding this event.
+            self._retry_requested[key] = zeroconf
+            return
+        # Unknown or FAILED: (re-)queue, unless the retry budget for this
+        # generation is exhausted.
+        if self._attempts.get(key, 0) >= _MAX_RESOLUTION_ATTEMPTS:
+            return
+        self._enqueue(zeroconf, service_type, name)
+
+    def _enqueue(self, zeroconf: Zeroconf, service_type: str, name: str) -> None:
+        """Queue one resolution attempt for a service."""
+        key = (service_type, name)
         self._states[key] = _ResolutionState.PENDING
+        self._attempts[key] = self._attempts.get(key, 0) + 1
         self._candidates.put_nowait((zeroconf, service_type, name, self._generations.get(key, 0)))
 
     async def async_get_candidate(self) -> tuple[Zeroconf, str, str, int]:
         """Wait for the next candidate service to resolve."""
         return await self._candidates.get()
 
-    def _is_current(self, key: tuple[str, str], generation: int) -> bool:
-        """Return True if a resolution outcome is not stale."""
-        return self._generations.get(key, 0) == generation
+    def is_current(self, service_type: str, name: str, generation: int) -> bool:
+        """Return True if a candidate or outcome for a service is not stale."""
+        return self._generations.get((service_type, name), 0) == generation
 
     def mark_resolved(
         self, service_type: str, name: str, generation: int, unit: ICUnit | None
@@ -152,19 +181,26 @@ class ICDiscoveryListener:
         resolved as something other than an IntelliCenter.
         """
         key = (service_type, name)
-        if not self._is_current(key, generation):
+        if not self.is_current(service_type, name, generation):
             return
         self._states[key] = _ResolutionState.RESOLVED
+        self._retry_requested.pop(key, None)
         if unit is not None:
             self.add_unit(name, unit)
 
     def mark_failed(self, service_type: str, name: str, generation: int) -> None:
         """Record a transient resolution failure, unless it is stale.
 
-        A later Added/Updated event for the service re-queues it.
+        If fresh records arrived while the failed attempt was in flight,
+        one retry is enqueued immediately (within the attempt budget);
+        otherwise a later Added/Updated event re-queues the service.
         """
         key = (service_type, name)
-        if not self._is_current(key, generation):
+        if not self.is_current(service_type, name, generation):
+            return
+        retry_zc = self._retry_requested.pop(key, None)
+        if retry_zc is not None and self._attempts.get(key, 0) < _MAX_RESOLUTION_ATTEMPTS:
+            self._enqueue(retry_zc, service_type, name)
             return
         self._states[key] = _ResolutionState.FAILED
 
@@ -242,6 +278,11 @@ async def _resolve_service(
             listener.mark_failed(service_type, name, generation)
             return
 
+        # Skip the TCP probes if the service was removed while its records
+        # were resolving; the outcome would be discarded as stale anyway.
+        if not listener.is_current(service_type, name, generation):
+            return
+
         # mDNS advertises WebSocket port (typically 6680)
         ws_port = info.port or 6680
         # Raw TCP port is WebSocket port + 1 (typically 6681)
@@ -295,6 +336,11 @@ async def _resolution_worker(listener: ICDiscoveryListener) -> None:
     """Drain and resolve candidate services until cancelled."""
     while True:
         zc, service_type, name, generation = await listener.async_get_candidate()
+        # Discard candidates invalidated by a Removed event before doing
+        # any resolution work, so remove/re-add churn cannot burn workers
+        # and the discovery window on wasted network requests.
+        if not listener.is_current(service_type, name, generation):
+            continue
         await _resolve_service(listener, zc, service_type, name, generation)
 
 
