@@ -7,6 +7,7 @@ view of the IntelliCenter system.
 
 from __future__ import annotations
 
+import copy
 import logging
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
@@ -49,15 +50,17 @@ class PoolObject:
     def __init__(self, objnam: str, params: dict[str, Any]) -> None:
         """Initialize from object name and parameters.
 
-        The params dictionary is copied: the caller's dict is never mutated
-        or aliased, so it can be reused (e.g. fed to multiple models) and
-        later mutations of it cannot corrupt the object's state.
+        The params dictionary is deep-copied: the caller's dict is never
+        mutated or aliased — including nested list/dict values — so it can be
+        reused (e.g. fed to multiple models) and later mutations of it cannot
+        corrupt the object's state or bypass change tracking. This is a cold
+        ingest path (construction only); update() intentionally does not copy.
 
         Args:
             objnam: The unique object identifier (e.g., "PUMP01", "LIGHT1")
             params: Dictionary of object attributes including OBJTYP and optionally SUBTYP
         """
-        properties = dict(params)
+        properties = copy.deepcopy(params)
         self._objnam = objnam
         self._objtype: str = properties.pop(OBJTYP_ATTR)
         self._subtype: str | None = properties.pop(SUBTYP_ATTR, None)
@@ -119,7 +122,12 @@ class PoolObject:
         return self._properties.get(FEATR_ATTR) == "ON"
 
     def __getitem__(self, key: str) -> Any:
-        """Return the value for attribute 'key'."""
+        """Return the value for attribute 'key'.
+
+        The returned value must not be mutated: mutable values (lists/dicts)
+        alias internal state, and mutating them in place would bypass change
+        tracking. Use update() to modify attributes.
+        """
         return self._properties.get(key)
 
     def __str__(self) -> str:
@@ -153,7 +161,10 @@ class PoolObject:
     def properties(self) -> Mapping[str, Any]:
         """Return a read-only view of the properties of the object.
 
-        Mutations must go through update() so change tracking stays coherent.
+        Only the top level is read-only: nested values (lists/dicts) alias
+        internal state and must not be mutated — treat everything obtained
+        from this view as immutable. Mutations must go through update() so
+        change tracking stays coherent.
         """
         return MappingProxyType(self._properties)
 
@@ -221,8 +232,11 @@ class PoolModel:
     def objects(self) -> Mapping[str, PoolObject]:
         """Return a read-only view of the objects contained in the model.
 
-        Additions and removals must go through add_object()/add_objects(),
-        remove_object() or reconcile() so the model stays consistent.
+        Only the mapping itself is read-only: the PoolObject values are live
+        model state, and attribute values obtained from them must not be
+        mutated (see PoolObject.properties). Additions and removals must go
+        through add_object()/add_objects(), remove_object() or reconcile()
+        so the model stays consistent.
         """
         return MappingProxyType(self._objects)
 
@@ -236,7 +250,12 @@ class PoolModel:
         return iter(self._objects.values())
 
     def __getitem__(self, key: str) -> PoolObject | None:
-        """Return an object based on its objnam."""
+        """Return an object based on its objnam.
+
+        The returned PoolObject is live model state: attribute values obtained
+        from it must be treated as read-only (mutating a nested list/dict in
+        place would bypass change tracking). Use PoolObject.update() to modify.
+        """
         return self._objects.get(key)
 
     def __contains__(self, objnam: object) -> bool:
@@ -323,26 +342,48 @@ class PoolModel:
             pool_obj.update(params)
         return pool_obj
 
-    def add_objects(self, obj_list: list[ObjectEntry]) -> None:
+    def add_objects(self, obj_list: list[ObjectEntry]) -> list[str]:
         """Create or update from all the objects in the list.
 
         Malformed entries (missing or invalid 'objnam'/'params') are skipped
-        so one bad entry cannot abort processing of the rest.
+        so one bad entry cannot abort processing of the rest. Skips are made
+        observable rather than silent: a single WARNING with per-call counts
+        is emitted, and callers can compare the returned objnams against the
+        snapshot length to detect a partial model.
 
         Args:
             obj_list: List of objects with 'objnam' and 'params' keys
+
+        Returns:
+            The objnams that were added to (or updated in) the model, in
+            processing order. Entries skipped as malformed, rejected for a
+            missing OBJTYP, or filtered out by the attribute map are absent.
         """
+        ingested: list[str] = []
+        skipped = 0
         for entry in obj_list:
             try:
                 objnam = entry["objnam"]
                 params = entry["params"]
             except (KeyError, TypeError):
                 _LOGGER.debug("Skipping malformed object entry: %r", entry)
+                skipped += 1
                 continue
             if not isinstance(objnam, str) or not isinstance(params, dict):
                 _LOGGER.debug("Skipping object entry with invalid objnam/params: %r", entry)
+                skipped += 1
                 continue
-            self.add_object(objnam, params)
+            if self.add_object(objnam, params) is not None:
+                ingested.append(objnam)
+        if skipped:
+            _LOGGER.warning(
+                "add_objects: skipped %d malformed entry(ies) out of %d; "
+                "%d object(s) added or updated",
+                skipped,
+                len(obj_list),
+                len(ingested),
+            )
+        return ingested
 
     def remove_object(self, objnam: str) -> PoolObject | None:
         """Remove an object from the model.
@@ -471,10 +512,11 @@ class PoolModel:
             # the required OBJTYP attribute and the type-tracking attribute map,
             # returning None (without storing) when there is not enough
             # information or the type is not tracked. A non-None result for a
-            # previously-absent objnam means it was added to the model. Pass a
-            # copy so the caller's entry is never aliased (PoolObject.__init__
-            # also copies defensively; this is belt-and-suspenders).
-            new_obj = self.add_object(objnam, dict(params))
+            # previously-absent objnam means it was added to the model.
+            # PoolObject.__init__ deep-copies params, so this entry is never
+            # aliased; the existing-object update() path above intentionally
+            # stays copy-free (protocol hot path on orjson-decoded frames).
+            new_obj = self.add_object(objnam, params)
             if new_obj is not None:
                 # Surface the new object's full attribute set through the normal
                 # updates dict so existing callback consumers react to it.

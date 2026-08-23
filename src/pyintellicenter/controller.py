@@ -489,9 +489,15 @@ class ICBaseController:
     async def start(self) -> None:
         """Connect and retrieve system information.
 
+        Startup is transactional: if anything fails after the connection is
+        created, the connection is closed and cleared before the error
+        propagates, so a failed ``start()`` never leaks a live socket or its
+        keepalive task.
+
         Raises:
             ICConnectionError: If connection fails
             ICCommandError: If system info request fails
+            ICResponseError: If the system info response is malformed
         """
         # Tear down any previous connection before replacing it: overwriting
         # the reference leaks the old socket and its keepalive task, and a late
@@ -521,30 +527,51 @@ class ICBaseController:
         connection.set_disconnect_callback(_on_connection_disconnect)
         self._connection = connection
 
-        # Connect
-        await self._connection.connect()
-        self._metrics.successful_connects += 1
+        completed = False
+        try:
+            # Connect
+            await connection.connect()
+            self._metrics.successful_connects += 1
 
-        _LOGGER.debug("Connected to IC at %s:%s", self._host, self._port)
+            _LOGGER.debug("Connected to IC at %s:%s", self._host, self._port)
 
-        # Fetch system info
-        with _RequestContext(self._metrics):
-            try:
-                response = await self._connection.send_request(
-                    "GetParamList",
-                    condition=f"{OBJTYP_ATTR}={SYSTEM_TYPE}",
-                    objectList=[{"objnam": "INCR", "keys": ICSystemInfo.ATTRIBUTES_LIST}],
-                )
-                info = response["objectList"][0]
-                self._system_info = ICSystemInfo(info["objnam"], info["params"])
-            except ICResponseError as err:
-                raise ICCommandError(err.code) from err
+            # Fetch system info
+            with _RequestContext(self._metrics):
+                try:
+                    response = await connection.send_request(
+                        "GetParamList",
+                        condition=f"{OBJTYP_ATTR}={SYSTEM_TYPE}",
+                        objectList=[{"objnam": "INCR", "keys": ICSystemInfo.ATTRIBUTES_LIST}],
+                    )
+                except ICResponseError as err:
+                    raise ICCommandError(err.code) from err
+                try:
+                    info = response["objectList"][0]
+                    self._system_info = ICSystemInfo(info["objnam"], info["params"])
+                except (KeyError, IndexError, TypeError) as err:
+                    raise ICResponseError(
+                        "MALFORMED", f"unusable system info response: {response!r}"
+                    ) from err
+            completed = True
+        finally:
+            if not completed:
+                # Partial init (connect/system-info failure or cancellation):
+                # close the socket so nothing keeps running behind the error.
+                with contextlib.suppress(Exception):
+                    await connection.disconnect()
+                if self._connection is connection:
+                    self._connection = None
 
     async def stop(self) -> None:
-        """Stop the controller and disconnect."""
-        if self._connection:
-            await self._connection.disconnect()
-            self._connection = None
+        """Stop the controller and disconnect.
+
+        The connection reference is detached *before* awaiting the (possibly
+        slow) disconnect, so a concurrent ``start()`` creating a replacement
+        connection can never be disowned when this coroutine resumes.
+        """
+        connection, self._connection = self._connection, None
+        if connection:
+            await connection.disconnect()
 
     def _on_disconnect(self, exc: Exception | None) -> None:
         """Handle disconnection from connection layer."""
@@ -826,43 +853,68 @@ class ICModelController(
     async def start(self) -> None:
         """Connect, fetch objects, and start monitoring.
 
+        Startup is transactional: if anything fails after the connection is
+        established (object fetch, model load, monitoring subscription), the
+        controller is stopped - monitor tasks cancelled and the connection
+        closed - before the error propagates.
+
         Raises:
             ICConnectionError: If connection fails
             ICCommandError: If initialization fails
         """
         await super().start()
 
-        # Set notification callback
-        if self._connection:
-            self._connection.set_notification_callback(self._on_notification)
+        completed = False
+        try:
+            # Set notification callback
+            if self._connection:
+                self._connection.set_notification_callback(self._on_notification)
 
-        # Fetch all objects
-        all_objects = await self.get_all_objects(
-            [OBJTYP_ATTR, SUBTYP_ATTR, SNAME_ATTR, PARENT_ATTR]
-        )
-        self._model.add_objects(all_objects)
-        _LOGGER.info("Model contains %d objects", self._model.num_objects)
+            # Fetch all objects
+            all_objects = await self.get_all_objects(
+                [OBJTYP_ATTR, SUBTYP_ATTR, SNAME_ATTR, PARENT_ATTR]
+            )
+            self._model.add_objects(all_objects)
+            _LOGGER.info("Model contains %d objects", self._model.num_objects)
 
-        # Request monitoring of attributes in batches
-        attributes = self._model.attributes_to_track()
-        query: list[dict[str, Any]] = []
-        num_attributes = 0
+            # Request monitoring of attributes in batches
+            attributes = self._model.attributes_to_track()
+            query: list[dict[str, Any]] = []
+            num_attributes = 0
 
-        for items in attributes:
-            query.append(items)
-            num_attributes += len(items["keys"])
+            for items in attributes:
+                keys_len = len(items["keys"])
+                # Flush before the batch would exceed the limit (a single
+                # object with more keys than the limit is still sent alone).
+                if query and num_attributes + keys_len > MAX_ATTRIBUTES_PER_QUERY:
+                    res = await self.send_cmd("RequestParamList", {"objectList": query})
+                    self._apply_updates(res["objectList"])
+                    query = []
+                    num_attributes = 0
+                query.append(items)
+                num_attributes += keys_len
 
-            # Batch to avoid overwhelming the system
-            if num_attributes >= MAX_ATTRIBUTES_PER_QUERY:
+            # Send remaining
+            if query:
                 res = await self.send_cmd("RequestParamList", {"objectList": query})
                 self._apply_updates(res["objectList"])
-                query = []
-                num_attributes = 0
+            completed = True
+        finally:
+            if not completed:
+                # Partial init: tear everything down so the failure cannot
+                # leak a live connection or background tasks.
+                with contextlib.suppress(Exception):
+                    await self.stop()
 
-        # Send remaining
-        if query:
-            res = await self.send_cmd("RequestParamList", {"objectList": query})
-            self._apply_updates(res["objectList"])
+    async def stop(self) -> None:
+        """Stop the controller: cancel monitor tasks, then disconnect."""
+        tasks = list(self._monitor_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            # Wait for cancellation so no monitor task is destroyed pending.
+            await asyncio.gather(*tasks, return_exceptions=True)
+        await super().stop()
 
     def _on_notification(self, msg: dict[str, Any]) -> None:
         """Handle NotifyList notifications."""
@@ -888,15 +940,12 @@ class ICModelController(
         if self._system_info and self._system_info.objnam in updates:
             self._system_info.update(updates[self._system_info.objnam])
 
-        # Notify callback (newly-added objects are included in updates, so the
-        # existing callback path surfaces them to consumers).
-        if updates and self._updated_callback:
-            self._updated_callback(self, updates)
-
         # Start monitoring any newly-added objects. This issues a network request,
         # so it runs as a background task; _on_notification is a synchronous
         # callback. If no event loop is running (e.g. direct synchronous calls in
-        # tests) we skip scheduling rather than crash.
+        # tests) we skip scheduling rather than crash. Scheduled *before* the
+        # user callback so a callback raise cannot abort monitoring of new
+        # equipment.
         if added_objnams:
             try:
                 loop = asyncio.get_running_loop()
@@ -911,6 +960,16 @@ class ICModelController(
                 # done callback drops it and logs any unexpected failure.
                 self._monitor_tasks.add(task)
                 task.add_done_callback(self._on_monitor_task_done)
+
+        # Notify callback (newly-added objects are included in updates, so the
+        # existing callback path surfaces them to consumers). A consumer
+        # callback raising must never break update processing, monitoring or
+        # the reconnect machinery that dispatches updates.
+        if updates and self._updated_callback:
+            try:
+                self._updated_callback(self, updates)
+            except Exception:
+                _LOGGER.exception("Error in model updated callback")
 
         return updates
 
@@ -927,6 +986,29 @@ class ICModelController(
             if exc is not None:
                 _LOGGER.warning("Monitor request for new objects failed: %s", exc)
 
+    def _monitor_queries_for(self, objnams: set[str]) -> list[dict[str, Any]]:
+        """Build per-object {objnam, keys} tracking queries for the given objects.
+
+        Equivalent to filtering ``PoolModel.attributes_to_track()`` down to
+        ``objnams``, but built directly from the model's attribute map so the
+        cost scales with the number of new objects instead of the size of the
+        whole model. Objects the model does not hold (or does not track) are
+        skipped.
+        """
+        # The model only ever holds objects whose type is in its attribute map,
+        # so the per-type lookup below cannot miss for a held object. The map
+        # has no public accessor; this mirrors attributes_to_track() exactly.
+        attribute_map = self._model._attribute_map
+        queries: list[dict[str, Any]] = []
+        for objnam in sorted(objnams):
+            pool_obj = self._model[objnam]
+            if pool_obj is None:
+                continue
+            attributes = attribute_map.get(pool_obj.objtype)
+            if attributes:
+                queries.append({"objnam": pool_obj.objnam, "keys": list(attributes)})
+        return queries
+
     async def _request_monitoring_for(self, objnams: set[str]) -> None:
         """Request attribute monitoring for the given (newly-added) objects.
 
@@ -935,9 +1017,9 @@ class ICModelController(
         MAX_ATTRIBUTES_PER_QUERY. Connection errors are logged and swallowed:
         this runs in a background task off the notification hot path.
         """
-        # Reuse the model's tracking query, filtered to the new objects so we only
+        # Build tracking queries for only the new objects so we only
         # (re-)subscribe what is needed.
-        queries = [q for q in self._model.attributes_to_track() if q["objnam"] in objnams]
+        queries = self._monitor_queries_for(objnams)
         if not queries:
             return
 
@@ -1111,6 +1193,17 @@ class ICModelController(
                 for req in requests:
                     if not req.future.done():
                         req.future.set_exception(e)
+            except Exception as e:
+                # Unexpected failure: the detached batch can never be re-sent,
+                # so the peer futures must still be resolved or their callers
+                # hang forever. The owner observes the error via the re-raise
+                # (its own future is abandoned unresolved, so no stale
+                # "exception never retrieved" warning is left behind).
+                _LOGGER.exception("Unexpected error flushing coalesced changes")
+                for req in requests:
+                    if req is not owner_request and not req.future.done():
+                        req.future.set_exception(e)
+                raise
 
     # --------------------------------------------------------------------------
     # Convenience methods for common operations
@@ -1252,6 +1345,17 @@ MAX_RECONNECT_DELAY = 600
 CIRCUIT_BREAKER_FAILURES = 5
 CIRCUIT_BREAKER_RESET_TIME = 300
 
+# Failure types a connection attempt is expected to raise. Anything else is
+# logged with a traceback but still counts as a failed attempt: an unexpected
+# exception must not end reconnection permanently.
+_EXPECTED_START_ERRORS = (
+    ICTimeoutError,
+    TimeoutError,
+    OSError,
+    ICConnectionError,
+    ICCommandError,
+)
+
 
 @runtime_checkable
 class ICConnectionHandlerCallbacks(Protocol):
@@ -1319,6 +1423,8 @@ class ICConnectionHandler:
 
         self._starter_task: asyncio.Task[None] | None = None
         self._disconnect_debounce_task: asyncio.Task[None] | None = None
+        self._stop_task: asyncio.Task[None] | None = None
+        self._start_attempt: asyncio.Future[None] | None = None
         self._stopped = False
         self._first_time = True
         self._is_connected = False
@@ -1344,6 +1450,16 @@ class ICConnectionHandler:
         """Return the managed controller."""
         return self._controller
 
+    @property
+    def connected(self) -> bool:
+        """Return True while the handler considers the connection established.
+
+        This is the handler-level (debounced) view of availability: it turns
+        True after a successful connect or reconnect and False on disconnect
+        or ``stop()``/``astop()``.
+        """
+        return self._is_connected
+
     async def start(self) -> None:
         """Start the connection handler.
 
@@ -1351,139 +1467,220 @@ class ICConnectionHandler:
         If the first connection attempt fails, the exception is raised.
         Subsequent reconnections happen automatically in the background.
 
+        Concurrent ``start()`` calls share (and await) the same first attempt.
+        After ``stop()``/``astop()`` the handler may be started again; any
+        still-running teardown from the previous stop is awaited first so the
+        old connection cannot race the new one.
+
         Raises:
             ICConnectionError: If the first connection attempt fails.
         """
-        if not self._starter_task:
-            # Create an event to signal first connection attempt complete
-            first_attempt_done = asyncio.Event()
-            first_attempt_error: Exception | None = None
+        # Serialize with an in-flight teardown from a previous stop(): the old
+        # controller.stop() must fully release its connection before a new one
+        # is opened, or the resumed teardown could disown the fresh socket.
+        if self._stop_task is not None:
+            await asyncio.wait({self._stop_task})
+            self._stop_task = None
+        self._stopped = False
 
-            async def starter_with_signal() -> None:
-                nonlocal first_attempt_error
-                try:
-                    await self._controller.start()
-                    # Success on first attempt
-                    self._failure_count = 0
-                    self._last_failure_time = None
-                    if self._first_time:
-                        self.on_started(self._controller)
-                        self._first_time = False
-                    self._is_connected = True
-                    if self._starter_task is asyncio.current_task():
-                        self._starter_task = None
-                except (ICTimeoutError, OSError, ICConnectionError, ICCommandError) as err:
-                    first_attempt_error = err
-                finally:
-                    first_attempt_done.set()
+        attempt = self._start_attempt
+        if attempt is not None and attempt.done() and self._is_connected:
+            # Already connected (e.g. start() called twice): nothing to do.
+            return
+        if attempt is None:
+            attempt = asyncio.get_running_loop().create_future()
+            self._start_attempt = attempt
+            self._starter_task = asyncio.create_task(self._starter(first_attempt=attempt))
+            self._starter_task.add_done_callback(self._on_starter_task_done)
 
-                # If first attempt failed, continue with normal reconnection logic
-                if first_attempt_error is not None:
-                    await self._starter(initial_delay=self._time_between_reconnects)
-
-            self._starter_task = asyncio.create_task(starter_with_signal())
-
-            # Wait for first attempt to complete
-            await first_attempt_done.wait()
-
-            # If first attempt failed, raise the error
-            if first_attempt_error is not None:
-                raise first_attempt_error
+        # Shield the shared attempt: cancelling one concurrent start() caller
+        # must not cancel the attempt other callers (and the handler) rely on.
+        await asyncio.shield(attempt)
 
     def stop(self) -> None:
-        """Stop the handler and controller."""
+        """Stop the handler and controller.
+
+        Synchronous and safe to call from callbacks. The controller teardown
+        runs in a tracked background task; use :meth:`astop` to also wait for
+        that teardown to complete (e.g. in Home Assistant's
+        ``async_unload_entry``). After stopping, the handler can be started
+        again with :meth:`start`.
+        """
         self._stopped = True
+        self._is_connected = False
         if self._starter_task:
             self._starter_task.cancel()
             self._starter_task = None
         if self._disconnect_debounce_task:
             self._disconnect_debounce_task.cancel()
             self._disconnect_debounce_task = None
-        # Fire and forget the async stop
-        asyncio.create_task(self._stop_controller())
+        if self._start_attempt is not None:
+            if not self._start_attempt.done():
+                self._start_attempt.cancel()
+            elif not self._start_attempt.cancelled():
+                # Consume any unretrieved failure so dropping the reference
+                # cannot log "exception was never retrieved".
+                self._start_attempt.exception()
+            self._start_attempt = None
+        # Schedule the async teardown in a *tracked* task: an untracked task is
+        # only weakly referenced by the loop and can be garbage-collected (or
+        # cancelled at loop shutdown) before it ever runs.
+        if self._stop_task is None or self._stop_task.done():
+            try:
+                self._stop_task = asyncio.create_task(self._stop_controller())
+            except RuntimeError:
+                self._stop_task = None
+                _LOGGER.warning(
+                    "stop() called without a running event loop; "
+                    "controller teardown was not scheduled - use astop() from async code"
+                )
+
+    async def astop(self) -> None:
+        """Stop the handler and wait for the full controller teardown.
+
+        Async counterpart of :meth:`stop` for consumers that must not proceed
+        until the connection is completely closed.
+        """
+        self.stop()
+        if self._stop_task is not None:
+            await self._stop_task
+            self._stop_task = None
 
     async def _stop_controller(self) -> None:
         """Stop the controller asynchronously."""
-        with contextlib.suppress(Exception):
+        try:
             await self._controller.stop()
+        except Exception:
+            _LOGGER.exception("Error while stopping controller")
 
-    async def _starter(self, initial_delay: int = 0) -> None:
-        """Attempt to connect with exponential backoff."""
+    def _invoke_callback(self, callback: Callable[..., None], *args: Any) -> None:
+        """Invoke a user callback, logging instead of propagating exceptions.
+
+        A consumer callback raising must never kill the reconnect machinery or
+        make a successful connection look failed.
+        """
+        try:
+            callback(*args)
+        except Exception:
+            _LOGGER.exception("Error in %s callback", getattr(callback, "__name__", repr(callback)))
+
+    def _on_starter_task_done(self, task: asyncio.Task[None]) -> None:
+        """Safety net: surface a reconnect task that died unexpectedly."""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            _LOGGER.error("Reconnect task died unexpectedly: %r", exc)
+
+    async def _starter(
+        self,
+        initial_delay: int = 0,
+        first_attempt: asyncio.Future[None] | None = None,
+    ) -> None:
+        """Attempt to connect with exponential backoff.
+
+        When ``first_attempt`` is given, it mirrors the outcome of the first
+        connection attempt so ``start()`` can await it: success resolves it,
+        the first failure records the exception (while this loop keeps
+        retrying in the background), and cancellation or a stop cancels it -
+        a cancelled attempt never reports success.
+        """
         delay = self._time_between_reconnects
 
-        while not self._stopped:
-            try:
-                # Check circuit breaker reset
-                if (
-                    self._last_failure_time
-                    and time.monotonic() - self._last_failure_time > CIRCUIT_BREAKER_RESET_TIME
-                ):
+        try:
+            while not self._stopped:
+                try:
+                    # Check circuit breaker reset
+                    if (
+                        self._last_failure_time
+                        and time.monotonic() - self._last_failure_time > CIRCUIT_BREAKER_RESET_TIME
+                    ):
+                        self._failure_count = 0
+                        self._last_failure_time = None
+
+                    # Circuit breaker open - pause
+                    if self._failure_count >= CIRCUIT_BREAKER_FAILURES:
+                        _LOGGER.warning(
+                            "Circuit breaker open - pausing %ds", CIRCUIT_BREAKER_RESET_TIME
+                        )
+                        await asyncio.sleep(CIRCUIT_BREAKER_RESET_TIME)
+                        self._failure_count = 0
+
+                    if initial_delay:
+                        self._invoke_callback(self.on_retrying, initial_delay)
+                        self._controller._metrics.reconnect_attempts += 1
+                        await asyncio.sleep(initial_delay)
+                        initial_delay = 0
+
+                    # Re-check after the sleeps above: stop() may have run while
+                    # we waited, and opening a fresh connection past that point
+                    # would leave a socket nothing ever closes.
+                    if self._stopped:
+                        return
+
+                    await self._controller.start()
+
+                    # Success - reset circuit breaker
                     self._failure_count = 0
                     self._last_failure_time = None
 
-                # Circuit breaker open - pause
-                if self._failure_count >= CIRCUIT_BREAKER_FAILURES:
-                    _LOGGER.warning(
-                        "Circuit breaker open - pausing %ds", CIRCUIT_BREAKER_RESET_TIME
-                    )
-                    await asyncio.sleep(CIRCUIT_BREAKER_RESET_TIME)
-                    self._failure_count = 0
+                    if self._disconnect_debounce_task:
+                        self._disconnect_debounce_task.cancel()
+                        self._disconnect_debounce_task = None
 
-                if initial_delay:
-                    self.on_retrying(initial_delay)
-                    self._controller._metrics.reconnect_attempts += 1
-                    await asyncio.sleep(initial_delay)
-                    initial_delay = 0
+                    if self._first_time:
+                        self._invoke_callback(self.on_started, self._controller)
+                        self._first_time = False
+                    elif not self._is_connected:
+                        self._invoke_callback(self.on_reconnected, self._controller)
 
-                # Re-check after the sleeps above: stop() may have run while we
-                # waited, and opening a fresh connection past that point would
-                # leave a socket nothing ever closes.
-                if self._stopped:
+                    self._is_connected = True
+                    if first_attempt is not None and not first_attempt.done():
+                        first_attempt.set_result(None)
+                    # Only clear the reference if it points at THIS task;
+                    # clearing someone else's reference would let stop() miss it.
+                    if self._starter_task is asyncio.current_task():
+                        self._starter_task = None
                     return
 
-                await self._controller.start()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as err:
+                    self._failure_count += 1
+                    self._last_failure_time = time.monotonic()
+                    self._controller._metrics.reconnect_attempts += 1
 
-                # Success - reset circuit breaker
-                self._failure_count = 0
-                self._last_failure_time = None
+                    if isinstance(err, _EXPECTED_START_ERRORS):
+                        _LOGGER.error(
+                            "Connection failed: %s (failure %d/%d)",
+                            err,
+                            self._failure_count,
+                            CIRCUIT_BREAKER_FAILURES,
+                        )
+                    else:
+                        # An unexpected exception anywhere in the start path
+                        # (including one escaping a consumer's code) must not
+                        # silently end reconnection forever.
+                        _LOGGER.exception(
+                            "Unexpected error during connection attempt (failure %d/%d)",
+                            self._failure_count,
+                            CIRCUIT_BREAKER_FAILURES,
+                        )
 
-                if self._disconnect_debounce_task:
-                    self._disconnect_debounce_task.cancel()
-                    self._disconnect_debounce_task = None
+                    if first_attempt is not None and not first_attempt.done():
+                        first_attempt.set_exception(err)
 
-                if self._first_time:
-                    self.on_started(self._controller)
-                    self._first_time = False
-                elif not self._is_connected:
-                    self.on_reconnected(self._controller)
-
-                self._is_connected = True
-                # Only clear the reference if it points at THIS task; clearing
-                # someone else's reference would let stop() miss it.
-                if self._starter_task is asyncio.current_task():
-                    self._starter_task = None
-                return
-
-            except (
-                ICTimeoutError,
-                TimeoutError,
-                OSError,
-                ICConnectionError,
-                ICCommandError,
-            ) as err:
-                self._failure_count += 1
-                self._last_failure_time = time.monotonic()
-                self._controller._metrics.reconnect_attempts += 1
-
-                _LOGGER.error(
-                    "Connection failed: %s (failure %d/%d)",
-                    err,
-                    self._failure_count,
-                    CIRCUIT_BREAKER_FAILURES,
-                )
-                self.on_retrying(delay)
-                await asyncio.sleep(delay)
-                delay = min(int(delay * 1.5), MAX_RECONNECT_DELAY)
+                    self._invoke_callback(self.on_retrying, delay)
+                    await asyncio.sleep(delay)
+                    # Grow the backoff without the old truncation degeneracy
+                    # (int(1 * 1.5) == 1 forever; a delay of 0 hot-looped).
+                    delay = min(max(delay + 1, int(delay * 1.5)), MAX_RECONNECT_DELAY)
+        finally:
+            # The attempt may end unresolved (stop() flipped _stopped before a
+            # result, or this task was cancelled): never leave start() hanging
+            # or reporting success.
+            if first_attempt is not None and not first_attempt.done():
+                first_attempt.cancel()
 
     def _on_disconnect(self, controller: ICBaseController, exc: Exception | None) -> None:
         """Handle disconnection."""
@@ -1504,6 +1701,7 @@ class ICConnectionHandler:
         # disconnect paths can fire for the same dead connection)
         if not self._starter_task or self._starter_task.done():
             self._starter_task = asyncio.create_task(self._starter(self._time_between_reconnects))
+            self._starter_task.add_done_callback(self._on_starter_task_done)
 
     async def _delayed_disconnect(
         self, controller: ICBaseController, exc: Exception | None
@@ -1511,16 +1709,16 @@ class ICConnectionHandler:
         """Notify about disconnection after debounce period."""
         try:
             await asyncio.sleep(self._disconnect_debounce_time)
-            if not self._is_connected:
-                self.on_disconnected(controller, exc)
         except asyncio.CancelledError:
-            pass
+            return
+        if not self._is_connected:
+            self._invoke_callback(self.on_disconnected, controller, exc)
 
     def _on_model_updated(
         self, controller: ICModelController, updates: dict[str, dict[str, Any]]
     ) -> None:
         """Internal callback that forwards to user callback."""
-        self.on_updated(controller, updates)
+        self._invoke_callback(self.on_updated, controller, updates)
 
     # Override these methods or assign callables to handle events
     def on_started(self, controller: ICBaseController) -> None:
