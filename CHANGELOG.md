@@ -7,6 +7,132 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+This release integrates the adversarial-review fix wave covering issues
+#53–#65 (PRs #69–#74) plus the integration pass (#68).
+
+### Added
+
+- **Ghost-equipment fix, end-to-end** (#56, #68): `PoolModel` gains
+  `remove_object(objnam)` and `reconcile(obj_list)` (which prunes objects
+  absent from an authoritative snapshot and returns the removed objnams), and
+  `ICModelController.start()` now reconciles the model against the
+  authoritative connect snapshot *before* building subscription queries.
+  Equipment deleted at the panel is pruned from the model (and from
+  re-subscription queries) on every connect and reconnect, removals are
+  logged at INFO, and each removed objnam is reported to the updated callback
+  as a `{objnam: None}` entry so consumers (e.g. Home Assistant) can remove
+  the corresponding entities. Previously deleted equipment lived in the model
+  — and kept being re-subscribed — until process restart.
+- `ICConnectionHandler.astop()` (#61): async stop that waits for the full
+  controller teardown, for consumers that must not proceed until the
+  connection is completely closed (e.g. Home Assistant's
+  `async_unload_entry`). `stop()` remains the synchronous best-effort form:
+  it now runs the teardown in a *tracked* background task (previously the
+  fire-and-forget task could be garbage-collected before running) and the
+  handler can be started again after a stop.
+- `ICConnectionHandler.connected` (#61): debounced handler-level availability
+  property (`True` after a successful connect/reconnect, `False` on
+  disconnect or stop).
+- Partial-snapshot visibility (#68): if the connect snapshot contains entries
+  the model cannot load (missing or untracked `OBJTYP`), a WARNING is logged
+  with the snapshot and loaded object counts instead of silently loading a
+  partial model.
+- `PoolModel.__contains__` (#56): `"OBJNAM" in model` now works (it
+  previously iterated `PoolObject` values and always returned `False`).
+- Discovery: `find_unit_by_name()` and `find_unit_by_host()` accept a
+  `zeroconf=` parameter to reuse a shared instance (#54).
+
+### Changed
+
+- The model updated callback now receives
+  `Mapping[str, dict[str, Any] | None]`: a value of `None` marks an object
+  removed during reconnect reconciliation. Attribute-change payloads are
+  unchanged at runtime.
+- `PoolObject.properties` and `PoolModel.objects` return read-only views
+  (#56); mutations must go through the model APIs so change tracking stays
+  coherent. `PoolObject.__init__` no longer mutates or aliases the caller's
+  params dict, so one `objectList` can safely feed multiple models.
+- Hot-path performance (#60): cursor-based TCP framing (no O(n²) rescans),
+  WebSocket text frames decoded without an extra copy, notification-observer
+  snapshot only taken when observers exist, and queue-overflow drops logged
+  as periodic summaries instead of per-message spam.
+
+### Fixed
+
+- **Discovery closed a caller-provided Zeroconf instance** (#53): one
+  discovery call could kill mDNS for the whole host process (e.g. all of Home
+  Assistant). Discovery now only ever closes an `AsyncZeroconf` it created
+  itself; borrowed instances are never wrapped or closed.
+- **Discovery rewritten on `AsyncServiceBrowser`** (#54): the previous
+  threaded `ServiceBrowser` bridged callbacks cross-thread into asyncio,
+  racing the event loop and able to silently kill the dispatch thread.
+  Handlers now run in the event loop; candidates resolve concurrently with
+  bounded concurrency and a real deadline, add/update events are deduplicated,
+  IPv6 scope ids are preserved, and teardown never blocks the loop.
+- **`PoolObject.update()` falsely reported `OBJTYP`/`SUBTYP` changes on every
+  snapshot replay** (#55): the dedup check read `_properties`, but those keys
+  live in dedicated slots, so every reconnect fired the update callback for
+  the entire model with spurious changes. Identical replays now produce an
+  empty change set; real transitions (including clearing `SUBTYP`) are
+  reported exactly once.
+- **Queued `send_request` could dereference a torn-down connection** (#57): a
+  disconnect between the connected-check and the send raised `AttributeError`
+  (not an `ICError`) and could send a stale request on a new connection
+  generation. The protocol is captured and re-validated under the request
+  lock; torn-down or replaced generations raise `ICConnectionError`.
+- **Valid non-object JSON killed the reader** (#58): a frame like `123` or
+  `[]` aborted the TCP connection or silently zombied the WebSocket reader.
+  Non-dict frames are now logged and skipped on both transports, and an
+  unexpected WebSocket reader error runs the disconnect path.
+- **WebSocket shutdown and callback gaps** (#59): in-flight requests now fail
+  fast on deliberate close instead of waiting out the 30s timeout;
+  `ICConnection.disconnect()` awaits the transport's `aclose()` (reader,
+  notification consumer, and close handshake are all awaited); a cancellation
+  arriving during a suspended async callback no longer raises
+  `AttributeError`; async-callable notification callbacks are properly
+  awaited; the reserved `messageID` kwarg is rejected with `ValueError`.
+- **Handler restart and stop races** (#61): `ICBaseController.stop()`
+  detaches the connection reference before awaiting disconnect so a
+  concurrent `start()` cannot be disowned; `ICConnectionHandler.start()`
+  serializes with an in-flight teardown and resets the stopped flag, making
+  stop-then-start restarts (including later reconnection) work; and
+  `ICModelController.stop()` cancels and awaits its background monitor tasks.
+- **One unexpected exception permanently killed reconnection** (#62): user
+  callbacks (`on_started`, `on_reconnected`, `on_disconnected`,
+  `on_retrying`, the update callback) are now exception-guarded; the
+  reconnect loop retries on *any* non-cancellation error; `start()` shares
+  one shielded first attempt across concurrent callers and never reports
+  success for a cancelled attempt; `ICBaseController.start()` /
+  `ICModelController.start()` are transactional (a partial init closes the
+  socket and cancels tasks before the error propagates); and the backoff no
+  longer degenerates (`int(1 * 1.5) == 1` forever; a delay of 0 hot-looped).
+- **Coalesced writes could strand peer futures** (#63): an unexpected flush
+  exception now reaches every detached waiter instead of leaving their
+  futures pending forever; `start()` monitoring batches are capped *before*
+  appending so no batch exceeds `MAX_ATTRIBUTES_PER_QUERY`; and new-object
+  monitoring builds queries only for the added objnams instead of walking the
+  whole model.
+- **Color Sync cancellation and ack metadata** (#64): a cancellation
+  delivered to the Sync lifecycle while a cancelled child task was still
+  unwinding was swallowed (breaking `asyncio.timeout` conversion); it now
+  propagates. When a 200 acknowledgement and a failing `NotifyList` arrive in
+  the same read segment, the raised `ICLightGroupError` now records
+  `response_received`/`acknowledged` correctly. Dead stores removed.
+- **Docs described APIs that do not exist** (#65): documentation now matches
+  the shipped API surface, exports are aligned, and `send_request` documents
+  `ICTimeoutError` and the reserved-kwarg `ValueError`.
+- `PoolModel.add_objects()` skips malformed entries (missing or invalid
+  `objnam`/`params`) instead of letting one bad entry abort the rest (#56).
+
+### Documentation
+
+- `ICConnectionHandler.astop()` and the `connected` property are documented
+  in the README, `docs/API.md` and `docs/USAGE.md`; async shutdown examples
+  use `await handler.astop()` where full teardown matters, with
+  `handler.stop()` kept as the sync best-effort form (#68).
+- The reconcile/removal-callback contract (`{objnam: None}`) is documented in
+  the README, `docs/API.md` and `docs/USAGE.md` (#68).
+
 ## [0.1.22] - 2026-07-15
 
 ### Added
@@ -608,7 +734,10 @@ First stable release of pyintellicenter.
 - `orjson` for fast JSON serialization
 - Python 3.11+ required
 
-[Unreleased]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.19...HEAD
+[Unreleased]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.22...HEAD
+[0.1.22]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.21...v0.1.22
+[0.1.21]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.20...v0.1.21
+[0.1.20]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.19...v0.1.20
 [0.1.19]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.18...v0.1.19
 [0.1.18]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.17...v0.1.18
 [0.1.17]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.16...v0.1.17

@@ -256,7 +256,7 @@ from .connection import DEFAULT_TCP_PORT, DEFAULT_WEBSOCKET_PORT, ICConnection, 
 from .exceptions import ICCommandError, ICConnectionError, ICError, ICResponseError, ICTimeoutError
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Callable, Mapping
     from contextlib import AbstractAsyncContextManager
 
     from .model import PoolModel, PoolObject
@@ -818,7 +818,7 @@ class ICModelController(
         super().__init__(host, port, keepalive_interval, transport)
         self._model = model
         self._updated_callback: (
-            Callable[[ICModelController, dict[str, dict[str, Any]]], None] | None
+            Callable[[ICModelController, Mapping[str, dict[str, Any] | None]], None] | None
         ) = None
 
         # Request coalescing state
@@ -845,13 +845,28 @@ class ICModelController(
         return self._model
 
     def set_updated_callback(
-        self, callback: Callable[[ICModelController, dict[str, dict[str, Any]]], None] | None
+        self,
+        callback: Callable[[ICModelController, Mapping[str, dict[str, Any] | None]], None] | None,
     ) -> None:
-        """Set callback for model updates."""
+        """Set callback for model updates.
+
+        The callback receives a mapping of objnam to its changed attributes.
+        A value of ``None`` marks a *removal*: the object was pruned from the
+        model because it disappeared from the authoritative snapshot fetched
+        on (re)connect (equipment deleted at the panel). Consumers should tear
+        down anything (e.g. Home Assistant entities) they created for that
+        objnam. Attribute-change entries are always non-``None`` dicts.
+        """
         self._updated_callback = callback
 
     async def start(self) -> None:
         """Connect, fetch objects, and start monitoring.
+
+        The GetParamList object snapshot fetched here is authoritative: the
+        model is reconciled against it, so equipment deleted at the panel is
+        pruned from the model (and from the subscription queries built below)
+        on every connect and reconnect. Removals are logged at INFO and
+        reported to the updated callback as ``{objnam: None}`` entries.
 
         Startup is transactional: if anything fails after the connection is
         established (object fetch, model load, monitoring subscription), the
@@ -870,12 +885,43 @@ class ICModelController(
             if self._connection:
                 self._connection.set_notification_callback(self._on_notification)
 
-            # Fetch all objects
+            # Fetch the authoritative snapshot of all objects
             all_objects = await self.get_all_objects(
                 [OBJTYP_ATTR, SUBTYP_ATTR, SNAME_ATTR, PARENT_ATTR]
             )
+
+            # Reconcile BEFORE loading and building subscription queries:
+            # equipment deleted at the panel never appears in a NotifyList
+            # again, so this snapshot is the only signal that an object is
+            # gone. Pruning first keeps ghosts out of the tracking queries.
+            removed = self._model.reconcile(all_objects)
             self._model.add_objects(all_objects)
             _LOGGER.info("Model contains %d objects", self._model.num_objects)
+
+            # Partial-snapshot visibility: after reconcile the model holds
+            # only objects present in the snapshot, so a count mismatch means
+            # entries were skipped (missing or untracked OBJTYP - e.g. the
+            # firmware 3.008+ pruned-away-params artifacts).
+            if len(all_objects) > self._model.num_objects:
+                _LOGGER.warning(
+                    "Object snapshot contained %d entries but only %d were loaded "
+                    "into the model (entries with a missing or untracked OBJTYP "
+                    "are skipped)",
+                    len(all_objects),
+                    self._model.num_objects,
+                )
+
+            if removed:
+                _LOGGER.info(
+                    "Removed %d object(s) no longer present on the panel: %s",
+                    len(removed),
+                    ", ".join(removed),
+                )
+                # Report removals through the updated callback using the
+                # documented {objnam: None} convention so consumers can tear
+                # down entities for deleted equipment.
+                removal_changes: dict[str, dict[str, Any] | None] = dict.fromkeys(removed)
+                self._notify_updated(removal_changes)
 
             # Request monitoring of attributes in batches
             attributes = self._model.attributes_to_track()
@@ -962,16 +1008,24 @@ class ICModelController(
                 task.add_done_callback(self._on_monitor_task_done)
 
         # Notify callback (newly-added objects are included in updates, so the
-        # existing callback path surfaces them to consumers). A consumer
-        # callback raising must never break update processing, monitoring or
-        # the reconnect machinery that dispatches updates.
+        # existing callback path surfaces them to consumers).
+        self._notify_updated(updates)
+
+        return updates
+
+    def _notify_updated(self, updates: Mapping[str, dict[str, Any] | None]) -> None:
+        """Invoke the consumer updated callback, containing any exception.
+
+        A consumer callback raising must never break update processing,
+        monitoring, startup or the reconnect machinery that dispatches
+        updates. An entry with value ``None`` marks an object removed from
+        the model (reconnect reconciliation); attribute changes are dicts.
+        """
         if updates and self._updated_callback:
             try:
                 self._updated_callback(self, updates)
             except Exception:
                 _LOGGER.exception("Error in model updated callback")
-
-        return updates
 
     def _on_monitor_task_done(self, task: asyncio.Task[None]) -> None:
         """Discard a finished monitor task and surface any unexpected error.
@@ -1380,8 +1434,14 @@ class ICConnectionHandlerCallbacks(Protocol):
         """Called before each retry attempt."""
         ...
 
-    def on_updated(self, controller: ICModelController, updates: dict[str, dict[str, Any]]) -> None:
-        """Called when model is updated (only for ICModelController)."""
+    def on_updated(
+        self, controller: ICModelController, updates: Mapping[str, dict[str, Any] | None]
+    ) -> None:
+        """Called when model is updated (only for ICModelController).
+
+        An entry with value ``None`` marks an object removed from the model
+        during reconnect reconciliation (equipment deleted at the panel).
+        """
         ...
 
 
@@ -1715,7 +1775,7 @@ class ICConnectionHandler:
             self._invoke_callback(self.on_disconnected, controller, exc)
 
     def _on_model_updated(
-        self, controller: ICModelController, updates: dict[str, dict[str, Any]]
+        self, controller: ICModelController, updates: Mapping[str, dict[str, Any] | None]
     ) -> None:
         """Internal callback that forwards to user callback."""
         self._invoke_callback(self.on_updated, controller, updates)
@@ -1734,5 +1794,11 @@ class ICConnectionHandler:
         """Called before retry attempt. Override or replace to handle."""
         _LOGGER.info("Retrying in %ds", delay)
 
-    def on_updated(self, controller: ICModelController, updates: dict[str, dict[str, Any]]) -> None:
-        """Called when model is updated. Override or replace to handle."""
+    def on_updated(
+        self, controller: ICModelController, updates: Mapping[str, dict[str, Any] | None]
+    ) -> None:
+        """Called when model is updated. Override or replace to handle.
+
+        An entry with value ``None`` marks an object removed from the model
+        during reconnect reconciliation (equipment deleted at the panel).
+        """

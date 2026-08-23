@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import inspect
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -3469,6 +3470,267 @@ class TestTransactionalStart:
             assert total_keys <= MAX_ATTRIBUTES_PER_QUERY
         covered = [item["objnam"] for batch in batches for item in batch]
         assert covered == [f"OBJ{i}" for i in range(7)]
+
+        await controller.stop()
+
+
+class TestStartReconcile:
+    """Regression tests for issue #68: start() reconciles the model.
+
+    Every (re)connect must prune objects absent from the authoritative
+    GetParamList snapshot BEFORE building subscription queries (ghost-equipment
+    fix end-to-end), report removals to the consumer as ``{objnam: None}``
+    entries, and surface partial snapshots with a WARNING.
+    """
+
+    def _mock_connection(self):
+        connection = AsyncMock()
+        connection.connected = True
+        connection.set_disconnect_callback = MagicMock()
+        connection.set_notification_callback = MagicMock()
+        return connection
+
+    @staticmethod
+    def _system_info_response():
+        return {
+            "response": "200",
+            "objectList": [
+                {
+                    "objnam": "INCR",
+                    "params": {
+                        "PROPNAME": "Test Pool",
+                        "VER": "1.0.0",
+                        "MODE": "ENGLISH",
+                        "SNAME": "TestSystem",
+                    },
+                }
+            ],
+        }
+
+    def _scripted_connection(self, snapshot, batches):
+        """Build a mock connection whose GetParamList serves ``snapshot``.
+
+        ``snapshot`` is a one-key dict {"objects": [...]} so tests can swap the
+        served object list between start() calls (simulating a reconnect after
+        equipment was deleted at the panel). RequestParamList batches are
+        appended to ``batches``.
+        """
+        connection = self._mock_connection()
+        system_info_response = self._system_info_response()
+
+        async def scripted_send(cmd, **kwargs):
+            if cmd == "GetParamList" and kwargs.get("condition"):
+                return system_info_response
+            if cmd == "GetParamList":
+                return {"response": "200", "objectList": snapshot["objects"]}
+            if cmd == "RequestParamList":
+                batches.append(kwargs["objectList"])
+            return {"response": "200", "objectList": []}
+
+        connection.send_request = AsyncMock(side_effect=scripted_send)
+        return connection
+
+    @pytest.mark.asyncio
+    async def test_reconnect_prunes_deleted_object(self, caplog):
+        """A reconnect snapshot missing an object prunes it end-to-end.
+
+        The ghost is removed from the model, the removal is reported to the
+        updated callback as {objnam: None}, it is not re-subscribed, and the
+        removal is logged at INFO.
+        """
+        model = PoolModel()
+        controller = ICModelController("192.168.1.100", model, 6681)
+        snapshot = {
+            "objects": [
+                {
+                    "objnam": "POOL1",
+                    "params": {"OBJTYP": "BODY", "SUBTYP": "POOL", "SNAME": "Pool"},
+                },
+                {
+                    "objnam": "C001",
+                    "params": {"OBJTYP": "CIRCUIT", "SUBTYP": "LIGHT", "SNAME": "Light"},
+                },
+            ]
+        }
+        batches: list[list[dict]] = []
+        connection = self._scripted_connection(snapshot, batches)
+
+        received: list[dict] = []
+        controller.set_updated_callback(lambda ctrl, updates: received.append(dict(updates)))
+
+        with patch("pyintellicenter.controller.ICConnection", return_value=connection):
+            await controller.start()
+            assert model["C001"] is not None
+
+            # Equipment deleted at the panel: absent from the next snapshot.
+            snapshot["objects"] = snapshot["objects"][:1]
+            batches.clear()
+            received.clear()
+            with caplog.at_level(logging.INFO, logger="pyintellicenter.controller"):
+                await controller.start()
+
+        # Ghost pruned from the model; surviving object retained.
+        assert model["C001"] is None
+        assert model["POOL1"] is not None
+
+        # Removal reported to the consumer with the {objnam: None} convention.
+        removal_payloads = [u for u in received if "C001" in u]
+        assert removal_payloads, "expected the removal to reach the updated callback"
+        assert all(u["C001"] is None for u in removal_payloads)
+
+        # No re-subscription for the ghost; the survivor is still subscribed.
+        targeted = {item["objnam"] for batch in batches for item in batch}
+        assert "C001" not in targeted
+        assert "POOL1" in targeted
+
+        # Removal logged at INFO.
+        removal_logs = [
+            r for r in caplog.records if r.levelno == logging.INFO and "C001" in r.getMessage()
+        ]
+        assert removal_logs, "expected an INFO log naming the removed object"
+
+        await controller.stop()
+
+    @pytest.mark.asyncio
+    async def test_reconcile_runs_before_subscription_queries(self):
+        """Ghosts already in the model never appear in tracking queries.
+
+        A model reused across connections may hold stale objects before the
+        first start(); pruning must happen before attributes_to_track() is
+        consulted so the very first subscription pass is already clean.
+        """
+        model = PoolModel()
+        model.add_object("GHOST1", {"OBJTYP": "CIRCUIT", "SUBTYP": "LIGHT", "SNAME": "Old Light"})
+        controller = ICModelController("192.168.1.100", model, 6681)
+        snapshot = {
+            "objects": [
+                {
+                    "objnam": "POOL1",
+                    "params": {"OBJTYP": "BODY", "SUBTYP": "POOL", "SNAME": "Pool"},
+                },
+            ]
+        }
+        batches: list[list[dict]] = []
+        connection = self._scripted_connection(snapshot, batches)
+
+        with patch("pyintellicenter.controller.ICConnection", return_value=connection):
+            await controller.start()
+
+        assert model["GHOST1"] is None
+        targeted = {item["objnam"] for batch in batches for item in batch}
+        assert "GHOST1" not in targeted
+        assert targeted == {"POOL1"}
+
+        await controller.stop()
+
+    @pytest.mark.asyncio
+    async def test_removal_callback_exception_does_not_abort_start(self):
+        """A consumer callback raising on a removal must not fail start()."""
+        model = PoolModel()
+        controller = ICModelController("192.168.1.100", model, 6681)
+        snapshot = {
+            "objects": [
+                {
+                    "objnam": "POOL1",
+                    "params": {"OBJTYP": "BODY", "SUBTYP": "POOL", "SNAME": "Pool"},
+                },
+                {
+                    "objnam": "C001",
+                    "params": {"OBJTYP": "CIRCUIT", "SUBTYP": "LIGHT", "SNAME": "Light"},
+                },
+            ]
+        }
+        batches: list[list[dict]] = []
+        connection = self._scripted_connection(snapshot, batches)
+
+        def exploding_callback(ctrl, updates):
+            raise RuntimeError("consumer bug")
+
+        controller.set_updated_callback(exploding_callback)
+
+        with patch("pyintellicenter.controller.ICConnection", return_value=connection):
+            await controller.start()
+            snapshot["objects"] = snapshot["objects"][:1]
+            batches.clear()
+            await controller.start()  # must not raise
+
+        assert model["C001"] is None
+        # Startup completed: subscriptions were still requested after the raise.
+        assert batches, "expected subscription queries despite the callback raise"
+
+        await controller.stop()
+
+    @pytest.mark.asyncio
+    async def test_partial_snapshot_logs_warning_with_counts(self, caplog):
+        """A snapshot with skipped entries logs a WARNING with both counts.
+
+        Entries without OBJTYP (firmware 3.008+ pruning artifacts) or with an
+        untracked type are silently skipped by the model; the controller must
+        surface the delta so a partially-loaded model is visible.
+        """
+        model = PoolModel()
+        controller = ICModelController("192.168.1.100", model, 6681)
+        snapshot = {
+            "objects": [
+                {
+                    "objnam": "POOL1",
+                    "params": {"OBJTYP": "BODY", "SUBTYP": "POOL", "SNAME": "Pool"},
+                },
+                # Pruned-away params (no OBJTYP): skipped by add_objects.
+                {"objnam": "_FDR", "params": {}},
+                # Untracked object type: skipped by add_objects.
+                {"objnam": "X001", "params": {"OBJTYP": "NOTATYPE", "SNAME": "Mystery"}},
+            ]
+        }
+        batches: list[list[dict]] = []
+        connection = self._scripted_connection(snapshot, batches)
+
+        with (
+            patch("pyintellicenter.controller.ICConnection", return_value=connection),
+            caplog.at_level(logging.WARNING, logger="pyintellicenter.controller"),
+        ):
+            await controller.start()
+
+        assert model.num_objects == 1
+        warnings = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.WARNING and "3" in r.getMessage() and "1" in r.getMessage()
+        ]
+        assert warnings, "expected a WARNING with the snapshot (3) and loaded (1) counts"
+
+        await controller.stop()
+
+    @pytest.mark.asyncio
+    async def test_full_snapshot_no_removals_no_warning(self, caplog):
+        """A clean, fully-loaded snapshot produces no removals and no WARNING."""
+        model = PoolModel()
+        controller = ICModelController("192.168.1.100", model, 6681)
+        snapshot = {
+            "objects": [
+                {
+                    "objnam": "POOL1",
+                    "params": {"OBJTYP": "BODY", "SUBTYP": "POOL", "SNAME": "Pool"},
+                },
+            ]
+        }
+        batches: list[list[dict]] = []
+        connection = self._scripted_connection(snapshot, batches)
+
+        received: list[dict] = []
+        controller.set_updated_callback(lambda ctrl, updates: received.append(dict(updates)))
+
+        with (
+            patch("pyintellicenter.controller.ICConnection", return_value=connection),
+            caplog.at_level(logging.WARNING, logger="pyintellicenter.controller"),
+        ):
+            await controller.start()
+            await controller.start()  # reconnect with an identical snapshot
+
+        # No removal payloads: no callback entry ever maps an objnam to None.
+        assert all(value is not None for updates in received for value in updates.values())
+        partial_warnings = [r for r in caplog.records if "snapshot" in r.getMessage().casefold()]
+        assert partial_warnings == []
 
         await controller.stop()
 

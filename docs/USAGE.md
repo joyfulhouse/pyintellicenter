@@ -36,11 +36,16 @@ async def main():
     heaters = controller.get_heaters()
     sensors = controller.get_sensors()
 
-    handler.stop()
+    await handler.astop()
 
 
 asyncio.run(main())
 ```
+
+`await handler.astop()` stops the handler and waits for the connection teardown
+to complete. Use the synchronous `handler.stop()` where you cannot await (for
+example inside a callback); it schedules the teardown in the background. See
+[Shutdown](#shutdown) below.
 
 ### Controlling equipment
 
@@ -125,11 +130,22 @@ monitored projection. `ICLightGroupError` exposes `phase`, `dispatch_started`,
 ```python
 def on_update(controller, changes):
     for objnam, attrs in changes.items():
-        print(f"{objnam} changed: {attrs}")
+        if attrs is None:
+            print(f"{objnam} was removed")  # equipment deleted at the panel
+        else:
+            print(f"{objnam} changed: {attrs}")
 
 
 controller.set_updated_callback(on_update)
 ```
+
+The `changes` payload maps each objnam to a dict of its changed attributes.
+A value of `None` marks a removal: on every (re)connect the controller
+reconciles the model against the authoritative object snapshot, prunes
+equipment that was deleted at the panel (it is also dropped from the
+attribute re-subscription queries), and reports each pruned objnam through
+this callback with value `None`. Consumers should tear down anything they
+created for a removed objnam (e.g. Home Assistant entities).
 
 ### Discovery
 
@@ -185,6 +201,26 @@ handler.on_retrying = lambda delay: print(f"Retrying in {delay}s")
 ```
 
 See [API.md](API.md#icconnectionhandler) for the full callback signatures.
+
+### Shutdown
+
+```python
+# Async code that must not proceed until the connection is fully closed
+# (e.g. Home Assistant's async_unload_entry): stop and await the teardown.
+await handler.astop()
+
+# Sync best-effort form (e.g. from inside a callback): cancels reconnection
+# and schedules the controller teardown in a tracked background task.
+handler.stop()
+
+# Handler-level (debounced) availability
+if handler.connected:
+    ...
+```
+
+`handler.stop()` is synchronous and returns `None` — it is not awaitable.
+After `stop()`/`astop()` the handler can be started again with
+`await handler.start()`.
 
 ### Using a shared Zeroconf instance (Home Assistant)
 
