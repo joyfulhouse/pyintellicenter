@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-22
+
 This release integrates the adversarial-review fix wave covering issues
 #53–#65 (PRs #69–#74), the model ingest follow-up (#78) and the integration
 pass (#68).
@@ -781,7 +783,8 @@ First stable release of pyintellicenter.
 - `orjson` for fast JSON serialization
 - Python 3.11+ required
 
-[Unreleased]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.22...HEAD
+[Unreleased]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.22...v0.2.0
 [0.1.22]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.21...v0.1.22
 [0.1.21]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.20...v0.1.21
 [0.1.20]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.19...v0.1.20
