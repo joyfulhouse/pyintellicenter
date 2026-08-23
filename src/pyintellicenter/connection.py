@@ -55,6 +55,10 @@ CONNECTION_TIMEOUT = 10.0  # seconds to wait for initial connection
 MAX_BUFFER_SIZE = 1024 * 1024  # 1MB max buffer to prevent DoS
 DEFAULT_NOTIFICATION_QUEUE_SIZE = 100  # max queued notifications
 NOTIFICATION_DROP_LOG_INTERVAL = 100  # summarize queue-overflow drops every N drops
+# Max messages merged into one callback invocation per consumer wakeup.
+# Bounded so a sustained burst cannot delay delivery indefinitely; a single
+# message is always dispatched immediately (the drain never waits).
+NOTIFICATION_BATCH_MAX = 25
 
 # Request fields owned by the protocol layer; callers must not override them.
 # messageID correlates the response and command routes it - overriding either
@@ -215,16 +219,22 @@ class ICNotificationMixin:
     _consumer_stop: asyncio.Event | None
     _notification_observer_state: _NotificationObserverState
     _notification_drops: int
+    # When True, messages already sitting in the queue behind the one just
+    # received are drained (bounded by NOTIFICATION_BATCH_MAX) and merged
+    # into a single synthetic NotifyList for one callback invocation.
+    _notification_batching: bool
 
     def _init_notification_mixin(
         self,
         notification_callback: NotificationCallback | None,
         notification_queue_size: int,
         notification_observer_state: _NotificationObserverState | None,
+        notification_batching: bool,
     ) -> None:
         """Initialize notification handling state."""
         self._notification_callback = notification_callback
         self._notification_queue_size = notification_queue_size
+        self._notification_batching = notification_batching
         self._notification_queue = None
         self._consumer_task = None
         self._consumer_stop = None
@@ -340,18 +350,94 @@ class ICNotificationMixin:
                 or self._notification_drops % NOTIFICATION_DROP_LOG_INTERVAL == 0
             ):
                 _LOGGER.warning(
-                    "Notification queue full (%d items) - dropped %d message(s) so far, "
-                    "keeping newest",
+                    "Notification queue full (%d items) - coalesced %d message(s) so far "
+                    "into newer entries",
                     self._notification_queue_size,
                     self._notification_drops,
                 )
             try:
-                self._notification_queue.get_nowait()
-                # Account for the discarded item so queue.join() cannot hang.
+                oldest = self._notification_queue.get_nowait()
+                # Account for the removed item so queue.join() cannot hang.
                 self._notification_queue.task_done()
-                self._notification_queue.put_nowait(msg)
+                if oldest is None:
+                    # The removed item was the shutdown sentinel (should be
+                    # unreachable: teardown detaches the queue before the
+                    # sentinel is enqueued). Restore it so the consumer
+                    # still exits; the new message is stale during shutdown.
+                    self._notification_queue.put_nowait(None)
+                else:
+                    # NotifyList frames are partial deltas: discarding the
+                    # oldest wholesale would silently lose attributes a later
+                    # frame does not resend. Fold its objectList into the
+                    # incoming message instead (newer attributes win).
+                    self._notification_queue.put_nowait(self._coalesce_notifications(oldest, msg))
             except asyncio.QueueEmpty:
                 _LOGGER.debug("Notification queue race - message dropped")
+
+    @staticmethod
+    def _coalesce_notifications(
+        older: dict[str, Any],
+        newer: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Merge an overflowed NotifyList into its newer successor.
+
+        Entries are coalesced per ``objnam``: attribute params are folded
+        chronologically (older first, newer last) so the result is exactly
+        the last-write-wins state ``PoolObject.update`` would have reached
+        had both frames been delivered. The newer frame's entries keep
+        their positions; unsuperseded older entries are appended (entry
+        order across *distinct* objnams carries no meaning downstream).
+        Entries without a usable ``objnam``/``params`` pair are preserved
+        verbatim. If either frame lacks a list-shaped ``objectList`` the
+        newer frame is returned unchanged.
+        """
+        older_list = older.get("objectList")
+        newer_list = newer.get("objectList")
+        if not isinstance(older_list, list) or not isinstance(newer_list, list):
+            return newer
+
+        def coalescible(entry: Any) -> bool:
+            return (
+                isinstance(entry, dict)
+                and isinstance(entry.get("objnam"), str)
+                and isinstance(entry.get("params"), dict)
+            )
+
+        params_by_objnam: dict[str, dict[str, Any]] = {}
+        for entry in (*older_list, *newer_list):  # chronological: newer wins
+            if coalescible(entry):
+                params_by_objnam.setdefault(entry["objnam"], {}).update(entry["params"])
+
+        merged: list[Any] = []
+        emitted: set[str] = set()
+        for entry in (*newer_list, *older_list):
+            if not coalescible(entry):
+                merged.append(entry)
+                continue
+            objnam: str = entry["objnam"]
+            if objnam in emitted:
+                continue
+            emitted.add(objnam)
+            merged.append({**entry, "params": params_by_objnam[objnam]})
+
+        return {**newer, "objectList": merged}
+
+    @staticmethod
+    def _merge_notification_batch(batch: list[dict[str, Any]]) -> dict[str, Any]:
+        """Concatenate a drained burst into one synthetic NotifyList.
+
+        ``objectList`` entries are concatenated in arrival order:
+        ``PoolObject.update`` is last-write-wins per attribute, so an
+        order-preserving concatenation yields exactly the state that
+        per-message delivery would have produced. Messages without a
+        list-shaped ``objectList`` contribute nothing.
+        """
+        merged: list[Any] = []
+        for msg in batch:
+            object_list = msg.get("objectList")
+            if isinstance(object_list, list):
+                merged.extend(object_list)
+        return {**batch[0], "objectList": merged}
 
     async def _notification_consumer(
         self,
@@ -363,9 +449,18 @@ class ICNotificationMixin:
         The queue and stop signal are received as arguments because
         teardown can null out (or a fast restart can replace) the
         instance attributes while an async callback is suspended; the
-        ``finally`` below must account for the item on the queue it
+        ``finally`` below must account for the items on the queue they
         actually came from - and cancellation must surface as a clean
         CancelledError, not an AttributeError.
+
+        When batching is enabled, messages already queued behind the one
+        just received are drained with ``get_nowait`` (bounded by
+        ``NOTIFICATION_BATCH_MAX``) and delivered as one merged NotifyList
+        per callback invocation; a lone message is dispatched as-is,
+        immediately. The ``None`` sentinel ends the drain: whatever was
+        collected before it is still dispatched, then the consumer exits.
+        Once ``stop`` is set nothing is dispatched - drained items only
+        receive their ``task_done`` accounting.
         """
         while True:
             try:
@@ -374,33 +469,55 @@ class ICNotificationMixin:
                 _LOGGER.debug("Notification consumer cancelled")
                 break
 
-            if msg is None or stop.is_set():
-                # A shutdown is in progress (see
-                # _stop_notification_consumer): drain entries without
-                # dispatching - anything still queued is stale once the
-                # connection is closing - and exit on the ``None``
-                # sentinel instead of waiting forever on the detached
-                # queue.
-                queue.task_done()
-                if msg is None:
-                    _LOGGER.debug("Notification consumer stopped")
-                    break
-                continue
+            batch: list[dict[str, Any]] = []
+            saw_sentinel = msg is None
+            if msg is not None:
+                batch.append(msg)
+                if self._notification_batching:
+                    # Synchronous drain: no await between get() returning
+                    # and the stop check below, so the batch is a
+                    # consistent snapshot of the burst.
+                    while len(batch) < NOTIFICATION_BATCH_MAX:
+                        try:
+                            extra = queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
+                        if extra is None:
+                            saw_sentinel = True
+                            break
+                        batch.append(extra)
 
-            try:
-                callback = self._notification_callback
-                if callback is not None:
-                    result = callback(msg)
-                    # isawaitable covers coroutine functions, async __call__
-                    # objects, and sync callables returning an awaitable;
-                    # for a plain sync callback returning None it is a
-                    # single cheap check.
-                    if inspect.isawaitable(result):
-                        await result
-            except Exception:
-                _LOGGER.exception("Error in notification callback")
-            finally:
+            if batch and not stop.is_set():
+                try:
+                    callback = self._notification_callback
+                    if callback is not None:
+                        payload = (
+                            batch[0] if len(batch) == 1 else self._merge_notification_batch(batch)
+                        )
+                        result = callback(payload)
+                        # isawaitable covers coroutine functions, async
+                        # __call__ objects, and sync callables returning an
+                        # awaitable; for a plain sync callback returning
+                        # None it is a single cheap check.
+                        if inspect.isawaitable(result):
+                            await result
+                except Exception:
+                    _LOGGER.exception("Error in notification callback")
+                finally:
+                    for _ in batch:
+                        queue.task_done()
+            else:
+                # A shutdown is in progress (see
+                # _stop_notification_consumer): anything still queued is
+                # stale once the connection is closing - account for it
+                # without dispatching.
+                for _ in batch:
+                    queue.task_done()
+
+            if saw_sentinel:
                 queue.task_done()
+                _LOGGER.debug("Notification consumer stopped")
+                break
 
 
 class ICProtocol(ICRequestMixin, ICNotificationMixin, asyncio.Protocol):
@@ -422,6 +539,7 @@ class ICProtocol(ICRequestMixin, ICNotificationMixin, asyncio.Protocol):
         *,
         notification_queue_size: int = DEFAULT_NOTIFICATION_QUEUE_SIZE,
         notification_observer_state: _NotificationObserverState | None = None,
+        notification_batching: bool = True,
     ) -> None:
         """Initialize the protocol.
 
@@ -429,12 +547,15 @@ class ICProtocol(ICRequestMixin, ICNotificationMixin, asyncio.Protocol):
             notification_callback: Called when NotifyList notifications arrive
             disconnect_callback: Called when connection is lost
             notification_queue_size: Max queued notifications (default: 100)
+            notification_batching: Merge queued notification bursts into one
+                callback invocation (default: True)
         """
         self._init_request_mixin()
         self._init_notification_mixin(
             notification_callback,
             notification_queue_size,
             notification_observer_state,
+            notification_batching,
         )
         self._disconnect_callback = disconnect_callback
 
@@ -596,6 +717,7 @@ class ICWebSocketTransport(ICRequestMixin, ICNotificationMixin):
         *,
         notification_queue_size: int = DEFAULT_NOTIFICATION_QUEUE_SIZE,
         notification_observer_state: _NotificationObserverState | None = None,
+        notification_batching: bool = True,
     ) -> None:
         """Initialize the WebSocket transport.
 
@@ -603,12 +725,15 @@ class ICWebSocketTransport(ICRequestMixin, ICNotificationMixin):
             notification_callback: Called when NotifyList notifications arrive
             disconnect_callback: Called when connection is lost
             notification_queue_size: Max queued notifications (default: 100)
+            notification_batching: Merge queued notification bursts into one
+                callback invocation (default: True)
         """
         self._init_request_mixin()
         self._init_notification_mixin(
             notification_callback,
             notification_queue_size,
             notification_observer_state,
+            notification_batching,
         )
         self._disconnect_callback = disconnect_callback
 
@@ -896,6 +1021,7 @@ class ICConnection:
         notification_queue_size: int = DEFAULT_NOTIFICATION_QUEUE_SIZE,
         *,
         transport: TransportType = "tcp",
+        notification_batching: bool = True,
     ) -> None:
         """Initialize connection configuration.
 
@@ -906,6 +1032,11 @@ class ICConnection:
             keepalive_interval: Seconds between keepalive requests (default: 90)
             notification_queue_size: Max queued notifications (default: 100)
             transport: Transport type - "tcp" or "websocket" (default: "tcp")
+            notification_batching: When a burst of NotifyList messages is
+                queued, merge them (bounded by NOTIFICATION_BATCH_MAX) into
+                one synthetic NotifyList per callback invocation. Merging is
+                order-preserving, so downstream last-write-wins updates see
+                the same final state as per-message delivery (default: True)
         """
         self._host = host
         self._transport_type = transport
@@ -917,6 +1048,7 @@ class ICConnection:
         self._response_timeout = response_timeout
         self._keepalive_interval = keepalive_interval
         self._notification_queue_size = notification_queue_size
+        self._notification_batching = notification_batching
 
         # Transport instance (created on connect)
         self._protocol: ICProtocol | ICWebSocketTransport | None = None
@@ -1123,6 +1255,7 @@ class ICConnection:
                         disconnect_callback=disconnect_callback,
                         notification_queue_size=self._notification_queue_size,
                         notification_observer_state=self._notification_observer_state,
+                        notification_batching=self._notification_batching,
                     ),
                     self._host,
                     self._port,
@@ -1147,6 +1280,7 @@ class ICConnection:
             disconnect_callback=disconnect_callback,
             notification_queue_size=self._notification_queue_size,
             notification_observer_state=self._notification_observer_state,
+            notification_batching=self._notification_batching,
         )
         await transport.connect(self._host, self._port)
         self._protocol = transport
