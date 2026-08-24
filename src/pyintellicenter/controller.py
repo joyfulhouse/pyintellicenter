@@ -1645,13 +1645,23 @@ class ICConnectionHandler:
 
     @property
     def connected(self) -> bool:
-        """Return True while the handler considers the connection established.
+        """Return True while the connection is established.
 
-        This is the handler-level (debounced) view of availability: it turns
-        True after a successful connect or reconnect and False on disconnect
-        or ``stop()``/``astop()``.
+        Combines the handler's own flag with the controller's live transport
+        state (``self._is_connected or self._controller.connected``). The
+        handler flag is only set *after* ``controller.start()`` returns, but a
+        (re)connect's initial object snapshot - reconcile removals plus the
+        attribute backfill - is dispatched from *within* ``start()``, after the
+        socket is up but before that flag is set. Reading the raw flag there
+        reported ``False`` during the very fan-out that carries the reconnect's
+        fresh state, so a consumer gating availability on ``connected`` (e.g. a
+        Home Assistant coordinator) would render every entity momentarily
+        unavailable on each reconnect. Or-ing in the live transport state
+        (which is already ``True`` throughout that in-``start()`` dispatch)
+        closes that window without disturbing the disconnect side: on a genuine
+        outage both terms are ``False``.
         """
-        return self._is_connected
+        return self._is_connected or self._controller.connected
 
     async def start(self) -> None:
         """Start the connection handler.

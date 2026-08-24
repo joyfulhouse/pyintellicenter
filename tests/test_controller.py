@@ -2417,6 +2417,11 @@ class TestICConnectionHandler:
         controller.host = "192.168.1.100"
         controller._metrics = ICConnectionMetrics()
         controller.set_disconnected_callback = MagicMock()
+        # Live transport state, or-ed into handler.connected. A real bool (not
+        # a truthy MagicMock) so ``handler.connected is False`` holds while the
+        # handler's own flag is False; tests that need "connected" drive
+        # ``handler._is_connected`` as before.
+        controller.connected = False
         return controller
 
     @pytest.fixture
@@ -2811,6 +2816,35 @@ class TestICConnectionHandler:
         handler.stop()
 
     @pytest.mark.asyncio
+    async def test_connected_true_during_in_start_backfill_dispatch(self, mock_controller):
+        """connected reads True during a dispatch emitted from within start().
+
+        A (re)connect's reconcile + attribute backfill is dispatched from
+        inside controller.start(), after the socket is up but before the
+        handler sets its own _is_connected flag. A consumer reading connected
+        at that point (e.g. a coordinator fanning the backfill out to its
+        entities) must observe True, not the not-yet-set flag - otherwise every
+        reconnect renders entities momentarily unavailable. Regression guard.
+        """
+        handler = ICConnectionHandler(mock_controller, time_between_reconnects=0)
+        observed: list[bool] = []
+
+        async def _start_with_backfill() -> None:
+            # Socket is up inside start(); the handler's own flag is still False.
+            mock_controller.connected = True
+            assert handler._is_connected is False  # noqa: SLF001 - precondition
+            observed.append(handler.connected)
+
+        mock_controller.start = AsyncMock(side_effect=_start_with_backfill)
+
+        await handler.start()
+        await asyncio.sleep(0.05)
+
+        assert observed == [True]
+        assert handler.connected is True
+        await handler.astop()
+
+    @pytest.mark.asyncio
     async def test_already_connected_success_emits_no_lifecycle_callback(self, mock_controller):
         """A success while already connected fires neither callback (issue #86)."""
         handler = ICConnectionHandler(mock_controller, time_between_reconnects=0)
@@ -2937,6 +2971,11 @@ class TestHandlerLifecycle:
         controller.host = "192.168.1.100"
         controller._metrics = ICConnectionMetrics()
         controller.set_disconnected_callback = MagicMock()
+        # Live transport state, or-ed into handler.connected. A real bool (not
+        # a truthy MagicMock) so ``handler.connected is False`` holds while the
+        # handler's own flag is False; tests that need "connected" drive
+        # ``handler._is_connected`` as before.
+        controller.connected = False
         return controller
 
     @pytest.fixture
@@ -3199,6 +3238,11 @@ class TestHandlerCallbackResilience:
         controller.host = "192.168.1.100"
         controller._metrics = ICConnectionMetrics()
         controller.set_disconnected_callback = MagicMock()
+        # Live transport state, or-ed into handler.connected. A real bool (not
+        # a truthy MagicMock) so ``handler.connected is False`` holds while the
+        # handler's own flag is False; tests that need "connected" drive
+        # ``handler._is_connected`` as before.
+        controller.connected = False
         return controller
 
     @pytest.fixture
@@ -3356,6 +3400,11 @@ class TestHandlerStartContract:
         controller.host = "192.168.1.100"
         controller._metrics = ICConnectionMetrics()
         controller.set_disconnected_callback = MagicMock()
+        # Live transport state, or-ed into handler.connected. A real bool (not
+        # a truthy MagicMock) so ``handler.connected is False`` holds while the
+        # handler's own flag is False; tests that need "connected" drive
+        # ``handler._is_connected`` as before.
+        controller.connected = False
         return controller
 
     @pytest.fixture
