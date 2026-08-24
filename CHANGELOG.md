@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-08-23
+
+### Fixed
+
+- **`ICConnectionHandler.connected` now reflects the live transport during a
+  (re)connect's in-`start()` backfill dispatch** (#89): the handler sets its
+  own `_is_connected` flag only *after* `controller.start()` returns, but a
+  (re)connect's initial object snapshot - reconcile removals plus the attribute
+  backfill - is dispatched from *within* `start()`, after the socket is up but
+  before that flag is set. `connected` read `False` during that fan-out, so a
+  consumer gating availability on it (e.g. the Home Assistant coordinator)
+  rendered every entity momentarily unavailable on each reconnect - a spurious
+  `unavailable` `state_changed` for any entity whose tracked attributes changed
+  during the outage. `connected` now returns
+  `not stopped and (self._is_connected or self._controller.connected)`, so it
+  observes the transport (already `True` throughout that dispatch) while the
+  `not stopped` guard keeps `stop()` synchronous (immediately `False`, even
+  though the socket teardown it schedules runs in a background task) and a
+  genuine outage leaves both terms `False`. This is the change that lets the
+  integration safely gate entity availability on the handler again (#86 fixed
+  the callback-ordering half; this fixes the in-`start()` dispatch half).
+
 ## [0.2.1] - 2026-08-23
 
 ### Fixed

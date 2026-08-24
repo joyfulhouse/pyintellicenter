@@ -134,8 +134,9 @@ the main concepts.
 
 - `await handler.start()` — connect and wait for the first successful attempt;
   reconnection then continues in the background
-- `handler.connected` — `True` while the handler considers the connection
-  established (debounced view)
+- `handler.connected` — `True` while the connection is established and the
+  handler has not been stopped (the handler flag or-ed with the live transport,
+  so it is already `True` during a reconnect's in-`start()` backfill dispatch)
 - `handler.stop()` — synchronous best-effort stop (teardown runs in the
   background; safe from callbacks)
 - `await handler.astop()` — stop and wait for the full connection teardown
