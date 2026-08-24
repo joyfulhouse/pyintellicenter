@@ -1864,13 +1864,22 @@ class ICConnectionHandler:
                         self._disconnect_debounce_task.cancel()
                         self._disconnect_debounce_task = None
 
-                    if self._first_time:
-                        self._invoke_callback(self.on_started, self._controller)
-                        self._first_time = False
-                    elif not self._is_connected:
-                        self._invoke_callback(self.on_reconnected, self._controller)
-
+                    # Mark connected BEFORE invoking the announcement callbacks
+                    # so a consumer that reads ``connected`` from inside
+                    # on_started/on_reconnected (e.g. a Home Assistant
+                    # availability fan-out) observes True, not the stale False.
+                    # Capture the prior state first to preserve the
+                    # reconnect-vs-first-time decision. The callbacks are
+                    # exception-guarded, so ordering the flag first cannot
+                    # strand it.
+                    was_connected = self._is_connected
                     self._is_connected = True
+
+                    if self._first_time:
+                        self._first_time = False
+                        self._invoke_callback(self.on_started, self._controller)
+                    elif not was_connected:
+                        self._invoke_callback(self.on_reconnected, self._controller)
                     if first_attempt is not None and not first_attempt.done():
                         first_attempt.set_result(None)
                     # Only clear the reference if it points at THIS task;

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`ICConnectionHandler.connected` is now True inside `on_started`/`on_reconnected`**
+  (#86): the handler previously set its availability flag *after* invoking the
+  announcement callbacks, so a consumer reading `connected` from within those
+  callbacks (e.g. a Home Assistant availability fan-out) observed a stale
+  `False` during the very callback announcing the connection. The flag is now
+  set before the callbacks fire, matching the disconnect side's ordering, while
+  preserving the first-time-vs-reconnect decision.
+
 ## [0.2.0] - 2026-08-22
 
 This release integrates the adversarial-review fix wave covering issues

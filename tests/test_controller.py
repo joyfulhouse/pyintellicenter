@@ -2777,6 +2777,94 @@ class TestICConnectionHandler:
         handler.stop()
 
     @pytest.mark.asyncio
+    async def test_connected_is_true_inside_on_started(self, mock_controller):
+        """connected must read True from within on_started (issue #86)."""
+        handler = ICConnectionHandler(mock_controller, time_between_reconnects=0)
+
+        observed: list[bool] = []
+        handler.on_started = lambda ctrl: observed.append(handler.connected)
+
+        await handler.start()
+        await asyncio.sleep(0.1)
+
+        assert observed == [True]
+        handler.stop()
+
+    @pytest.mark.asyncio
+    async def test_connected_is_true_inside_on_reconnected(self, mock_controller):
+        """connected must read True from within on_reconnected (issue #86)."""
+        handler = ICConnectionHandler(mock_controller, time_between_reconnects=0)
+
+        observed: list[bool] = []
+        handler.on_reconnected = lambda ctrl: observed.append(handler.connected)
+
+        await handler.start()
+        await asyncio.sleep(0.1)
+
+        # Simulate disconnect then reconnect
+        handler._is_connected = False
+        handler._first_time = False
+        handler._starter_task = asyncio.create_task(handler._starter())
+        await asyncio.sleep(0.2)
+
+        assert observed == [True]
+        handler.stop()
+
+    @pytest.mark.asyncio
+    async def test_already_connected_success_emits_no_lifecycle_callback(self, mock_controller):
+        """A success while already connected fires neither callback (issue #86)."""
+        handler = ICConnectionHandler(mock_controller, time_between_reconnects=0)
+
+        started: list[object] = []
+        reconnected: list[object] = []
+        handler.on_started = lambda ctrl: started.append(ctrl)
+        handler.on_reconnected = lambda ctrl: reconnected.append(ctrl)
+
+        await handler.start()
+        await asyncio.sleep(0.1)
+        assert len(started) == 1
+
+        # Spurious re-run of _starter while already connected: no callback.
+        handler._first_time = False  # noqa: SLF001 - drive the branch directly
+        assert handler._is_connected is True  # noqa: SLF001
+        handler._starter_task = asyncio.create_task(handler._starter())
+        await asyncio.sleep(0.1)
+
+        assert len(started) == 1
+        assert reconnected == []
+        handler.stop()
+
+    @pytest.mark.asyncio
+    async def test_reconnect_via_on_disconnect_cancels_debounce_and_marks_connected(
+        self, mock_controller
+    ):
+        """Full disconnect->reconnect path: debounce cancelled, connected True."""
+        handler = ICConnectionHandler(
+            mock_controller, time_between_reconnects=0, disconnect_debounce_time=100
+        )
+
+        observed: list[bool] = []
+        disconnected: list[object] = []
+        handler.on_reconnected = lambda ctrl: observed.append(handler.connected)
+        handler.on_disconnected = lambda ctrl: disconnected.append(ctrl)
+
+        await handler.start()
+        await asyncio.sleep(0.1)
+
+        # Drive the real disconnect path (schedules the debounce, starts reconnect).
+        handler._on_disconnect(  # noqa: SLF001 - exercise the production path
+            handler.controller, None
+        )
+        await asyncio.sleep(0.2)
+
+        assert observed == [True]
+        assert handler.connected is True
+        # The debounced on_disconnected must have been cancelled by the reconnect.
+        assert disconnected == []
+        assert handler._disconnect_debounce_task is None  # noqa: SLF001
+        handler.stop()
+
+    @pytest.mark.asyncio
     async def test_on_updated_callback_on_model_controller(self):
         """Test on_updated callback is set on ICModelController."""
         model = PoolModel()
