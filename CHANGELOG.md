@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-08-23
+
 ### Fixed
 
 - **`ICConnectionHandler.connected` is now True inside `on_started`/`on_reconnected`**
@@ -793,7 +795,8 @@ First stable release of pyintellicenter.
 - `orjson` for fast JSON serialization
 - Python 3.11+ required
 
-[Unreleased]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.22...v0.2.0
 [0.1.22]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.21...v0.1.22
 [0.1.21]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.1.20...v0.1.21
