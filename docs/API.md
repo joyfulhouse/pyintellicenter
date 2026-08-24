@@ -371,10 +371,14 @@ Methods and properties:
   caller raises `CancelledError` to that caller while the teardown keeps
   running in the background, and a later `start()`/`astop()` waits for its
   actual completion.
-- `handler.connected` — `True` while the handler considers the connection
-  established (the debounced handler-level view): it turns `True` after a
-  successful connect or reconnect and `False` on disconnect or
-  `stop()`/`astop()`.
+- `handler.connected` — `True` while the connection is established and the
+  handler has not been stopped. It is `not stopped and (handler flag or live
+  transport)`: `True` once the socket is up (including during a (re)connect's
+  in-`start()` object snapshot/backfill dispatch, before the handler's own flag
+  is set) and `False` on a genuine outage or immediately after
+  `stop()`/`astop()`. During an in-flight reconnect it therefore tracks the
+  live transport; consumers that gate availability typically react to the
+  lifecycle callbacks and update fan-out rather than polling this flag.
 - `handler.subscribe(objnam, callback)` — forwards to
   `ICModelController.subscribe()` on the managed controller and returns the
   unsubscribe callable (see "Per-object subscriptions" above). Raises

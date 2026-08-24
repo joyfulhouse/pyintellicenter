@@ -1635,7 +1635,7 @@ class ICConnectionHandler:
     def __repr__(self) -> str:
         return (
             f"ICConnectionHandler(controller={self._controller!r}, "
-            f"connected={self._is_connected}, failures={self._failure_count})"
+            f"connected={self.connected}, failures={self._failure_count})"
         )
 
     @property
@@ -1645,23 +1645,31 @@ class ICConnectionHandler:
 
     @property
     def connected(self) -> bool:
-        """Return True while the connection is established.
+        """Return True while the connection is established (and not stopped).
 
         Combines the handler's own flag with the controller's live transport
-        state (``self._is_connected or self._controller.connected``). The
-        handler flag is only set *after* ``controller.start()`` returns, but a
-        (re)connect's initial object snapshot - reconcile removals plus the
+        state, gated on not having been stopped:
+        ``not self._stopped and (self._is_connected or self._controller.connected)``.
+
+        The handler flag is only set *after* ``controller.start()`` returns, but
+        a (re)connect's initial object snapshot - reconcile removals plus the
         attribute backfill - is dispatched from *within* ``start()``, after the
         socket is up but before that flag is set. Reading the raw flag there
         reported ``False`` during the very fan-out that carries the reconnect's
         fresh state, so a consumer gating availability on ``connected`` (e.g. a
         Home Assistant coordinator) would render every entity momentarily
         unavailable on each reconnect. Or-ing in the live transport state
-        (which is already ``True`` throughout that in-``start()`` dispatch)
-        closes that window without disturbing the disconnect side: on a genuine
-        outage both terms are ``False``.
+        (already ``True`` throughout that in-``start()`` dispatch) closes that
+        window; on a genuine outage both terms are ``False``.
+
+        The ``not self._stopped`` guard keeps ``stop()`` synchronous: ``stop()``
+        sets ``_stopped`` and clears ``_is_connected`` immediately, but the
+        controller teardown that closes the socket runs in a background task, so
+        without the guard the still-live transport would keep this ``True``
+        until that task ran (or indefinitely if ``stop()`` was called with no
+        running loop). ``start()`` clears ``_stopped`` again.
         """
-        return self._is_connected or self._controller.connected
+        return not self._stopped and (self._is_connected or self._controller.connected)
 
     async def start(self) -> None:
         """Start the connection handler.

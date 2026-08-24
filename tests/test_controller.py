@@ -2845,6 +2845,31 @@ class TestICConnectionHandler:
         await handler.astop()
 
     @pytest.mark.asyncio
+    async def test_connected_false_immediately_after_sync_stop(self, mock_controller):
+        """stop() makes connected False synchronously, before teardown runs.
+
+        stop() sets _stopped and clears the handler flag immediately, but the
+        controller teardown that closes the socket runs in a background task.
+        The live transport can still report 'up' until that task runs, so
+        connected must be gated on not-stopped - otherwise or-ing the transport
+        would keep it True until teardown (or forever if stop() ran with no
+        running loop). Regression guard for the sync-stop() semantics.
+        """
+        mock_controller.connected = True  # transport up after a successful start
+        handler = ICConnectionHandler(mock_controller, time_between_reconnects=0)
+        await handler.start()
+        assert handler.connected is True
+
+        handler.stop()  # synchronous; controller teardown deferred to a task
+
+        # Immediately False even though the mock transport still reports up
+        # (its teardown has not run yet).
+        assert mock_controller.connected is True
+        assert handler.connected is False
+
+        await handler.astop()
+
+    @pytest.mark.asyncio
     async def test_already_connected_success_emits_no_lifecycle_callback(self, mock_controller):
         """A success while already connected fires neither callback (issue #86)."""
         handler = ICConnectionHandler(mock_controller, time_between_reconnects=0)
