@@ -2777,6 +2777,40 @@ class TestICConnectionHandler:
         handler.stop()
 
     @pytest.mark.asyncio
+    async def test_connected_is_true_inside_on_started(self, mock_controller):
+        """connected must read True from within on_started (issue #86)."""
+        handler = ICConnectionHandler(mock_controller, time_between_reconnects=0)
+
+        observed: list[bool] = []
+        handler.on_started = lambda ctrl: observed.append(handler.connected)
+
+        await handler.start()
+        await asyncio.sleep(0.1)
+
+        assert observed == [True]
+        handler.stop()
+
+    @pytest.mark.asyncio
+    async def test_connected_is_true_inside_on_reconnected(self, mock_controller):
+        """connected must read True from within on_reconnected (issue #86)."""
+        handler = ICConnectionHandler(mock_controller, time_between_reconnects=0)
+
+        observed: list[bool] = []
+        handler.on_reconnected = lambda ctrl: observed.append(handler.connected)
+
+        await handler.start()
+        await asyncio.sleep(0.1)
+
+        # Simulate disconnect then reconnect
+        handler._is_connected = False
+        handler._first_time = False
+        handler._starter_task = asyncio.create_task(handler._starter())
+        await asyncio.sleep(0.2)
+
+        assert observed == [True]
+        handler.stop()
+
+    @pytest.mark.asyncio
     async def test_on_updated_callback_on_model_controller(self):
         """Test on_updated callback is set on ICModelController."""
         model = PoolModel()
