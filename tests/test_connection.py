@@ -2360,7 +2360,7 @@ class TestNotificationOverflowCoalescing:
     @pytest.mark.asyncio
     async def test_overflow_folds_into_successor_and_appends_incoming_unchanged(self):
         protocol = ICProtocol(notification_callback=MagicMock(), notification_queue_size=3)
-        queue = asyncio.Queue(maxsize=3)
+        queue = connection_module._NotificationQueue(maxsize=3)
         protocol._notification_queue = queue
         oldest = {
             "command": "NotifyList",
@@ -2402,7 +2402,7 @@ class TestNotificationOverflowCoalescing:
     @pytest.mark.asyncio
     async def test_overflow_leaves_successor_sentinel_and_accounting_intact(self):
         protocol = ICProtocol(notification_callback=MagicMock(), notification_queue_size=2)
-        queue = asyncio.Queue(maxsize=2)
+        queue = connection_module._NotificationQueue(maxsize=2)
         protocol._notification_queue = queue
         queue.put_nowait(
             {
@@ -2420,6 +2420,7 @@ class TestNotificationOverflowCoalescing:
         )
 
         assert list(queue._queue) == [None]
+        assert queue.qsize() == 1
         assert queue._unfinished_tasks == 1
         assert queue.get_nowait() is None
         queue.task_done()
@@ -2478,34 +2479,36 @@ class TestNotificationOverflowCoalescing:
         protocol.connection_made(MagicMock())
         queue = protocol._notification_queue
         assert queue is not None
+        try:
+            protocol._handle_notification({"command": "NotifyList", "objectList": []})
+            await asyncio.wait_for(entered.wait(), timeout=1.0)
 
-        protocol._handle_notification({"command": "NotifyList", "objectList": []})
-        await asyncio.wait_for(entered.wait(), timeout=1.0)
+            chronological = []
+            for objnam, params in burst:
+                message = {
+                    "command": "NotifyList",
+                    "objectList": [{"objnam": objnam, "params": params}],
+                }
+                chronological.append(message)
+                protocol._handle_notification(message)
 
-        chronological = []
-        for objnam, params in burst:
-            message = {
-                "command": "NotifyList",
-                "objectList": [{"objnam": objnam, "params": params}],
-            }
-            chronological.append(message)
-            protocol._handle_notification(message)
+            expected = {}
+            for message in chronological:
+                apply(message, expected)
 
-        expected = {}
-        for message in chronological:
-            apply(message, expected)
+            assert protocol._notification_drops >= 2
+            release.set()
+            await asyncio.wait_for(queue.join(), timeout=1.0)
 
-        assert protocol._notification_drops >= 2
-        release.set()
-        await asyncio.wait_for(queue.join(), timeout=1.0)
-
-        assert observed == expected
-        assert queue.empty()
-        assert queue._unfinished_tasks == 0
-        consumer_task = protocol._consumer_task
-        assert consumer_task is not None
-        assert not consumer_task.done()
-        protocol.connection_lost(None)
+            assert observed == expected
+            assert queue.empty()
+            assert queue._unfinished_tasks == 0
+            consumer_task = protocol._consumer_task
+            assert consumer_task is not None
+            assert not consumer_task.done()
+        finally:
+            release.set()
+            protocol.connection_lost(None)
 
     @pytest.mark.asyncio
     async def test_overflow_preserves_attribute_deltas(self):
