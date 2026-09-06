@@ -53,13 +53,14 @@ retain response-only timing for a particular call.
 The `ICTimeoutError` message names the budget that expired: the response-only
 timeout, or the total deadline (including when the total deadline clipped the
 response window). Its `delivery_uncertain` attribute is `False` when the request
-never reached the transport (it expired while queued for the request lock) and
+never reached the transport (it expired while queued for the request lock, or
+the budget was already exhausted when the lock was granted) and
 `True` once the transport write or WebSocket send began, so a caller can tell
 whether the panel may have acted on the request.
 
 Keepalive probes use their keepalive timeout as a total deadline, so queued
-commands cannot postpone dead-link detection indefinitely. A successful command
-or keepalive response resets the consecutive-miss count.
+commands cannot postpone dead-link detection indefinitely. Any correlated
+response (success or panel error) resets the consecutive-miss count.
 
 ### Notification batching
 
