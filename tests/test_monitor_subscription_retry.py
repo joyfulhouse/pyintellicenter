@@ -68,7 +68,7 @@ def controller(model: PoolModel) -> ICModelController:
 @pytest.fixture
 def no_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
     """Retry immediately so the tests do not wait out real backoff."""
-    monkeypatch.setattr(controller_module, "MONITOR_RETRY_BASE_DELAY", 0, raising=False)
+    monkeypatch.setattr(controller_module, "MONITOR_RETRY_BASE_DELAY", 0)
 
 
 @pytest.fixture
@@ -224,7 +224,7 @@ class TestMonitorSubscriptionRetry:
 
     async def test_stop_during_backoff_cancels_and_awaits_worker(self, controller, monkeypatch):
         """(f) stop() while the worker is parked in backoff cancels it cleanly."""
-        monkeypatch.setattr(controller_module, "MONITOR_RETRY_BASE_DELAY", 3600, raising=False)
+        monkeypatch.setattr(controller_module, "MONITOR_RETRY_BASE_DELAY", 3600)
         controller.send_cmd = AsyncMock(side_effect=ICTimeoutError("no reply"))
 
         notify(controller, CHM02)
@@ -244,7 +244,7 @@ class TestMonitorSubscriptionRetry:
     async def test_reconnect_start_supersedes_pending_retry(self, monkeypatch):
         """(g) Connection replacement mid-retry: start() clears the pending set and
         the full resubscribe it builds covers the object."""
-        monkeypatch.setattr(controller_module, "MONITOR_RETRY_BASE_DELAY", 3600, raising=False)
+        monkeypatch.setattr(controller_module, "MONITOR_RETRY_BASE_DELAY", 3600)
         async with MockIntelliCenterServer() as server:
             server.set_system_info("Retry Pool", "2.0.0")
             server.add_object("POOL1", "BODY", "POOL", "Pool", STATUS="OFF")

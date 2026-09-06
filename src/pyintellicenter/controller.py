@@ -857,11 +857,9 @@ class ICModelController(
         # Held in a set so they are not garbage-collected before completing.
         self._monitor_tasks: set[asyncio.Task[None]] = set()
         # Runtime-added objects whose RequestParamList subscription has not
-        # been acknowledged yet, and the single worker draining that set with
-        # backoff (also a member of _monitor_tasks so start()/stop() tear it
-        # down with the rest).
+        # been acknowledged yet; drained with backoff by a single worker task
+        # held in _monitor_tasks.
         self._pending_monitor: set[str] = set()
-        self._monitor_worker: asyncio.Task[None] | None = None
 
     def __repr__(self) -> str:
         return (
@@ -1094,11 +1092,10 @@ class ICModelController(
         if self._system_info and self._system_info.objnam in updates:
             self._system_info.update(updates[self._system_info.objnam])
 
-        # Queue monitoring for any newly-added objects. The request goes through
-        # the pending set and its drain worker so a transient failure is retried
-        # instead of abandoned: the object is already in the model, so no later
-        # notification would ever re-report it as added (issue #91). Queued
-        # *before* the user callback so a callback raise cannot abort
+        # Queue monitoring for any newly-added objects. The pending set and its
+        # drain worker retry transient failures: the object is already in the
+        # model, so no later notification would ever re-report it as added.
+        # Queued *before* the user callback so a callback raise cannot abort
         # monitoring of new equipment.
         if added_objnams:
             self._pending_monitor |= added_objnams
@@ -1214,7 +1211,7 @@ class ICModelController(
         synchronous calls in tests) the objnams simply stay pending rather
         than crashing.
         """
-        if self._monitor_worker is not None and not self._monitor_worker.done():
+        if any(not task.done() for task in self._monitor_tasks):
             return
         try:
             loop = asyncio.get_running_loop()
@@ -1225,7 +1222,6 @@ class ICModelController(
             )
             return
         task = loop.create_task(self._drain_pending_monitor())
-        self._monitor_worker = task
         # Retain a reference so the task is not garbage-collected; the done
         # callback drops it and logs any unexpected failure.
         self._monitor_tasks.add(task)
