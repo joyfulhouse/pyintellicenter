@@ -65,6 +65,10 @@ NOTIFICATION_BATCH_MAX = 25
 # via **kwargs guarantees a timeout or a misrouted request.
 _RESERVED_REQUEST_FIELDS = frozenset({"messageID", "command"})
 
+# Distinguishes an omitted per-call deadline from an explicit None, which
+# disables the connection's default total deadline for that request.
+_USE_DEFAULT_REQUEST_TOTAL_TIMEOUT: Any = object()
+
 # Backwards compatibility alias
 DEFAULT_PORT = DEFAULT_TCP_PORT
 
@@ -719,7 +723,10 @@ class ICProtocol(ICRequestMixin, ICNotificationMixin, asyncio.Protocol):
 
         except TimeoutError as err:
             _LOGGER.error("Request %s timed out after %ss", command, request_timeout)
-            raise ICTimeoutError(f"Request {command} timed out after {request_timeout}s") from err
+            raise ICTimeoutError(
+                f"Request {command} timed out after {request_timeout}s",
+                delivery_uncertain=True,
+            ) from err
 
         finally:
             self._clear_pending_request()
@@ -924,7 +931,17 @@ class ICWebSocketTransport(ICRequestMixin, ICNotificationMixin):
                     self._notification_observer_state.sequence,
                     asyncio.get_running_loop().time(),
                 )
-            await self._ws.send(packet)
+            try:
+                await self._ws.send(packet)
+            except asyncio.CancelledError:
+                # websockets discourages cancelling send() because delivery may
+                # be partial. Retire this transport so it is never reused, while
+                # preserving the caller's cancellation (an outer request
+                # deadline converts only its own cancellation to TimeoutError).
+                if self._response_future is not None:
+                    self._response_future.cancel()
+                self._handle_disconnect(ICConnectionError("WebSocket send cancelled"))
+                raise
             if _after_write_callback is not None:
                 _after_write_callback(self._notification_observer_state.sequence)
             _LOGGER.debug("Sent WebSocket request: %s (ID: %s)", command, msg_id)
@@ -941,7 +958,10 @@ class ICWebSocketTransport(ICRequestMixin, ICNotificationMixin):
 
         except TimeoutError as err:
             _LOGGER.error("Request %s timed out after %ss", command, request_timeout)
-            raise ICTimeoutError(f"Request {command} timed out after {request_timeout}s") from err
+            raise ICTimeoutError(
+                f"Request {command} timed out after {request_timeout}s",
+                delivery_uncertain=True,
+            ) from err
 
         except (WebSocketException, OSError, ConnectionError) as err:
             # ws.send() raises ConnectionClosed (a WebSocketException) on a
@@ -1047,6 +1067,7 @@ class ICConnection:
         keepalive_interval: float = KEEPALIVE_INTERVAL,
         notification_queue_size: int = DEFAULT_NOTIFICATION_QUEUE_SIZE,
         *,
+        request_total_timeout: float | None = 60.0,
         transport: TransportType = "tcp",
         notification_batching: bool = True,
     ) -> None:
@@ -1058,6 +1079,8 @@ class ICConnection:
             response_timeout: Seconds to wait for response (default: 30)
             keepalive_interval: Seconds between keepalive requests (default: 90)
             notification_queue_size: Max queued notifications (default: 100)
+            request_total_timeout: Maximum seconds for request queueing, write,
+                and response combined (default: 60); None disables the deadline
             transport: Transport type - "tcp" or "websocket" (default: "tcp")
             notification_batching: When a burst of NotifyList messages is
                 queued, merge them (bounded by NOTIFICATION_BATCH_MAX) into
@@ -1073,6 +1096,7 @@ class ICConnection:
             else (DEFAULT_WEBSOCKET_PORT if transport == "websocket" else DEFAULT_TCP_PORT)
         )
         self._response_timeout = response_timeout
+        self._request_total_timeout = request_total_timeout
         self._keepalive_interval = keepalive_interval
         self._notification_queue_size = notification_queue_size
         self._notification_batching = notification_batching
@@ -1096,6 +1120,7 @@ class ICConnection:
 
         # Keepalive task
         self._keepalive_task: asyncio.Task[None] | None = None
+        self._keepalive_failures = 0
 
         # Ensures the disconnect callback fires at most once per connection
         # (the keepalive teardown and the transport's own notification can race)
@@ -1190,8 +1215,13 @@ class ICConnection:
 
     def _handle_current_disconnect(self, exc: Exception | None) -> None:
         """Cancel current lifecycle work and dispatch an unexpected close."""
-        if self._keepalive_task and not self._keepalive_task.done():
-            self._keepalive_task.cancel()
+        keepalive_task = self._keepalive_task
+        if (
+            keepalive_task
+            and not keepalive_task.done()
+            and keepalive_task is not asyncio.current_task()
+        ):
+            keepalive_task.cancel()
             self._keepalive_task = None
 
         self._dispatch_disconnect(exc)
@@ -1368,6 +1398,7 @@ class ICConnection:
         command: str,
         request_timeout: float | None = None,
         *,
+        total_timeout: float | None = _USE_DEFAULT_REQUEST_TOTAL_TIMEOUT,
         _before_write_callback: BeforeWriteCallback | None = None,
         _after_write_callback: AfterWriteCallback | None = None,
         **kwargs: Any,
@@ -1376,7 +1407,11 @@ class ICConnection:
 
         Args:
             command: The command name (e.g., "GetParamList", "SetParamList")
-            request_timeout: Override response timeout (default: use instance timeout)
+            request_timeout: Override response-only timeout (default: use
+                instance timeout); time queued for the request lock is excluded
+            total_timeout: Maximum seconds for queueing, write, and response
+                combined (default: use instance total timeout); None disables
+                the total deadline
             **kwargs: Additional fields to include in the request
 
         Returns:
@@ -1385,7 +1420,7 @@ class ICConnection:
         Raises:
             ICConnectionError: If not connected or connection fails.
             ICResponseError: If IntelliCenter returns an error response.
-            ICTimeoutError: If no response is received within the timeout.
+            ICTimeoutError: If the response or total deadline expires.
             ValueError: If kwargs contain protocol-owned fields
                 (``messageID``/``command``).
         """
@@ -1396,22 +1431,52 @@ class ICConnection:
         effective_timeout = (
             request_timeout if request_timeout is not None else self._response_timeout
         )
+        effective_total_timeout = (
+            self._request_total_timeout
+            if total_timeout is _USE_DEFAULT_REQUEST_TOTAL_TIMEOUT
+            else total_timeout
+        )
+        loop = asyncio.get_running_loop()
+        deadline = (
+            None if effective_total_timeout is None else loop.time() + effective_total_timeout
+        )
+        delivery_uncertain = False
 
-        async with self._request_lock:
-            # Re-check under the lock: the connection may have been torn
-            # down (keepalive abort, disconnect) or replaced by a reconnect
-            # while this request waited its turn. Send only on the protocol
-            # generation captured at call time.
-            if self._protocol is not protocol or not protocol.connected:
-                raise ICConnectionError("Connection lost while request was queued")
+        try:
+            async with asyncio.timeout_at(deadline):
+                async with self._request_lock:
+                    # Re-check under the lock: the connection may have been torn
+                    # down (keepalive abort, disconnect) or replaced by a reconnect
+                    # while this request waited its turn. Send only on the protocol
+                    # generation captured at call time.
+                    if self._protocol is not protocol or not protocol.connected:
+                        raise ICConnectionError("Connection lost while request was queued")
 
-            return await protocol.send_request(
-                command,
-                request_timeout=effective_timeout,
-                _before_write_callback=_before_write_callback,
-                _after_write_callback=_after_write_callback,
-                **kwargs,
-            )
+                    response_timeout = effective_timeout
+                    if deadline is not None:
+                        response_timeout = min(response_timeout, max(0.0, deadline - loop.time()))
+
+                    delivery_uncertain = True
+                    try:
+                        response = await protocol.send_request(
+                            command,
+                            request_timeout=response_timeout,
+                            _before_write_callback=_before_write_callback,
+                            _after_write_callback=_after_write_callback,
+                            **kwargs,
+                        )
+                    except ICResponseError:
+                        # Any correlated response proves the link is alive, even
+                        # when the panel rejects that particular request.
+                        self._keepalive_failures = 0
+                        raise
+                    self._keepalive_failures = 0
+                    return response
+        except TimeoutError as err:
+            raise ICTimeoutError(
+                f"Request {command} exceeded its total timeout of {effective_total_timeout}s",
+                delivery_uncertain=delivery_uncertain,
+            ) from err
 
     async def _keepalive_loop(self) -> None:
         """Send periodic keepalive requests to maintain connection health.
@@ -1432,7 +1497,7 @@ class ICConnection:
         design. A connection error, by contrast, is definitive and tears the
         connection down immediately.
         """
-        failures = 0
+        self._keepalive_failures = 0
         try:
             while self.connected:
                 await asyncio.sleep(self._keepalive_interval)
@@ -1445,21 +1510,22 @@ class ICConnection:
                     await self.send_request(
                         "GetParamList",
                         request_timeout=KEEPALIVE_TIMEOUT,
+                        total_timeout=KEEPALIVE_TIMEOUT,
                         condition="OBJTYP=SYSTEM",
                         objectList=[{"objnam": "INCR", "keys": ["MODE"]}],
                     )
-                    failures = 0
+                    self._keepalive_failures = 0
                 except (ICTimeoutError, TimeoutError) as err:
-                    failures += 1
+                    self._keepalive_failures += 1
                     _LOGGER.warning(
                         "Keepalive timeout (%d/%d) - connection may be dead",
-                        failures,
+                        self._keepalive_failures,
                         KEEPALIVE_MAX_FAILURES,
                     )
-                    if failures >= KEEPALIVE_MAX_FAILURES:
+                    if self._keepalive_failures >= KEEPALIVE_MAX_FAILURES:
                         _LOGGER.warning(
                             "Dropping dead connection after %d consecutive keepalive timeouts",
-                            failures,
+                            self._keepalive_failures,
                         )
                         self._abort_connection(err)
                         break
@@ -1470,7 +1536,7 @@ class ICConnection:
                 except ICResponseError as err:
                     # The panel answered - the link is alive - but rejected
                     # the request; keep the connection and keep probing.
-                    failures = 0
+                    self._keepalive_failures = 0
                     _LOGGER.warning("Keepalive request rejected: %s", err)
 
         except asyncio.CancelledError:

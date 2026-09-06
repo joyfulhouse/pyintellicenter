@@ -136,9 +136,13 @@ class ICCommandError(ICError):
 
 
 class ICTimeoutError(ICError):
-    """Raised when a request times out waiting for a response.
+    """Raised when a request exceeds a response or total deadline.
 
-    This is distinct from connection timeout - it indicates the
-    connection is established but the response was not received
-    within the expected time.
+    Attributes:
+        delivery_uncertain: Whether transport delivery may have started
+            before the timeout.
     """
+
+    def __init__(self, *args: object, delivery_uncertain: bool = False) -> None:
+        self.delivery_uncertain = delivery_uncertain
+        super().__init__(*args)

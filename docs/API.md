@@ -23,7 +23,8 @@ conn = ICConnection(
     host="192.168.1.100",
     port=6681,  # Default: 6681 (TCP), 6680 (WebSocket)
     transport="tcp",  # "tcp" or "websocket"
-    response_timeout=30.0,  # Request timeout in seconds
+    response_timeout=30.0,  # Response-only timeout in seconds
+    request_total_timeout=60.0,  # Queue + write + response deadline; None disables
     keepalive_interval=90.0,  # Keepalive interval in seconds
     notification_queue_size=100,  # Max queued notifications
     notification_batching=True,  # Merge queued notification bursts (see below)
@@ -42,6 +43,16 @@ await conn.disconnect()
 conn.set_notification_callback(lambda msg: print(msg))
 conn.set_disconnect_callback(lambda exc: print(f"Disconnected: {exc}"))
 ```
+
+`send_request(..., request_timeout=30.0)` limits only the response wait; time
+queued behind another request is excluded. `total_timeout` limits the complete
+operation (request-lock queueing, transport write, and response) and defaults to
+the connection's `request_total_timeout` setting. Pass `total_timeout=None` to
+retain response-only timing for a particular call.
+
+Keepalive probes use their keepalive timeout as a total deadline, so queued
+commands cannot postpone dead-link detection indefinitely. A successful command
+or keepalive response resets the consecutive-miss count.
 
 ### Notification batching
 
