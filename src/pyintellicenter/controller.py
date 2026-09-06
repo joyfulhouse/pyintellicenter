@@ -1267,9 +1267,10 @@ class ICModelController(
           only repeat the rejection. Logged at WARNING and dropped.
         - ICConnectionError / OSError: the link is gone. The worker ends; the
           reconnect's start() rebuilds every subscription from the model.
-        - Anything else (a bug, or an error class not listed here): logged
-          with its traceback and retried like a transient failure, so the
-          objnams never sit pending with no worker to drain them.
+        - Anything else (a bug, or an error class not listed here): retried
+          like a transient failure so the objnams never sit pending with no
+          worker to drain them. The first occurrence is an ERROR with its
+          traceback, the retries that follow are DEBUG.
         """
         delay = MONITOR_RETRY_BASE_DELAY
         failures = 0
@@ -1289,6 +1290,10 @@ class ICModelController(
                     err.error_code,
                 )
                 self._pending_monitor -= objnams
+                # The rejection closes this pending set: objnams merged in
+                # since (or added later) start with a fresh backoff.
+                delay = MONITOR_RETRY_BASE_DELAY
+                failures = 0
                 continue
             except (ICConnectionError, OSError) as err:
                 _LOGGER.warning(
@@ -1309,11 +1314,22 @@ class ICModelController(
                 )
             except Exception:
                 failures += 1
-                _LOGGER.exception(
-                    "Unexpected error requesting monitoring for new objects %s; retrying in %.0fs",
-                    sorted(objnams),
-                    delay,
-                )
+                # Traceback on the first occurrence of an outage only; ruff's
+                # blind-except rule needs the literal .exception() call.
+                if failures == 1:
+                    _LOGGER.exception(
+                        "Unexpected error requesting monitoring for new objects %s; "
+                        "retrying in %.0fs",
+                        sorted(objnams),
+                        delay,
+                    )
+                else:
+                    _LOGGER.debug(
+                        "Unexpected error requesting monitoring for new objects %s; "
+                        "retrying in %.0fs",
+                        sorted(objnams),
+                        delay,
+                    )
             else:
                 self._pending_monitor -= objnams
                 delay = MONITOR_RETRY_BASE_DELAY

@@ -348,18 +348,63 @@ class TestMonitorSubscriptionRetry:
 
     @pytest.mark.usefixtures("no_backoff")
     async def test_unexpected_error_is_logged_and_retried(self, controller, caplog):
-        """An error class outside the policy must not kill the worker with objnams pending."""
-        controller.send_cmd = AsyncMock(side_effect=[RuntimeError("bug"), ACK])
+        """An error class outside the policy must not kill the worker with objnams pending.
 
-        with caplog.at_level(logging.ERROR, logger="pyintellicenter.controller"):
+        The first occurrence is an ERROR with its traceback; a repeat is DEBUG
+        without one, so a persistent bug cannot emit a traceback every retry.
+        """
+        controller.send_cmd = AsyncMock(side_effect=[RuntimeError("bug"), RuntimeError("bug"), ACK])
+
+        with caplog.at_level(logging.DEBUG, logger="pyintellicenter.controller"):
             notify(controller, CHM02)
             await drain(controller)
 
-        assert targeted(controller.send_cmd) == [["CHM02"], ["CHM02"]]
+        assert targeted(controller.send_cmd) == [["CHM02"]] * 3
         assert controller._pending_monitor == set()
-        assert any(
-            record.exc_info and "RuntimeError" in repr(record.exc_info) for record in caplog.records
-        )
+        unexpected = [r for r in caplog.records if "Unexpected error" in r.getMessage()]
+        assert [record.levelno for record in unexpected] == [logging.ERROR, logging.DEBUG]
+        assert [bool(record.exc_info) for record in unexpected] == [True, False]
+        assert "RuntimeError" in repr(unexpected[0].exc_info)
+
+    async def test_rejection_resets_backoff_for_objnams_merged_in(self, controller, caplog):
+        """A rejection closes the pending set: an objnam merged in while the
+        rejected request was in flight gets its own first WARNING and the base
+        delay, not the inflated state left by the outage before the rejection."""
+        real_sleep = asyncio.sleep
+        sleeps: list[float] = []
+
+        async def recording_sleep(delay, *args, **kwargs):
+            sleeps.append(delay)
+            await real_sleep(0)
+
+        calls = 0
+
+        async def fake_send_cmd(cmd, extra=None):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise ICTimeoutError("no reply")  # outage: WARNING, delay doubles
+            if calls == 2:
+                notify(controller, CHM03)  # merges in while this request is in flight...
+                raise ICCommandError("400")  # ...which the panel then rejects
+            if calls == 3:
+                raise ICTimeoutError("no reply")  # CHM03's own first failure
+            return ACK
+
+        controller.send_cmd = AsyncMock(side_effect=fake_send_cmd)
+        with (
+            patch("asyncio.sleep", new=recording_sleep),
+            caplog.at_level(logging.DEBUG, logger="pyintellicenter.controller"),
+        ):
+            notify(controller, CHM02)
+            await drain(controller)
+
+        assert targeted(controller.send_cmd) == [["CHM02"], ["CHM02"], ["CHM03"], ["CHM03"]]
+        base = controller_module.MONITOR_RETRY_BASE_DELAY
+        assert sleeps == [base, base]
+        retries = [r for r in caplog.records if "retrying in" in r.getMessage()]
+        assert [record.levelno for record in retries] == [logging.WARNING, logging.WARNING]
+        assert controller._pending_monitor == set()
 
     async def test_notification_during_stop_teardown_cannot_spawn_worker(self, controller):
         """A NotifyList landing after the worker has finished cancelling but before
