@@ -382,6 +382,7 @@ class ICNotificationMixin:
                 # folded forward: into its successor, or incoming at capacity one.
                 elif self._notification_queue.empty():
                     self._notification_queue.put_nowait(self._coalesce_notifications(oldest, msg))
+                # A None successor is the shutdown sentinel: both frames are stale and are dropped.
                 elif (successor := self._notification_queue.head) is not None:
                     # In-place replacement preserves queue order and task accounting.
                     self._notification_queue.replace_head(
