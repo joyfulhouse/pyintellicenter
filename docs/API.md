@@ -50,6 +50,13 @@ operation (request-lock queueing, transport write, and response) and defaults to
 the connection's `request_total_timeout` setting. Pass `total_timeout=None` to
 retain response-only timing for a particular call.
 
+The `ICTimeoutError` message names the budget that expired: the response-only
+timeout, or the total deadline (including when the total deadline clipped the
+response window). Its `delivery_uncertain` attribute is `False` when the request
+never reached the transport (it expired while queued for the request lock) and
+`True` once the transport write or WebSocket send began, so a caller can tell
+whether the panel may have acted on the request.
+
 Keepalive probes use their keepalive timeout as a total deadline, so queued
 commands cannot postpone dead-link detection indefinitely. A successful command
 or keepalive response resets the consecutive-miss count.
