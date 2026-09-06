@@ -267,6 +267,10 @@ _LOGGER = logging.getLogger(__name__)
 
 # Configuration constants
 MAX_ATTRIBUTES_PER_QUERY = 50  # Maximum attributes per query batch
+# Backoff between retries of a runtime monitor subscription (see
+# ICModelController._drain_pending_monitor): doubles per failed attempt.
+MONITOR_RETRY_BASE_DELAY = 1.0
+MONITOR_RETRY_MAX_DELAY = 60.0
 
 
 @dataclass
@@ -852,6 +856,12 @@ class ICModelController(
         # Background tasks that request monitoring for objects added at runtime.
         # Held in a set so they are not garbage-collected before completing.
         self._monitor_tasks: set[asyncio.Task[None]] = set()
+        # Runtime-added objects whose RequestParamList subscription has not
+        # been acknowledged yet, and the single worker draining that set with
+        # backoff (also a member of _monitor_tasks so start()/stop() tear it
+        # down with the rest).
+        self._pending_monitor: set[str] = set()
+        self._monitor_worker: asyncio.Task[None] | None = None
 
     def __repr__(self) -> str:
         return (
@@ -964,6 +974,13 @@ class ICModelController(
             ICConnectionError: If connection fails
             ICCommandError: If initialization fails
         """
+        # A (re)connect is the generation boundary for runtime subscriptions:
+        # the full subscription built below covers every object in the model,
+        # so whatever the drain worker still owed the previous connection is
+        # superseded. Tear it down before the connection is replaced.
+        await self._cancel_monitor_tasks()
+        self._pending_monitor.clear()
+
         await super().start()
 
         completed = False
@@ -1041,13 +1058,17 @@ class ICModelController(
 
     async def stop(self) -> None:
         """Stop the controller: cancel monitor tasks, then disconnect."""
+        await self._cancel_monitor_tasks()
+        await super().stop()
+
+    async def _cancel_monitor_tasks(self) -> None:
+        """Cancel and await every runtime monitor task (the drain worker)."""
         tasks = list(self._monitor_tasks)
         for task in tasks:
             task.cancel()
         if tasks:
             # Wait for cancellation so no monitor task is destroyed pending.
             await asyncio.gather(*tasks, return_exceptions=True)
-        await super().stop()
 
     def _on_notification(self, msg: dict[str, Any]) -> None:
         """Handle NotifyList notifications."""
@@ -1062,9 +1083,9 @@ class ICModelController(
 
         A NotifyList may introduce a brand-new object (e.g. equipment installed
         while the connection is live). process_updates() adds such objects to the
-        model and reports their objnams via ``added_objnams``; we then schedule a
-        RequestParamList so IntelliCenter starts pushing their monitored
-        attributes (a newly-added object is not monitored otherwise).
+        model and reports their objnams via ``added_objnams``; they are then
+        queued for a RequestParamList so IntelliCenter starts pushing their
+        monitored attributes (a newly-added object is not monitored otherwise).
         """
         added_objnams: set[str] = set()
         updates = self._model.process_updates(changes_as_list, added_objnams)
@@ -1073,26 +1094,15 @@ class ICModelController(
         if self._system_info and self._system_info.objnam in updates:
             self._system_info.update(updates[self._system_info.objnam])
 
-        # Start monitoring any newly-added objects. This issues a network request,
-        # so it runs as a background task; _on_notification is a synchronous
-        # callback. If no event loop is running (e.g. direct synchronous calls in
-        # tests) we skip scheduling rather than crash. Scheduled *before* the
-        # user callback so a callback raise cannot abort monitoring of new
-        # equipment.
+        # Queue monitoring for any newly-added objects. The request goes through
+        # the pending set and its drain worker so a transient failure is retried
+        # instead of abandoned: the object is already in the model, so no later
+        # notification would ever re-report it as added (issue #91). Queued
+        # *before* the user callback so a callback raise cannot abort
+        # monitoring of new equipment.
         if added_objnams:
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                _LOGGER.debug(
-                    "No running loop; skipping monitor request for new objects %s",
-                    added_objnams,
-                )
-            else:
-                task = loop.create_task(self._request_monitoring_for(added_objnams))
-                # Retain a reference so the task is not garbage-collected; the
-                # done callback drops it and logs any unexpected failure.
-                self._monitor_tasks.add(task)
-                task.add_done_callback(self._on_monitor_task_done)
+            self._pending_monitor |= added_objnams
+            self._ensure_monitor_worker()
 
         # Notify callback (newly-added objects are included in updates, so the
         # existing callback path surfaces them to consumers).
@@ -1196,13 +1206,94 @@ class ICModelController(
                 queries.append({"objnam": pool_obj.objnam, "keys": list(attributes)})
         return queries
 
+    def _ensure_monitor_worker(self) -> None:
+        """Start the pending-monitor drain worker unless one is already running.
+
+        _on_notification is a synchronous callback, so the network work runs
+        in a background task. If no event loop is running (e.g. direct
+        synchronous calls in tests) the objnams simply stay pending rather
+        than crashing.
+        """
+        if self._monitor_worker is not None and not self._monitor_worker.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            _LOGGER.debug(
+                "No running loop; deferring monitor request for new objects %s",
+                sorted(self._pending_monitor),
+            )
+            return
+        task = loop.create_task(self._drain_pending_monitor())
+        self._monitor_worker = task
+        # Retain a reference so the task is not garbage-collected; the done
+        # callback drops it and logs any unexpected failure.
+        self._monitor_tasks.add(task)
+        task.add_done_callback(self._on_monitor_task_done)
+
+    async def _drain_pending_monitor(self) -> None:
+        """Subscribe every pending runtime-added object, retrying transient failures.
+
+        At most one instance runs at a time (see _ensure_monitor_worker) and
+        each attempt covers everything pending at that moment, so additions
+        that arrive while an attempt is in flight or backing off merge into
+        the next one. Objects the model no longer holds are dropped before
+        each attempt. Failure policy:
+
+        - ICTimeoutError, or a malformed reply (ICResponseError): retry after
+          a backoff that doubles from MONITOR_RETRY_BASE_DELAY up to
+          MONITOR_RETRY_MAX_DELAY. The attempt count is not capped, only the
+          rate; the sleep happens here, never while a request is in flight.
+        - ICCommandError: the panel rejected the command, so a retry would
+          only repeat the rejection. Logged at WARNING and dropped.
+        - ICConnectionError / OSError: the link is gone. The worker ends; the
+          reconnect's start() rebuilds every subscription from the model.
+        """
+        delay = MONITOR_RETRY_BASE_DELAY
+        while self._pending_monitor:
+            gone = {objnam for objnam in self._pending_monitor if objnam not in self._model}
+            if gone:
+                _LOGGER.debug("Dropping monitor request for removed objects %s", sorted(gone))
+                self._pending_monitor -= gone
+            objnams = set(self._pending_monitor)
+            try:
+                await self._request_monitoring_for(objnams)
+            except ICCommandError as err:
+                _LOGGER.warning(
+                    "IntelliCenter rejected monitor request for new objects %s (code %s); "
+                    "not retrying",
+                    sorted(objnams),
+                    err.error_code,
+                )
+                self._pending_monitor -= objnams
+            except (ICConnectionError, OSError) as err:
+                _LOGGER.warning(
+                    "Failed to request monitoring for new objects %s: %s; "
+                    "subscriptions are rebuilt on reconnect",
+                    sorted(objnams),
+                    err,
+                )
+                return
+            except (ICTimeoutError, ICResponseError) as err:
+                _LOGGER.warning(
+                    "Monitor request for new objects %s failed: %s; retrying in %.0fs",
+                    sorted(objnams),
+                    err,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, MONITOR_RETRY_MAX_DELAY)
+            else:
+                self._pending_monitor -= objnams
+                delay = MONITOR_RETRY_BASE_DELAY
+
     async def _request_monitoring_for(self, objnams: set[str]) -> None:
         """Request attribute monitoring for the given (newly-added) objects.
 
         Builds the same per-object {objnam, keys} query that start() uses, from
         the model's attribute map, and sends it in batches bounded by
-        MAX_ATTRIBUTES_PER_QUERY. Connection errors are logged and swallowed:
-        this runs in a background task off the notification hot path.
+        MAX_ATTRIBUTES_PER_QUERY. Errors propagate to the caller (the drain
+        worker), which decides whether they are retryable.
         """
         # Build tracking queries for only the new objects so we only
         # (re-)subscribe what is needed.
@@ -1212,37 +1303,34 @@ class ICModelController(
 
         batch: list[dict[str, Any]] = []
         num_attributes = 0
-        try:
-            for items in queries:
-                keys_len = len(items["keys"])
-                # Flush the current batch before it would exceed the limit (a
-                # single object with more keys than the limit is still sent alone).
-                if batch and num_attributes + keys_len > MAX_ATTRIBUTES_PER_QUERY:
-                    await self._send_monitor_batch(batch)
-                    batch = []
-                    num_attributes = 0
-                batch.append(items)
-                num_attributes += keys_len
-
-            if batch:
+        for items in queries:
+            keys_len = len(items["keys"])
+            # Flush the current batch before it would exceed the limit (a
+            # single object with more keys than the limit is still sent alone).
+            if batch and num_attributes + keys_len > MAX_ATTRIBUTES_PER_QUERY:
                 await self._send_monitor_batch(batch)
-        except (ICConnectionError, ICCommandError, ICTimeoutError, OSError) as err:
-            _LOGGER.warning("Failed to request monitoring for new objects %s: %s", objnams, err)
+                batch = []
+                num_attributes = 0
+            batch.append(items)
+            num_attributes += keys_len
+
+        if batch:
+            await self._send_monitor_batch(batch)
 
     async def _send_monitor_batch(self, batch: list[dict[str, Any]]) -> None:
         """Send one RequestParamList batch and apply the response.
 
-        Validates the response shape so a malformed reply is logged and skipped
-        rather than crashing the background monitor task.
+        Raises:
+            ICResponseError: If the reply carries no usable ``objectList``. The
+                subscription cannot be taken as acknowledged, so the caller
+                treats this as a retryable failure (an empty list is fine).
         """
         res = await self.send_cmd("RequestParamList", {"objectList": batch})
         object_list = res.get("objectList")
         if not isinstance(object_list, list):
-            _LOGGER.warning(
-                "RequestParamList returned no usable objectList for monitor request: %r",
-                res,
+            raise ICResponseError(
+                "MALFORMED", f"RequestParamList returned no usable objectList: {res!r}"
             )
-            return
         self._apply_updates(object_list)
 
     # --------------------------------------------------------------------------
