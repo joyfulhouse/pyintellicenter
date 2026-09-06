@@ -984,6 +984,9 @@ class TestWriteWatermarks:
             return await connection.send_request(
                 "GetParamList",
                 request_timeout=1.0,
+                # This test replaces loop.time(); keep that clock stub from
+                # expiring the unrelated connection-level deadline.
+                total_timeout=None,
                 _before_write_callback=before_write,
                 _after_write_callback=after_write,
             )
