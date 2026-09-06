@@ -25,7 +25,7 @@ import contextlib
 import inspect
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, runtime_checkable
 
 import orjson
 from websockets.exceptions import WebSocketException
@@ -365,12 +365,27 @@ class ICNotificationMixin:
                     # sentinel is enqueued). Restore it so the consumer
                     # still exits; the new message is stale during shutdown.
                     self._notification_queue.put_nowait(None)
-                else:
-                    # NotifyList frames are partial deltas: discarding the
-                    # oldest wholesale would silently lose attributes a later
-                    # frame does not resend. Fold its objectList into the
-                    # incoming message instead (newer attributes win).
+                elif self._notification_queue.empty():
+                    # A one-slot queue has no retained successor. Preserve
+                    # its established behavior by folding into the incoming
+                    # frame; there cannot be an intervening newer frame whose
+                    # ordering this could reverse.
                     self._notification_queue.put_nowait(self._coalesce_notifications(oldest, msg))
+                else:
+                    queued = cast("Any", self._notification_queue)._queue
+                    successor = queued[0]
+                    if successor is not None:
+                        # Fold the evicted delta forward into its immediate
+                        # successor, then append the incoming frame unchanged.
+                        # This synchronous head replacement and put_nowait are
+                        # atomic with respect to the same-event-loop consumer.
+                        # The successor stays logically queued, so its original
+                        # unfinished-task count remains the exact accounting for
+                        # the replacement.
+                        queued[0] = self._coalesce_notifications(oldest, successor)
+                        self._notification_queue.put_nowait(msg)
+                    # A sentinel at the head means shutdown is underway. Leave
+                    # it in place and discard both stale notification frames.
             except asyncio.QueueEmpty:
                 _LOGGER.debug("Notification queue race - message dropped")
 
