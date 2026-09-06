@@ -388,9 +388,6 @@ class ICNotificationMixin:
                         self._coalesce_notifications(oldest, successor)
                     )
                     self._notification_queue.put_nowait(msg)
-                else:
-                    # Successor is the shutdown sentinel: both frames are stale, drop them.
-                    pass
             except asyncio.QueueEmpty:
                 _LOGGER.debug("Notification queue race - message dropped")
 
