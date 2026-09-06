@@ -366,6 +366,27 @@ class TestMonitorSubscriptionRetry:
         assert [bool(record.exc_info) for record in unexpected] == [True, False]
         assert "RuntimeError" in repr(unexpected[0].exc_info)
 
+    @pytest.mark.usefixtures("no_backoff")
+    async def test_unexpected_error_after_timeout_still_logs_error(self, controller, caplog):
+        """The unexpected-error gate is independent of the transient one: a bug
+        surfacing after a timeout in the same outage is still the first of its
+        kind and must be an ERROR with its traceback, not a DEBUG continuation
+        of the timeout outage."""
+        controller.send_cmd = AsyncMock(
+            side_effect=[ICTimeoutError("no reply"), RuntimeError("bug"), ACK]
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="pyintellicenter.controller"):
+            notify(controller, CHM02)
+            await drain(controller)
+
+        assert targeted(controller.send_cmd) == [["CHM02"]] * 3
+        assert controller._pending_monitor == set()
+        retries = [r for r in caplog.records if "retrying in" in r.getMessage()]
+        assert [record.levelno for record in retries] == [logging.WARNING, logging.ERROR]
+        assert [bool(record.exc_info) for record in retries] == [False, True]
+        assert "RuntimeError" in repr(retries[1].exc_info)
+
     async def test_rejection_resets_backoff_for_objnams_merged_in(self, controller, caplog):
         """A rejection closes the pending set: an objnam merged in while the
         rejected request was in flight gets its own first WARNING and the base

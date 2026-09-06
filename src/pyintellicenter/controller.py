@@ -1270,10 +1270,13 @@ class ICModelController(
         - Anything else (a bug, or an error class not listed here): retried
           like a transient failure so the objnams never sit pending with no
           worker to drain them. The first occurrence is an ERROR with its
-          traceback, the retries that follow are DEBUG.
+          traceback, the retries that follow are DEBUG. This first-occurrence
+          gate is independent of the transient one, so a bug surfacing partway
+          through a timeout outage is still reported at ERROR.
         """
         delay = MONITOR_RETRY_BASE_DELAY
         failures = 0
+        unexpected_failures = 0
         while self._pending_monitor:
             gone = {objnam for objnam in self._pending_monitor if objnam not in self._model}
             if gone:
@@ -1294,6 +1297,7 @@ class ICModelController(
                 # since (or added later) start with a fresh backoff.
                 delay = MONITOR_RETRY_BASE_DELAY
                 failures = 0
+                unexpected_failures = 0
                 continue
             except (ICConnectionError, OSError) as err:
                 _LOGGER.warning(
@@ -1313,10 +1317,10 @@ class ICModelController(
                     delay,
                 )
             except Exception:
-                failures += 1
+                unexpected_failures += 1
                 # Traceback on the first occurrence of an outage only; ruff's
                 # blind-except rule needs the literal .exception() call.
-                if failures == 1:
+                if unexpected_failures == 1:
                     _LOGGER.exception(
                         "Unexpected error requesting monitoring for new objects %s; "
                         "retrying in %.0fs",
@@ -1334,6 +1338,7 @@ class ICModelController(
                 self._pending_monitor -= objnams
                 delay = MONITOR_RETRY_BASE_DELAY
                 failures = 0
+                unexpected_failures = 0
                 continue
             await asyncio.sleep(delay)
             delay = min(delay * 2, MONITOR_RETRY_MAX_DELAY)
