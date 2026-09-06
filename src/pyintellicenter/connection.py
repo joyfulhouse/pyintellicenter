@@ -24,7 +24,6 @@ import asyncio
 import contextlib
 import inspect
 import logging
-from collections import deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
@@ -34,6 +33,7 @@ from websockets.exceptions import WebSocketException
 from .exceptions import ICConnectionError, ICResponseError, ICTimeoutError
 
 if TYPE_CHECKING:
+    from collections import deque
     from collections.abc import Awaitable, Callable
 
     # Callback types
@@ -204,16 +204,8 @@ class ICRequestMixin:
 class _NotificationQueue(asyncio.Queue[dict[str, Any] | None]):
     """FIFO notification queue with typed constant-time head replacement."""
 
-    def _init(self, _maxsize: int) -> None:
-        # asyncio.Queue's subclass storage hook establishes this FIFO invariant:
-        # deque index zero is the next item returned by _get().
-        self._queue: deque[dict[str, Any] | None] = deque()
-
-    def _get(self) -> dict[str, Any] | None:
-        return self._queue.popleft()
-
-    def _put(self, item: dict[str, Any] | None) -> None:
-        self._queue.append(item)
+    # asyncio.Queue's FIFO storage keeps the next item at deque index zero.
+    _queue: deque[dict[str, Any] | None]
 
     @property
     def head(self) -> dict[str, Any] | None:
