@@ -934,12 +934,8 @@ class ICWebSocketTransport(ICRequestMixin, ICNotificationMixin):
             try:
                 await self._ws.send(packet)
             except asyncio.CancelledError:
-                # websockets discourages cancelling send() because delivery may
-                # be partial. Retire this transport so it is never reused, while
-                # preserving the caller's cancellation (an outer request
-                # deadline converts only its own cancellation to TimeoutError).
-                if self._response_future is not None:
-                    self._response_future.cancel()
+                # A cancelled WebSocket send may have delivered a partial frame.
+                self._response_future.cancel()
                 self._handle_disconnect(ICConnectionError("WebSocket send cancelled"))
                 raise
             if _after_write_callback is not None:
