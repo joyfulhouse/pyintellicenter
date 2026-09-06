@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -43,6 +44,23 @@ def _record_response_timeouts(monkeypatch: pytest.MonkeyPatch, protocol: ICProto
 
     monkeypatch.setattr(protocol, "send_request", record_response_timeout)
     return response_timeouts
+
+
+async def _hold_request_lock(connection: ICConnection, release: asyncio.Event) -> None:
+    """Hold the request lock until ``release`` fires, queueing later requests."""
+    async with connection._request_lock:
+        await release.wait()
+
+
+async def _queue_behind_held_lock(
+    connection: ICConnection,
+) -> tuple[asyncio.Task[None], asyncio.Event]:
+    """Start a holder task on the request lock; return it with its release Event."""
+    release = asyncio.Event()
+    holder = asyncio.create_task(_hold_request_lock(connection, release))
+    await asyncio.sleep(0)
+    assert connection._request_lock.locked()
+    return holder, release
 
 
 class _BlockingWebSocket:
@@ -87,28 +105,21 @@ class TestRequestTotalDeadline:
         transport.write.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_deadline_expired_when_lock_granted_never_writes(self, monkeypatch):
+    async def test_deadline_expired_when_lock_granted_never_writes(self):
         connection, _protocol, transport = _connected_tcp()
-        loop = asyncio.get_running_loop()
-        loop_time = loop.time
-        await connection._request_lock.acquire()
-        task = asyncio.create_task(
-            connection.send_request("SetParamList", request_timeout=0.2, total_timeout=0.01)
-        )
-        await asyncio.sleep(0)
-        assert not task.done()
 
-        # Move the loop clock past the deadline, then hand the lock over: the
-        # lock grant and the expired deadline timer land in the same loop
-        # iteration, with the grant running first.
-        monkeypatch.setattr(loop, "time", lambda: loop_time() + 1.0)
-        connection._request_lock.release()
-
+        # A zero budget is already exhausted when the free lock is granted
+        # without suspending, and the deadline timer (scheduled with
+        # call_soon) has not run yet: only the remaining-budget check under
+        # the lock can fail the request, and it must do so before any write.
         with pytest.raises(ICTimeoutError) as exc_info:
             async with asyncio.timeout(1.0):
-                await task
+                await connection.send_request(
+                    "SetParamList", request_timeout=0.2, total_timeout=0.0
+                )
 
         assert exc_info.value.delivery_uncertain is False
+        assert "total timeout of 0.0s" in str(exc_info.value)
         transport.write.assert_not_called()
 
     @pytest.mark.asyncio
@@ -129,9 +140,12 @@ class TestRequestTotalDeadline:
         transport.write.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_total_deadline_uses_remaining_response_budget_without_replay(self, monkeypatch):
+    async def test_total_deadline_uses_remaining_response_budget_without_replay(
+        self, monkeypatch, caplog
+    ):
         connection, protocol, transport = _connected_tcp()
         response_timeouts = _record_response_timeouts(monkeypatch, protocol)
+        caplog.set_level(logging.DEBUG, logger="pyintellicenter.connection")
         written = asyncio.Event()
         await connection._request_lock.acquire()
         task = asyncio.create_task(
@@ -161,9 +175,12 @@ class TestRequestTotalDeadline:
         assert "total timeout of 0.2s" in str(exc_info.value)
         assert exc_info.value.delivery_uncertain is True
         assert transport.write.call_count == 1
+        # One ERROR line for the expired total budget, none from the transport.
+        error_lines = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+        assert error_lines == [str(exc_info.value)]
 
     @pytest.mark.asyncio
-    async def test_clipped_response_wait_names_total_budget(self, monkeypatch):
+    async def test_clipped_response_wait_names_total_budget(self, monkeypatch, caplog):
         connection, protocol, _transport = _connected_tcp()
         response_timeouts: list[float] = []
 
@@ -177,33 +194,34 @@ class TestRequestTotalDeadline:
             )
 
         monkeypatch.setattr(protocol, "send_request", expire_response_wait)
-        loop = asyncio.get_running_loop()
-        loop_time = loop.time
-        await connection._request_lock.acquire()
+        caplog.set_level(logging.DEBUG, logger="pyintellicenter.connection")
+        holder, release = await _queue_behind_held_lock(connection)
         task = asyncio.create_task(
-            connection.send_request("SetParamList", request_timeout=1.0, total_timeout=0.5)
+            connection.send_request("SetParamList", request_timeout=10.0, total_timeout=5.0)
         )
         await asyncio.sleep(0)
         assert not task.done()
 
-        # Hand the lock over with ~0.2s of the total budget left, so the
-        # response window is clipped from 1.0s to what remains. The transport
+        # Hand the lock over well inside the total budget: the response window
+        # is clipped from 10s to what remains of the 5s, and the transport
         # then reports that clipped window expiring.
-        monkeypatch.setattr(loop, "time", lambda: loop_time() + 0.3)
-        connection._request_lock.release()
-
+        release.set()
         with pytest.raises(ICTimeoutError) as exc_info:
             async with asyncio.timeout(1.0):
                 await task
+        await holder
 
         assert len(response_timeouts) == 1
-        assert response_timeouts[0] < 1.0
+        assert 0.0 < response_timeouts[0] < 5.0
         message = str(exc_info.value)
-        assert "total timeout of 0.5s" in message
-        assert "response timeout 1.0s" in message
+        assert "total timeout of 5.0s" in message
+        assert "response timeout 10.0s" in message
         assert "timed out after" not in message
         assert exc_info.value.delivery_uncertain is True
         assert isinstance(exc_info.value.__cause__, ICTimeoutError)
+        # Exactly one ERROR line, and it names the budget that expired.
+        error_lines = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+        assert error_lines == [message]
 
     @pytest.mark.asyncio
     async def test_caller_cancellation_during_response_wait_clears_pending_state(self):
@@ -228,12 +246,13 @@ class TestRequestTotalDeadline:
         assert "total_timeout" not in packet
 
     @pytest.mark.asyncio
-    async def test_disabled_total_timeout_preserves_response_only_timeout(self, monkeypatch):
+    async def test_disabled_total_timeout_preserves_response_only_timeout(
+        self, monkeypatch, caplog
+    ):
         connection, protocol, transport = _connected_tcp(request_total_timeout=0.01)
         response_timeouts = _record_response_timeouts(monkeypatch, protocol)
-        loop = asyncio.get_running_loop()
-        loop_time = loop.time
-        await connection._request_lock.acquire()
+        caplog.set_level(logging.DEBUG, logger="pyintellicenter.connection")
+        holder, release = await _queue_behind_held_lock(connection)
         task = asyncio.create_task(
             connection.send_request(
                 "GetParamList",
@@ -244,20 +263,25 @@ class TestRequestTotalDeadline:
         await asyncio.sleep(0)
         assert not task.done()
 
-        # Hand the lock over well past the connection default this call opted
-        # out of: the request must still go out with its full response budget.
-        monkeypatch.setattr(loop, "time", lambda: loop_time() + 1.0)
-        connection._request_lock.release()
-
+        # Hand the lock over: with the connection default opted out of, the
+        # request goes out with its full, unclipped response-only budget.
+        release.set()
         with pytest.raises(ICTimeoutError) as exc_info:
             async with asyncio.timeout(1.0):
                 await task
+        await holder
 
         assert response_timeouts == [0.03]
-        assert "timed out after 0.03s" in str(exc_info.value)
+        message = str(exc_info.value)
+        assert message == "Request GetParamList timed out after 0.03s"
         assert exc_info.value.delivery_uncertain is True
         packet = orjson.loads(transport.write.call_args.args[0])
         assert "total_timeout" not in packet
+        # The transport's own window is logged at DEBUG; the single ERROR
+        # line comes from send_request and names the response budget.
+        assert any(r.levelno == logging.DEBUG and r.getMessage() == message for r in caplog.records)
+        error_lines = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+        assert error_lines == [message]
 
 
 class TestWebSocketWriteDeadline:

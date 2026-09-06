@@ -730,7 +730,10 @@ class ICProtocol(ICRequestMixin, ICNotificationMixin, asyncio.Protocol):
             return msg
 
         except TimeoutError as err:
-            _LOGGER.error("Request %s timed out after %ss", command, request_timeout)
+            # DEBUG only: this window may have been clipped by a total
+            # deadline the transport cannot see. ICConnection.send_request
+            # emits the one ERROR line, naming the budget that expired.
+            _LOGGER.debug("Request %s timed out after %ss", command, request_timeout)
             raise ICTimeoutError(
                 f"Request {command} timed out after {request_timeout}s",
                 delivery_uncertain=True,
@@ -965,7 +968,10 @@ class ICWebSocketTransport(ICRequestMixin, ICNotificationMixin):
             return msg
 
         except TimeoutError as err:
-            _LOGGER.error("Request %s timed out after %ss", command, request_timeout)
+            # DEBUG only: this window may have been clipped by a total
+            # deadline the transport cannot see. ICConnection.send_request
+            # emits the one ERROR line, naming the budget that expired.
+            _LOGGER.debug("Request %s timed out after %ss", command, request_timeout)
             raise ICTimeoutError(
                 f"Request {command} timed out after {request_timeout}s",
                 delivery_uncertain=True,
@@ -1507,10 +1513,18 @@ class ICConnection:
                     self._keepalive_failures = 0
                     return response
         except TimeoutError as err:
-            raise ICTimeoutError(
+            total_error = ICTimeoutError(
                 f"Request {command} exceeded its total timeout of {effective_total_timeout}s",
                 delivery_uncertain=delivery_uncertain,
-            ) from err
+            )
+            _LOGGER.error("%s", total_error)
+            raise total_error from err
+        except ICTimeoutError as err:
+            # The one ERROR line per timed-out request, naming the budget that
+            # expired; the transports log their own window at DEBUG because it
+            # may have been clipped by the total deadline.
+            _LOGGER.error("%s", err)
+            raise
 
     async def _keepalive_loop(self) -> None:
         """Send periodic keepalive requests to maintain connection health.
@@ -1541,19 +1555,16 @@ class ICConnection:
 
                 try:
                     _LOGGER.debug("Sending keepalive request")
+                    # The keepalive window is the probe's total deadline;
+                    # send_request clips the response wait to what is left
+                    # of it, and resets the miss count on any correlated
+                    # response.
                     await self.send_request(
                         "GetParamList",
-                        request_timeout=KEEPALIVE_TIMEOUT,
                         total_timeout=KEEPALIVE_TIMEOUT,
                         condition="OBJTYP=SYSTEM",
                         objectList=[{"objnam": "INCR", "keys": ["MODE"]}],
                     )
-                    # send_request already reset the count for this answered
-                    # probe. Reset here as well so the loop's miss policy
-                    # (N consecutive misses, a success in between clears
-                    # them) holds on its own, independent of the request
-                    # path's bookkeeping.
-                    self._keepalive_failures = 0
                 except (ICTimeoutError, TimeoutError) as err:
                     if not self.connected:
                         # The deadline aborted a WebSocket send and its

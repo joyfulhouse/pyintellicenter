@@ -143,8 +143,8 @@ class TestKeepaliveMissPolicy:
     async def test_success_resets_the_miss_count(self):
         conn = self._connection_with_mock_protocol()
         protocol = conn._protocol  # _abort_connection detaches it after closing
-        conn.send_request = AsyncMock(
-            side_effect=[
+        outcomes = iter(
+            [
                 ICTimeoutError("timeout 1"),
                 ICTimeoutError("timeout 2"),
                 {"response": "200"},  # recovery resets the count
@@ -153,6 +153,15 @@ class TestKeepaliveMissPolicy:
                 ICTimeoutError("timeout 5"),
             ]
         )
+
+        async def probe(*_args, **_kwargs):
+            outcome = next(outcomes)
+            if isinstance(outcome, Exception):
+                raise outcome
+            conn._keepalive_failures = 0  # the real send_request resets on any correlated response
+            return outcome
+
+        conn.send_request = AsyncMock(side_effect=probe)
 
         with patch("asyncio.sleep", new=AsyncMock()):
             await conn._keepalive_loop()
