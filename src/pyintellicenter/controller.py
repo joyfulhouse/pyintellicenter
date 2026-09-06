@@ -853,13 +853,15 @@ class ICModelController(
         self._pending_requests: list[_PendingRequest] = []
         self._coalesce_lock = asyncio.Lock()
 
-        # Background tasks that request monitoring for objects added at runtime.
-        # Held in a set so they are not garbage-collected before completing.
-        self._monitor_tasks: set[asyncio.Task[None]] = set()
         # Runtime-added objects whose RequestParamList subscription has not
-        # been acknowledged yet; drained with backoff by a single worker task
-        # held in _monitor_tasks.
+        # been acknowledged yet, drained with backoff by a single worker task
+        # (the reference keeps it from being garbage-collected). Spawning is
+        # paused while start()/stop() tear the worker down so nothing can
+        # escape that teardown; start() resumes it once its full subscription
+        # is in place.
         self._pending_monitor: set[str] = set()
+        self._monitor_task: asyncio.Task[None] | None = None
+        self._monitor_paused = False
 
     def __repr__(self) -> str:
         return (
@@ -975,9 +977,11 @@ class ICModelController(
         # A (re)connect is the generation boundary for runtime subscriptions:
         # the full subscription built below covers every object in the model,
         # so whatever the drain worker still owed the previous connection is
-        # superseded. Tear it down before the connection is replaced.
-        await self._cancel_monitor_tasks()
-        self._pending_monitor.clear()
+        # superseded. Tear it down before the connection is replaced, and keep
+        # spawning paused until that subscription is in place so a NotifyList
+        # arriving mid-start() cannot race it with a duplicate request.
+        self._monitor_paused = True
+        await self._cancel_monitor_task()
 
         await super().start()
 
@@ -1025,7 +1029,10 @@ class ICModelController(
                 removal_changes: dict[str, dict[str, Any] | None] = dict.fromkeys(removed)
                 self._notify_updated(removal_changes)
 
-            # Request monitoring of attributes in batches
+            # Request monitoring of attributes in batches. Everything in the
+            # model at this point (runtime additions included) is covered by
+            # these queries; only objects added after this stay pending.
+            self._pending_monitor.clear()
             attributes = self._model.attributes_to_track()
             query: list[dict[str, Any]] = []
             num_attributes = 0
@@ -1046,6 +1053,12 @@ class ICModelController(
             if query:
                 res = await self.send_cmd("RequestParamList", {"objectList": query})
                 self._apply_updates(res["objectList"])
+
+            # Resume the drain worker for anything added while the queries
+            # above were being built and sent.
+            self._monitor_paused = False
+            if self._pending_monitor:
+                self._ensure_monitor_worker()
             completed = True
         finally:
             if not completed:
@@ -1055,18 +1068,19 @@ class ICModelController(
                     await self.stop()
 
     async def stop(self) -> None:
-        """Stop the controller: cancel monitor tasks, then disconnect."""
-        await self._cancel_monitor_tasks()
+        """Stop the controller: cancel the monitor worker, then disconnect."""
+        self._monitor_paused = True
+        await self._cancel_monitor_task()
         await super().stop()
 
-    async def _cancel_monitor_tasks(self) -> None:
-        """Cancel and await every runtime monitor task (the drain worker)."""
-        tasks = list(self._monitor_tasks)
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            # Wait for cancellation so no monitor task is destroyed pending.
-            await asyncio.gather(*tasks, return_exceptions=True)
+    async def _cancel_monitor_task(self) -> None:
+        """Cancel and await the drain worker, if one is running."""
+        task = self._monitor_task
+        if task is None:
+            return
+        task.cancel()
+        # Wait for cancellation so the task is never destroyed pending.
+        await asyncio.gather(task, return_exceptions=True)
 
     def _on_notification(self, msg: dict[str, Any]) -> None:
         """Handle NotifyList notifications."""
@@ -1174,7 +1188,8 @@ class ICModelController(
         anything else (a bug, or a callback raising) so it is logged rather than
         silently swallowed by asyncio.
         """
-        self._monitor_tasks.discard(task)
+        if self._monitor_task is task:
+            self._monitor_task = None
         if not task.cancelled():
             exc = task.exception()
             if exc is not None:
@@ -1207,11 +1222,18 @@ class ICModelController(
         """Start the pending-monitor drain worker unless one is already running.
 
         _on_notification is a synchronous callback, so the network work runs
-        in a background task. If no event loop is running (e.g. direct
-        synchronous calls in tests) the objnams simply stay pending rather
-        than crashing.
+        in a background task. While start()/stop() are tearing the worker
+        down, or if no event loop is running (e.g. direct synchronous calls in
+        tests), the objnams simply stay pending rather than spawning a task
+        that would escape the teardown or crash.
         """
-        if any(not task.done() for task in self._monitor_tasks):
+        if self._monitor_paused:
+            _LOGGER.debug(
+                "Controller starting or stopping; deferring monitor request for new objects %s",
+                sorted(self._pending_monitor),
+            )
+            return
+        if self._monitor_task is not None and not self._monitor_task.done():
             return
         try:
             loop = asyncio.get_running_loop()
@@ -1222,9 +1244,9 @@ class ICModelController(
             )
             return
         task = loop.create_task(self._drain_pending_monitor())
-        # Retain a reference so the task is not garbage-collected; the done
-        # callback drops it and logs any unexpected failure.
-        self._monitor_tasks.add(task)
+        # The reference keeps the task alive; the done callback clears it and
+        # logs any unexpected failure.
+        self._monitor_task = task
         task.add_done_callback(self._on_monitor_task_done)
 
     async def _drain_pending_monitor(self) -> None:
@@ -1240,12 +1262,17 @@ class ICModelController(
           a backoff that doubles from MONITOR_RETRY_BASE_DELAY up to
           MONITOR_RETRY_MAX_DELAY. The attempt count is not capped, only the
           rate; the sleep happens here, never while a request is in flight.
+          The first failure is a WARNING, the retries that follow are DEBUG.
         - ICCommandError: the panel rejected the command, so a retry would
           only repeat the rejection. Logged at WARNING and dropped.
         - ICConnectionError / OSError: the link is gone. The worker ends; the
           reconnect's start() rebuilds every subscription from the model.
+        - Anything else (a bug, or an error class not listed here): logged
+          with its traceback and retried like a transient failure, so the
+          objnams never sit pending with no worker to drain them.
         """
         delay = MONITOR_RETRY_BASE_DELAY
+        failures = 0
         while self._pending_monitor:
             gone = {objnam for objnam in self._pending_monitor if objnam not in self._model}
             if gone:
@@ -1262,6 +1289,7 @@ class ICModelController(
                     err.error_code,
                 )
                 self._pending_monitor -= objnams
+                continue
             except (ICConnectionError, OSError) as err:
                 _LOGGER.warning(
                     "Failed to request monitoring for new objects %s: %s; "
@@ -1271,17 +1299,28 @@ class ICModelController(
                 )
                 return
             except (ICTimeoutError, ICResponseError) as err:
-                _LOGGER.warning(
+                failures += 1
+                _LOGGER.log(
+                    logging.WARNING if failures == 1 else logging.DEBUG,
                     "Monitor request for new objects %s failed: %s; retrying in %.0fs",
                     sorted(objnams),
                     err,
                     delay,
                 )
-                await asyncio.sleep(delay)
-                delay = min(delay * 2, MONITOR_RETRY_MAX_DELAY)
+            except Exception:
+                failures += 1
+                _LOGGER.exception(
+                    "Unexpected error requesting monitoring for new objects %s; retrying in %.0fs",
+                    sorted(objnams),
+                    delay,
+                )
             else:
                 self._pending_monitor -= objnams
                 delay = MONITOR_RETRY_BASE_DELAY
+                failures = 0
+                continue
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, MONITOR_RETRY_MAX_DELAY)
 
     async def _request_monitoring_for(self, objnams: set[str]) -> None:
         """Request attribute monitoring for the given (newly-added) objects.

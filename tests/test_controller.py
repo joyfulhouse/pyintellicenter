@@ -583,8 +583,8 @@ class TestICModelController:
         controller._on_notification(msg)
 
         # The monitor request runs as a background task; let it run.
-        assert controller._monitor_tasks
-        await asyncio.gather(*controller._monitor_tasks)
+        assert controller._monitor_task is not None
+        await controller._monitor_task
 
         # A RequestParamList was sent that targets the new object.
         request_param_calls = [extra for cmd, extra in sent_commands if cmd == "RequestParamList"]
@@ -3250,14 +3250,14 @@ class TestHandlerLifecycle:
             await asyncio.Event().wait()
 
         task = asyncio.create_task(hang())
-        controller._monitor_tasks.add(task)
+        controller._monitor_task = task
         task.add_done_callback(controller._on_monitor_task_done)
         await started.wait()
 
         await controller.stop()
 
         assert task.cancelled()
-        assert controller._monitor_tasks == set()
+        assert controller._monitor_task is None
 
 
 class TestHandlerCallbackResilience:
@@ -3413,8 +3413,8 @@ class TestHandlerCallbackResilience:
         controller._on_notification(msg)
 
         # Monitoring for the new object was scheduled despite the raise.
-        assert controller._monitor_tasks
-        await asyncio.gather(*controller._monitor_tasks)
+        assert controller._monitor_task is not None
+        await controller._monitor_task
         request_calls = [
             call
             for call in controller.send_cmd.await_args_list
@@ -3675,7 +3675,7 @@ class TestTransactionalStart:
 
         connection.disconnect.assert_awaited_once()
         assert controller._connection is None
-        assert controller._monitor_tasks == set()
+        assert controller._monitor_task is None
 
     @pytest.mark.asyncio
     async def test_model_start_skips_malformed_object_entries(self):

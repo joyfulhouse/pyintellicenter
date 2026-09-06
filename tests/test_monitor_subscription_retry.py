@@ -10,7 +10,7 @@ pin that behaviour down.
 
 import asyncio
 import logging
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -42,8 +42,10 @@ def notify(controller: ICModelController, *entries: dict) -> None:
 
 
 async def drain(controller: ICModelController) -> None:
-    """Wait for whatever monitor task(s) the last notification scheduled."""
-    await asyncio.gather(*controller._monitor_tasks)
+    """Wait (bounded, so a looping worker fails instead of hanging the suite)."""
+    task = controller._monitor_task
+    if task is not None:
+        await asyncio.wait_for(task, timeout=5)
 
 
 def targeted(send_cmd: AsyncMock) -> list[list[str]]:
@@ -138,8 +140,9 @@ class TestMonitorSubscriptionRetry:
         controller.send_cmd = AsyncMock(return_value=ACK)
 
         notify(controller, CHM02)
+        worker = controller._monitor_task
         notify(controller, CHM03)
-        assert len(controller._monitor_tasks) == 1, "a second worker was spawned"
+        assert controller._monitor_task is worker, "a second worker was spawned"
         await drain(controller)
 
         assert targeted(controller.send_cmd) == [["CHM02", "CHM03"]]
@@ -171,11 +174,12 @@ class TestMonitorSubscriptionRetry:
         )
 
     @pytest.mark.usefixtures("small_attribute_map")
-    async def test_extended_outage_backoff_is_exponential_and_capped(self, controller):
+    async def test_extended_outage_backoff_is_exponential_and_capped(self, controller, caplog):
         """(e) N timeouts: sleeps double from 1s and cap at 60s; one worker, one in flight.
 
         An addition that arrives mid-outage merges into the same worker's next
-        attempt instead of spawning a second worker.
+        attempt instead of spawning a second worker. Only the first failure of
+        the outage is a WARNING; the retries that follow are DEBUG.
         """
         real_sleep = asyncio.sleep
         sleeps: list[float] = []
@@ -209,11 +213,16 @@ class TestMonitorSubscriptionRetry:
                 in_flight -= 1
 
         controller.send_cmd = AsyncMock(side_effect=fake_send_cmd)
-        with patch("asyncio.sleep", new=recording_sleep):
+        with (
+            patch("asyncio.sleep", new=recording_sleep),
+            caplog.at_level(logging.DEBUG, logger="pyintellicenter.controller"),
+        ):
             notify(controller, CHM02)
             await drain(controller)
 
         assert sleeps == [1, 2, 4, 8, 16, 32, 60, 60]
+        retries = [record for record in caplog.records if "retrying in" in record.getMessage()]
+        assert [record.levelno for record in retries] == [logging.WARNING] + [logging.DEBUG] * 7
         assert controller.send_cmd.await_count == 9
         assert max_in_flight == 1
         assert len(sending_tasks) == 1
@@ -228,7 +237,8 @@ class TestMonitorSubscriptionRetry:
         controller.send_cmd = AsyncMock(side_effect=ICTimeoutError("no reply"))
 
         notify(controller, CHM02)
-        worker = next(iter(controller._monitor_tasks))
+        worker = controller._monitor_task
+        assert worker is not None
         # Let the first attempt fail and the worker enter its (long) sleep.
         for _ in range(10):
             await asyncio.sleep(0)
@@ -238,7 +248,7 @@ class TestMonitorSubscriptionRetry:
         await controller.stop()
 
         assert worker.cancelled()
-        assert controller._monitor_tasks == set()
+        assert controller._monitor_task is None
         assert controller.send_cmd.await_count == 1
 
     async def test_reconnect_start_supersedes_pending_retry(self, monkeypatch):
@@ -288,7 +298,7 @@ class TestMonitorSubscriptionRetry:
                         break
                     await asyncio.sleep(0.01)
                 assert request_lists == [["CHM02"]]
-                worker = next(iter(controller._monitor_tasks), None)
+                worker = controller._monitor_task
                 assert worker is not None and not worker.done(), "worker gave up"
                 assert controller._pending_monitor == {"CHM02"}
 
@@ -335,3 +345,86 @@ class TestMonitorSubscriptionRetry:
         assert controller.send_cmd.await_count == 1
         # Left in place for the reconnect's start() to clear and rebuild.
         assert controller._pending_monitor == {"CHM02"}
+
+    @pytest.mark.usefixtures("no_backoff")
+    async def test_unexpected_error_is_logged_and_retried(self, controller, caplog):
+        """An error class outside the policy must not kill the worker with objnams pending."""
+        controller.send_cmd = AsyncMock(side_effect=[RuntimeError("bug"), ACK])
+
+        with caplog.at_level(logging.ERROR, logger="pyintellicenter.controller"):
+            notify(controller, CHM02)
+            await drain(controller)
+
+        assert targeted(controller.send_cmd) == [["CHM02"], ["CHM02"]]
+        assert controller._pending_monitor == set()
+        assert any(
+            record.exc_info and "RuntimeError" in repr(record.exc_info) for record in caplog.records
+        )
+
+    async def test_notification_during_stop_teardown_cannot_spawn_worker(self, controller):
+        """A NotifyList landing after the worker has finished cancelling but before
+        stop() resumes must not spawn a fresh worker that escapes the teardown."""
+
+        async def hang_then_notify(cmd, extra=None):
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                # Queue the notification to land once this task is done but
+                # before stop()'s await on it resumes.
+                asyncio.get_running_loop().call_soon(notify, controller, CHM03)
+                raise
+
+        controller.send_cmd = AsyncMock(side_effect=hang_then_notify)
+        notify(controller, CHM02)
+        worker = controller._monitor_task
+        assert worker is not None
+        await asyncio.sleep(0)  # the worker is now inside send_cmd
+
+        await controller.stop()
+
+        assert worker.cancelled()
+        assert controller._monitor_task is None
+        # Both objnams wait for the next start(), which rebuilds every subscription.
+        assert controller._pending_monitor == {"CHM02", "CHM03"}
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert controller.send_cmd.await_count == 1, "a worker ran behind stop()'s back"
+
+    async def test_addition_during_start_is_subscribed_after_start(self, controller, model):
+        """An object announced while start() sends its own subscription is neither
+        raced by a worker (duplicate request) nor lost: it is subscribed once
+        start() has finished."""
+        model.add_object("POOL1", {"OBJTYP": "BODY", "SUBTYP": "POOL", "SNAME": "Pool"})
+        requests: list[list[str]] = []
+        worker_during_start: list = []
+
+        async def fake_send_request(cmd, **kwargs):
+            if cmd == "GetParamList":
+                if "SYSTEM" in kwargs.get("condition", ""):
+                    params = {"PROPNAME": "Pool", "VER": "1.0.0", "MODE": "ENGLISH", "SNAME": "Sys"}
+                    return {"response": "200", "objectList": [{"objnam": "INCR", "params": params}]}
+                params = {"OBJTYP": "BODY", "SUBTYP": "POOL", "SNAME": "Pool", "PARENT": "INCR"}
+                return {"response": "200", "objectList": [{"objnam": "POOL1", "params": params}]}
+            requests.append([item["objnam"] for item in kwargs["objectList"]])
+            if len(requests) == 1:
+                # NotifyList lands while start()'s RequestParamList is in flight.
+                notify(controller, CHM02)
+                worker_during_start.append(controller._monitor_task)
+            return ACK
+
+        connection = MagicMock()
+        connection.connected = True
+        connection.connect = AsyncMock()
+        connection.disconnect = AsyncMock()
+        connection.send_request = AsyncMock(side_effect=fake_send_request)
+
+        with patch("pyintellicenter.controller.ICConnection", return_value=connection):
+            await controller.start()
+            try:
+                assert worker_during_start == [None], "a worker raced start()'s subscription"
+                await drain(controller)
+            finally:
+                await controller.stop()
+
+        assert requests == [["POOL1"], ["CHM02"]]
+        assert controller._pending_monitor == set()
