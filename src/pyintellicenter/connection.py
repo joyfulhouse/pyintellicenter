@@ -1558,9 +1558,16 @@ class ICConnection:
                     # The keepalive window is the probe's total deadline;
                     # send_request clips the response wait to what is left
                     # of it, and resets the miss count on any correlated
-                    # response.
+                    # response. request_timeout is redundant for that bound
+                    # but NOT for the wording: when the transport reports its
+                    # response window expiring, send_request names the
+                    # caller's response timeout in the ICTimeoutError that
+                    # reaches _abort_connection and the disconnect callbacks.
+                    # Passing KEEPALIVE_TIMEOUT makes that the probe's own
+                    # window rather than the instance response_timeout.
                     await self.send_request(
                         "GetParamList",
+                        request_timeout=KEEPALIVE_TIMEOUT,
                         total_timeout=KEEPALIVE_TIMEOUT,
                         condition="OBJTYP=SYSTEM",
                         objectList=[{"objnam": "INCR", "keys": ["MODE"]}],

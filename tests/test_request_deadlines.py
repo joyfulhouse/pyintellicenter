@@ -535,6 +535,46 @@ class TestKeepaliveRequestDeadline:
         assert transport._pending_message_id is None
         assert transport._response_future is None
 
+    @pytest.mark.asyncio
+    async def test_probe_miss_names_keepalive_window(self, monkeypatch):
+        monkeypatch.setattr(connection_module, "KEEPALIVE_TIMEOUT", 0.02)
+        monkeypatch.setattr(connection_module, "KEEPALIVE_MAX_FAILURES", 1)
+        # The instance response_timeout default must be clearly distinct from
+        # the probe's window so the wording can be attributed.
+        connection = ICConnection("host", response_timeout=30.0, keepalive_interval=3600)
+        protocol = ICProtocol()
+        protocol.connection_made(MagicMock())
+        connection._protocol = protocol
+        connection._keepalive_interval = 0.01
+
+        async def expire_response_wait(
+            command: str, request_timeout: float, **_kwargs: Any
+        ) -> dict[str, Any]:
+            # The transport reports its own (clipped) response window expiring.
+            raise ICTimeoutError(
+                f"Request {command} timed out after {request_timeout}s",
+                delivery_uncertain=True,
+            )
+
+        monkeypatch.setattr(protocol, "send_request", expire_response_wait)
+        disconnects: list[Exception | None] = []
+        connection.set_disconnect_callback(disconnects.append)
+        keepalive = asyncio.create_task(connection._keepalive_loop())
+        connection._keepalive_task = keepalive
+        async with asyncio.timeout(1.0):
+            await keepalive
+
+        # The error handed to the disconnect callback names the probe's own
+        # window (KEEPALIVE_TIMEOUT), not the instance response_timeout.
+        assert len(disconnects) == 1
+        error = disconnects[0]
+        assert isinstance(error, ICTimeoutError)
+        message = str(error)
+        assert "total timeout of 0.02s" in message
+        assert "response timeout 0.02s" in message
+        assert "30.0s" not in message
+        assert connection.connected is False
+
 
 def test_timeout_error_defaults_to_certain_non_delivery() -> None:
     error = ICTimeoutError("request expired while queued")
