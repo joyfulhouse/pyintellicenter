@@ -23,7 +23,8 @@ conn = ICConnection(
     host="192.168.1.100",
     port=6681,  # Default: 6681 (TCP), 6680 (WebSocket)
     transport="tcp",  # "tcp" or "websocket"
-    response_timeout=30.0,  # Request timeout in seconds
+    response_timeout=30.0,  # Response-only timeout in seconds
+    request_total_timeout=60.0,  # Queue + write + response deadline; None disables
     keepalive_interval=90.0,  # Keepalive interval in seconds
     notification_queue_size=100,  # Max queued notifications
     notification_batching=True,  # Merge queued notification bursts (see below)
@@ -42,6 +43,24 @@ await conn.disconnect()
 conn.set_notification_callback(lambda msg: print(msg))
 conn.set_disconnect_callback(lambda exc: print(f"Disconnected: {exc}"))
 ```
+
+`send_request(..., request_timeout=30.0)` limits only the response wait; time
+queued behind another request is excluded. `total_timeout` limits the complete
+operation (request-lock queueing, transport write, and response) and defaults to
+the connection's `request_total_timeout` setting. Pass `total_timeout=None` to
+retain response-only timing for a particular call.
+
+The `ICTimeoutError` message names the budget that expired: the response-only
+timeout, or the total deadline (including when the total deadline clipped the
+response window). Its `delivery_uncertain` attribute is `False` when the request
+never reached the transport (it expired while queued for the request lock, or
+the budget was already exhausted when the lock was granted) and
+`True` once the transport write or WebSocket send began, so a caller can tell
+whether the panel may have acted on the request.
+
+Keepalive probes use their keepalive timeout as a total deadline, so queued
+commands cannot postpone dead-link detection indefinitely. Any correlated
+response (success or panel error) resets the consecutive-miss count.
 
 ### Notification batching
 
