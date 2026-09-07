@@ -27,10 +27,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dropped and its tracked attributes never arrived until the next reconnect.
   `ICModelController` now keeps a set of pending object names drained by at
   most one worker task with exponential backoff (1 s doubling to a 60 s cap;
-  attempt count uncapped). Panel rejections (`ICCommandError`) are logged at
-  WARNING and dropped; connection errors end the worker and let the reconnect's
-  `start()` rebuild every subscription; any other exception is retried with an
-  ERROR-plus-traceback on its first occurrence and DEBUG thereafter.
+  attempt count uncapped). Transient failures (a timeout or a malformed reply)
+  are retried and logged at WARNING on the first miss of an outage and DEBUG
+  thereafter, without a traceback. Panel rejections (`ICCommandError`) are
+  logged at WARNING and dropped; connection errors end the worker and let the
+  reconnect's `start()` rebuild every subscription; an unexpected exception of
+  any other class is also retried, logged at ERROR with its traceback on its
+  first occurrence and DEBUG thereafter.
   `start()`/`stop()` gate the worker so a notification landing during teardown
   can neither spawn a worker nor be lost.
 - **Request waits are bounded so queued commands cannot postpone dead-link
