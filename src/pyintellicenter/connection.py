@@ -33,6 +33,7 @@ from websockets.exceptions import WebSocketException
 from .exceptions import ICConnectionError, ICResponseError, ICTimeoutError
 
 if TYPE_CHECKING:
+    from collections import deque
     from collections.abc import Awaitable, Callable
 
     # Callback types
@@ -200,6 +201,20 @@ class ICRequestMixin:
             self._response_future.set_exception(exc)
 
 
+class _NotificationQueue(asyncio.Queue[dict[str, Any] | None]):
+    """FIFO notification queue with typed constant-time head replacement."""
+
+    # asyncio.Queue's FIFO storage keeps the next item at deque index zero.
+    _queue: deque[dict[str, Any] | None]
+
+    @property
+    def head(self) -> dict[str, Any] | None:
+        return self._queue[0]
+
+    def replace_head(self, item: dict[str, Any]) -> None:
+        self._queue[0] = item
+
+
 class ICNotificationMixin:
     """Mixin providing shared notification handling logic.
 
@@ -212,7 +227,7 @@ class ICNotificationMixin:
     _notification_queue_size: int
     # ``None`` on the queue is the shutdown sentinel (see
     # _stop_notification_consumer); real notifications are always dicts.
-    _notification_queue: asyncio.Queue[dict[str, Any] | None] | None
+    _notification_queue: _NotificationQueue | None
     _consumer_task: asyncio.Task[None] | None
     # Per-generation shutdown signal for the consumer: once set, the
     # consumer drains its queue without dispatching callbacks.
@@ -251,9 +266,7 @@ class ICNotificationMixin:
             return
 
         self._notification_drops = 0
-        queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(
-            maxsize=self._notification_queue_size
-        )
+        queue = _NotificationQueue(maxsize=self._notification_queue_size)
         stop = asyncio.Event()
         self._notification_queue = queue
         self._consumer_stop = stop
@@ -365,12 +378,17 @@ class ICNotificationMixin:
                     # sentinel is enqueued). Restore it so the consumer
                     # still exits; the new message is stale during shutdown.
                     self._notification_queue.put_nowait(None)
-                else:
-                    # NotifyList frames are partial deltas: discarding the
-                    # oldest wholesale would silently lose attributes a later
-                    # frame does not resend. Fold its objectList into the
-                    # incoming message instead (newer attributes win).
+                # NotifyList frames are partial deltas, so the oldest must be
+                # folded forward: into its successor, or incoming at capacity one.
+                elif self._notification_queue.empty():
                     self._notification_queue.put_nowait(self._coalesce_notifications(oldest, msg))
+                # A None successor is the shutdown sentinel: both frames are stale and are dropped.
+                elif (successor := self._notification_queue.head) is not None:
+                    # In-place replacement preserves queue order and task accounting.
+                    self._notification_queue.replace_head(
+                        self._coalesce_notifications(oldest, successor)
+                    )
+                    self._notification_queue.put_nowait(msg)
             except asyncio.QueueEmpty:
                 _LOGGER.debug("Notification queue race - message dropped")
 

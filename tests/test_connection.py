@@ -2355,7 +2355,160 @@ class TestNotificationBurstBatching:
 
 
 class TestNotificationOverflowCoalescing:
-    """Issue #67: overflow folds the oldest frame's deltas into its successor."""
+    """Issues #67/#90: overflow preserves partial deltas and their chronology."""
+
+    @pytest.mark.asyncio
+    async def test_overflow_folds_into_successor_and_appends_incoming_unchanged(self):
+        protocol = ICProtocol(notification_callback=MagicMock(), notification_queue_size=3)
+        queue = connection_module._NotificationQueue(maxsize=3)
+        protocol._notification_queue = queue
+        oldest = {
+            "command": "NotifyList",
+            "objectList": [{"objnam": "B1", "params": {"STATUS": "OFF", "TEMP": "80"}}],
+        }
+        successor = {
+            "command": "NotifyList",
+            "objectList": [{"objnam": "B1", "params": {"TEMP": "82"}}],
+        }
+        retained = {
+            "command": "NotifyList",
+            "objectList": [{"objnam": "P1", "params": {"RPM": "2000"}}],
+        }
+        incoming = {
+            "command": "NotifyList",
+            "objectList": [{"objnam": "P1", "params": {"RPM": "2500"}}],
+        }
+        for message in (oldest, successor, retained):
+            queue.put_nowait(message)
+
+        protocol._handle_notification(incoming)
+
+        queued = list(queue._queue)
+        assert queued == [
+            {
+                "command": "NotifyList",
+                "objectList": [{"objnam": "B1", "params": {"STATUS": "OFF", "TEMP": "82"}}],
+            },
+            retained,
+            incoming,
+        ]
+        assert queued[1] is retained
+        assert queued[2] is incoming
+        while not queue.empty():
+            queue.get_nowait()
+            queue.task_done()
+        await asyncio.wait_for(queue.join(), timeout=1.0)
+
+    @pytest.mark.asyncio
+    async def test_overflow_leaves_successor_sentinel_and_accounting_intact(self):
+        protocol = ICProtocol(notification_callback=MagicMock(), notification_queue_size=2)
+        queue = connection_module._NotificationQueue(maxsize=2)
+        protocol._notification_queue = queue
+        queue.put_nowait(
+            {
+                "command": "NotifyList",
+                "objectList": [{"objnam": "B1", "params": {"TEMP": "80"}}],
+            }
+        )
+        queue.put_nowait(None)
+
+        protocol._handle_notification(
+            {
+                "command": "NotifyList",
+                "objectList": [{"objnam": "B1", "params": {"TEMP": "82"}}],
+            }
+        )
+
+        assert list(queue._queue) == [None]
+        assert queue.qsize() == 1
+        assert queue._unfinished_tasks == 1
+        assert queue.get_nowait() is None
+        queue.task_done()
+        await asyncio.wait_for(queue.join(), timeout=1.0)
+
+    @pytest.mark.parametrize("notification_batching", [True, False])
+    @pytest.mark.parametrize(
+        ("queue_size", "burst"),
+        [
+            (
+                2,
+                [
+                    ("B1", {"TEMP": "80", "STATUS": "OFF"}),
+                    ("B1", {"TEMP": "82"}),
+                    ("P1", {"RPM": "2000"}),
+                    ("P1", {"RPM": "2500"}),
+                    ("B1", {"MODE": "AUTO"}),
+                ],
+            ),
+            (
+                3,
+                [
+                    ("B1", {"TEMP": "80", "STATUS": "OFF"}),
+                    ("P1", {"RPM": "2000"}),
+                    ("B1", {"TEMP": "82"}),
+                    ("P1", {"RPM": "2500"}),
+                    ("B1", {"MODE": "AUTO"}),
+                ],
+            ),
+        ],
+        ids=["capacity-2", "capacity-3"],
+    )
+    @pytest.mark.asyncio
+    async def test_overflow_preserves_chronological_state(
+        self, notification_batching, queue_size, burst
+    ):
+        """Overflow delivery reaches the same state as an unbounded queue."""
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        observed = {}
+
+        def apply(message, state):
+            for entry in message["objectList"]:
+                state.setdefault(entry["objnam"], {}).update(entry["params"])
+
+        async def callback(message):
+            apply(message, observed)
+            entered.set()
+            await release.wait()
+
+        protocol = ICProtocol(
+            notification_callback=callback,
+            notification_queue_size=queue_size,
+            notification_batching=notification_batching,
+        )
+        protocol.connection_made(MagicMock())
+        queue = protocol._notification_queue
+        assert queue is not None
+        try:
+            protocol._handle_notification({"command": "NotifyList", "objectList": []})
+            await asyncio.wait_for(entered.wait(), timeout=1.0)
+
+            chronological = []
+            for objnam, params in burst:
+                message = {
+                    "command": "NotifyList",
+                    "objectList": [{"objnam": objnam, "params": params}],
+                }
+                chronological.append(message)
+                protocol._handle_notification(message)
+
+            expected = {}
+            for message in chronological:
+                apply(message, expected)
+
+            assert protocol._notification_drops >= 2
+            release.set()
+            await asyncio.wait_for(queue.join(), timeout=1.0)
+
+            assert observed == expected
+            assert queue.empty()
+            assert queue._unfinished_tasks == 0
+            consumer_task = protocol._consumer_task
+            assert consumer_task is not None
+            assert not consumer_task.done()
+        finally:
+            release.set()
+            protocol.connection_lost(None)
 
     @pytest.mark.asyncio
     async def test_overflow_preserves_attribute_deltas(self):
