@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Notification overflow no longer reorders attribute updates** (#90, #93):
+  when the bounded notification queue was full, the overflow path merged the
+  evicted oldest frame into the *incoming* frame and appended the result at the
+  tail, so attributes retained from the oldest frame were delivered *after*
+  newer queued values and the final callback/model state could regress (for
+  example `TEMP=80` replaying over `TEMP=82`). The evicted frame is now folded
+  into its immediate retained successor at the queue head, using the existing
+  per-object coalescing so the successor's attributes win, and the incoming
+  frame is appended unchanged; head/tail identity, the shutdown sentinel, and
+  `queue.join()` accounting are preserved, and the capacity-one path still folds
+  into the incoming frame as before.
+- **Dynamic monitor subscriptions are retried after a transient failure**
+  (#91, #95): equipment added while the connection was live was added to the
+  model on its first `NotifyList`, but if the follow-up `RequestParamList`
+  timed out or returned a malformed reply the subscription intent was silently
+  dropped and its tracked attributes never arrived until the next reconnect.
+  `ICModelController` now keeps a set of pending object names drained by at
+  most one worker task with exponential backoff (1 s doubling to a 60 s cap;
+  attempt count uncapped). Panel rejections (`ICCommandError`) are logged at
+  WARNING and dropped; connection errors end the worker and let the reconnect's
+  `start()` rebuild every subscription; any other exception is retried with an
+  ERROR-plus-traceback on its first occurrence and DEBUG thereafter.
+  `start()`/`stop()` gate the worker so a notification landing during teardown
+  can neither spawn a worker nor be lost.
+- **Request waits are bounded so queued commands cannot postpone dead-link
+  detection** (#92, #94): `request_timeout` covered only the response stage,
+  so on a half-open link commands queued behind the request lock (and
+  WebSocket writes stuck inside `send()`) could delay a keepalive's timer
+  indefinitely. `ICConnection.send_request` gains a keyword-only
+  `total_timeout` covering lock acquisition, transport write, and response,
+  defaulting to the new `ICConnection(request_total_timeout=60.0)` setting
+  (`None` disables it); the response stage receives the remaining budget, and a
+  request whose budget is already exhausted when the lock is granted fails
+  before anything is written. Keepalive probes use `KEEPALIVE_TIMEOUT` as their
+  total deadline, and any correlated response resets the consecutive-miss count
+  so a slow-but-healthy panel under serial load is not declared dead.
+  `ICTimeoutError` gains a backward-compatible `delivery_uncertain` attribute
+  (`False` when the request never reached the transport, `True` once a write or
+  send began); a cancelled or timed-out WebSocket `send()` retires that
+  transport and fires the normal disconnect path exactly once. Timeout errors
+  now name the budget that expired and are logged at ERROR exactly once per
+  request, with transport-level timeout logs at DEBUG.
+
 ## [0.2.2] - 2026-08-23
 
 ### Fixed
