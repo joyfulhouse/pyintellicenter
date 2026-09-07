@@ -557,12 +557,29 @@ class TestKeepaliveRequestDeadline:
             )
 
         monkeypatch.setattr(protocol, "send_request", expire_response_wait)
+        probe_queued = asyncio.Event()
+        send_request = connection.send_request
+
+        async def signal_probe(command: str, **kwargs: Any) -> dict[str, Any]:
+            probe_queued.set()
+            return await send_request(command, **kwargs)
+
+        monkeypatch.setattr(connection, "send_request", signal_probe)
         disconnects: list[Exception | None] = []
         connection.set_disconnect_callback(disconnects.append)
+        # Hold the lock so the probe queues behind it: the loop clock then
+        # advances between the probe's deadline computation and its
+        # under-lock remaining check, which clips the response window below
+        # KEEPALIVE_TIMEOUT by construction rather than by clock resolution.
+        holder, release = await _queue_behind_held_lock(connection)
         keepalive = asyncio.create_task(connection._keepalive_loop())
         connection._keepalive_task = keepalive
         async with asyncio.timeout(1.0):
+            await probe_queued.wait()
+            await asyncio.sleep(0.001)
+            release.set()
             await keepalive
+            await holder
 
         # The error handed to the disconnect callback names the probe's own
         # window (KEEPALIVE_TIMEOUT), not the instance response_timeout.
