@@ -583,8 +583,8 @@ class TestICModelController:
         controller._on_notification(msg)
 
         # The monitor request runs as a background task; let it run.
-        assert controller._monitor_tasks
-        await asyncio.gather(*controller._monitor_tasks)
+        assert controller._monitor_task is not None
+        await controller._monitor_task
 
         # A RequestParamList was sent that targets the new object.
         request_param_calls = [extra for cmd, extra in sent_commands if cmd == "RequestParamList"]
@@ -593,13 +593,17 @@ class TestICModelController:
         assert "CHM02" in targeted
 
     @pytest.mark.asyncio
-    async def test_request_monitoring_for_handles_errors(self, controller, model):
-        """_request_monitoring_for swallows connection errors (background task)."""
+    async def test_request_monitoring_for_propagates_errors(self, controller, model):
+        """_request_monitoring_for lets request errors reach its caller.
+
+        The drain worker (issue #91) decides per error type whether to retry,
+        drop or defer to reconnect, so the helper must not swallow anything.
+        """
         model.add_object("CHM02", {"OBJTYP": "CHEM", "SUBTYP": "ICHEM", "SNAME": "IntelliChem 2"})
         controller.send_cmd = AsyncMock(side_effect=ICConnectionError("boom"))
 
-        # Must not raise despite the failing send_cmd.
-        await controller._request_monitoring_for({"CHM02"})
+        with pytest.raises(ICConnectionError):
+            await controller._request_monitoring_for({"CHM02"})
 
     @pytest.mark.asyncio
     async def test_request_monitoring_for_no_matching_objects(self, controller):
@@ -609,17 +613,23 @@ class TestICModelController:
         controller.send_cmd.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_request_monitoring_for_handles_malformed_response(self, controller, model):
-        """A response missing/!list objectList is skipped, not crashed."""
+    async def test_request_monitoring_for_rejects_malformed_response(self, controller, model):
+        """A response missing/!list objectList is a failure, not an acknowledgement.
+
+        Issue #91: silently returning left the object unsubscribed for good.
+        Reporting it as ICResponseError lets the drain worker retry.
+        """
         model.add_object("CHM02", {"OBJTYP": "CHEM", "SUBTYP": "ICHEM", "SNAME": "IntelliChem 2"})
 
         # Missing objectList entirely.
         controller.send_cmd = AsyncMock(return_value={"response": "200"})
-        await controller._request_monitoring_for({"CHM02"})  # must not raise
+        with pytest.raises(ICResponseError, match="MALFORMED"):
+            await controller._request_monitoring_for({"CHM02"})
 
         # objectList present but not a list.
         controller.send_cmd = AsyncMock(return_value={"objectList": "nope"})
-        await controller._request_monitoring_for({"CHM02"})  # must not raise
+        with pytest.raises(ICResponseError, match="MALFORMED"):
+            await controller._request_monitoring_for({"CHM02"})
 
     @pytest.mark.asyncio
     async def test_request_monitoring_for_respects_batch_limit(self, controller, monkeypatch):
@@ -3240,14 +3250,14 @@ class TestHandlerLifecycle:
             await asyncio.Event().wait()
 
         task = asyncio.create_task(hang())
-        controller._monitor_tasks.add(task)
+        controller._monitor_task = task
         task.add_done_callback(controller._on_monitor_task_done)
         await started.wait()
 
         await controller.stop()
 
         assert task.cancelled()
-        assert controller._monitor_tasks == set()
+        assert controller._monitor_task is None
 
 
 class TestHandlerCallbackResilience:
@@ -3403,8 +3413,8 @@ class TestHandlerCallbackResilience:
         controller._on_notification(msg)
 
         # Monitoring for the new object was scheduled despite the raise.
-        assert controller._monitor_tasks
-        await asyncio.gather(*controller._monitor_tasks)
+        assert controller._monitor_task is not None
+        await controller._monitor_task
         request_calls = [
             call
             for call in controller.send_cmd.await_args_list
@@ -3665,7 +3675,7 @@ class TestTransactionalStart:
 
         connection.disconnect.assert_awaited_once()
         assert controller._connection is None
-        assert controller._monitor_tasks == set()
+        assert controller._monitor_task is None
 
     @pytest.mark.asyncio
     async def test_model_start_skips_malformed_object_entries(self):
