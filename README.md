@@ -227,6 +227,11 @@ Full API reference lives in [docs/](docs/). Key entry points:
 
 See [docs/API.md](docs/API.md) for the detailed per-class reference.
 
+For independent evidence from the Android client, see the
+[Pentair app protocol analysis](docs/PENTAIR_APP_LOCAL_PROTOCOL.md) and
+[APK reverse-engineering workflow](docs/APK_REVERSE_ENGINEERING.md). These
+references distinguish app request builders from device-validated capabilities.
+
 ## Architecture
 
 ```

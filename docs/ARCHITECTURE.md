@@ -43,6 +43,10 @@ be tested and evolved independently.
 
 ## Data Flow
 
+For versioned evidence from the Pentair Android client's local WebSocket
+implementation, see [Pentair app local protocol](PENTAIR_APP_LOCAL_PROTOCOL.md).
+That reference distinguishes client behavior from device-validated capabilities.
+
 **Initialization:**
 
 1. `ICConnection.connect()` establishes the transport layer.
