@@ -1,0 +1,13 @@
+{
+  "evidence": "Synthetic topology follows tests/test_circuit_group.py. Expected request is static client evidence from Pentair Pool 4.2.21 functions 79341, 81634 and 81636, never captured panel traffic.",
+  "group_id": "GROUP",
+  "objects": [
+    {"objnam": "GROUP", "params": {"OBJTYP": "CIRCUIT", "SUBTYP": "LITSHO", "SNAME": "Original", "TIME": "720", "DNTSTP": "OFF"}},
+    {"objnam": "ROW_B", "params": {"OBJTYP": "CIRCGRP", "PARENT": "GROUP", "CIRCUIT": "CHILD_B", "LISTORD": "2"}},
+    {"objnam": "ROW_A", "params": {"OBJTYP": "CIRCGRP", "PARENT": "GROUP", "CIRCUIT": "CHILD_A", "LISTORD": "1"}},
+    {"objnam": "CHILD_A", "params": {"OBJTYP": "CIRCUIT", "SUBTYP": "GLOW"}},
+    {"objnam": "CHILD_B", "params": {"OBJTYP": "CIRCUIT", "SUBTYP": "GLOW"}}
+  ],
+  "spec": {"subtype": "LITSHO", "sname": " Renamed lights ", "time_minutes": 90, "members": [{"circuit": "CHILD_B"}, {"circuit": "CHILD_A"}]},
+  "expected_request": {"command": "SetCommand", "method": "EditGroup", "arguments": {"objnam": "GROUP", "SNAME": "Renamed lights", "TIME": "90", "DNTSTP": "OFF", "OBJLIST": [{"objnam": "CHILD_B", "params": {}}, {"objnam": "CHILD_A", "params": {}}]}}
+}

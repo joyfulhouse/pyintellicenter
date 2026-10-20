@@ -14,6 +14,7 @@ Documentation for pyintellicenter.
 | Document | Description |
 |---|---|
 | [API.md](API.md) | Detailed API reference for all public classes and functions |
+| [GROUP_CONFIGURATION.md](GROUP_CONFIGURATION.md) | Read-only group planning, static request evidence, and commissioning gates |
 
 ---
 

@@ -12,6 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Typed firmware observations and a bounded watcher, with request/reconnect/version
   verification scaffolding (#106). Installation remains disabled pending validated
   device support contracts; no decline/cancel action is exposed.
+- Read-only typed group create/edit planning, topology diagnostics, static-client
+  edit-request previews, and an offline readback evidence harness (#104).
+  Commissioning remains unavailable pending verified panel write semantics;
+  `apply_group_edit()` fails before I/O. See `docs/GROUP_CONFIGURATION.md` for
+  rename semantics, supported planning scope, and remaining device gates.
 - Per-action light-group capability decisions with stable reason codes and an
   offline capture validator reusing the existing Color Sync safety checks (#100).
   Set/Swim and broader firmware/topology support remain gated on device evidence;
