@@ -14,6 +14,7 @@ from .exceptions import (
     ICError,
     ICLightGroupError,
 )
+from .light_group import ICLightGroupCapabilityError, LightGroupCapabilityReason
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
@@ -132,23 +133,43 @@ def _real_value(params: dict[str, Any], key: str) -> str:
 
 
 def _cached_optional(obj: Any, key: str) -> str | None:
-    return _normalize_optional(key, obj[key], present=key in obj.attribute_keys)
+    try:
+        return _normalize_optional(key, obj[key], present=key in obj.attribute_keys)
+    except ICError as error:
+        raise ICLightGroupCapabilityError(
+            LightGroupCapabilityReason.MALFORMED_CACHE, str(error)
+        ) from error
 
 
 def build_topology(controller: _CircuitGroupMixin, group_objnam: str) -> LightGroupTopology:
     """Build and validate the exact cached action topology without I/O."""
     system_info = controller._system_info
     if system_info is None or system_info.sw_version != SUPPORTED_FIRMWARE:
-        raise ValueError("Color Sync requires exact cached firmware 1.064")
+        raise ICLightGroupCapabilityError(
+            LightGroupCapabilityReason.UNSUPPORTED_FIRMWARE,
+            "Color Sync requires exact cached firmware 1.064",
+        )
+
+    if controller.transport not in {"tcp", "websocket"}:
+        raise ICLightGroupCapabilityError(
+            LightGroupCapabilityReason.UNSUPPORTED_TRANSPORT,
+            "Color Sync requires a validated TCP or WebSocket transport",
+        )
 
     model = controller._model
     target = model[group_objnam]
     if target is None or target.objtype != "CIRCUIT" or target.subtype != "LITSHO":
-        raise ValueError("Color Sync target is not a CIRCUIT/LITSHO parent")
+        raise ICLightGroupCapabilityError(
+            LightGroupCapabilityReason.UNSUPPORTED_PARENT,
+            "Color Sync target is not a CIRCUIT/LITSHO parent",
+        )
 
     rows = controller.get_circuit_group_members(group_objnam)
     if len(rows) != SUPPORTED_CHILD_COUNT:
-        raise ValueError("Color Sync requires exactly two membership rows")
+        raise ICLightGroupCapabilityError(
+            LightGroupCapabilityReason.MEMBERSHIP_COUNT,
+            "Color Sync requires exactly two membership rows",
+        )
 
     target_rows: list[tuple[str, str, str, str]] = []
     children: list[str] = []
@@ -165,24 +186,38 @@ def build_topology(controller: _CircuitGroupMixin, group_objnam: str) -> LightGr
             or not isinstance(order, (str, int))
             or order in {"LISTORD", "00000"}
         ):
-            raise ValueError("Color Sync membership topology is malformed")
+            raise ICLightGroupCapabilityError(
+                LightGroupCapabilityReason.MALFORMED_MEMBERSHIP,
+                "Color Sync membership topology is malformed",
+            )
         try:
             if int(order) < 0:
                 raise ValueError
         except (TypeError, ValueError) as err:
-            raise ValueError("Color Sync membership order is malformed") from err
+            raise ICLightGroupCapabilityError(
+                LightGroupCapabilityReason.MALFORMED_MEMBERSHIP,
+                "Color Sync membership order is malformed",
+            ) from err
         child = model[child_ref]
         if child is None or child.objtype != "CIRCUIT" or child.subtype != SUPPORTED_CHILD_SUBTYPE:
-            raise ValueError("Color Sync children must be exact CIRCUIT/GLOW objects")
+            raise ICLightGroupCapabilityError(
+                LightGroupCapabilityReason.UNSUPPORTED_CHILD,
+                "Color Sync children must be exact CIRCUIT/GLOW objects",
+            )
         children.append(child_ref)
         target_rows.append((row.objnam, parent, child_ref, str(order)))
 
     if len(set(children)) != SUPPORTED_CHILD_COUNT:
-        raise ValueError("Color Sync children must be distinct")
+        raise ICLightGroupCapabilityError(
+            LightGroupCapabilityReason.DUPLICATE_CHILD, "Color Sync children must be distinct"
+        )
 
     systems = model.get_by_type("SYSTEM")
     if len(systems) != 1 or systems[0].objnam != system_info.objnam:
-        raise ValueError("Color Sync cached system topology must contain exactly one system")
+        raise ICLightGroupCapabilityError(
+            LightGroupCapabilityReason.INCOMPLETE_INVENTORY,
+            "Color Sync cached system topology must contain exactly one system",
+        )
 
     circuits = sorted(
         (obj for obj in model if obj.objtype == "CIRCUIT"), key=lambda obj: obj.objnam
@@ -195,9 +230,15 @@ def build_topology(controller: _CircuitGroupMixin, group_objnam: str) -> LightGr
         circuit = row["CIRCUIT"]
         order = row["LISTORD"]
         if not all(isinstance(value, str) and value for value in (parent, circuit)):
-            raise ValueError("Color Sync cached membership topology is incomplete")
+            raise ICLightGroupCapabilityError(
+                LightGroupCapabilityReason.INCOMPLETE_INVENTORY,
+                "Color Sync cached membership topology is incomplete",
+            )
         if not isinstance(order, (str, int)):
-            raise ValueError("Color Sync cached membership order is incomplete")
+            raise ICLightGroupCapabilityError(
+                LightGroupCapabilityReason.INCOMPLETE_INVENTORY,
+                "Color Sync cached membership order is incomplete",
+            )
         row_topology.append((row.objnam, parent, circuit, str(order)))
 
     return LightGroupTopology(
@@ -508,8 +549,11 @@ def validate_subscription_response(
 class LightGroupSyncTracker:
     """Edge-qualified monotonic action and invariant tracker."""
 
-    def __init__(self, topology: LightGroupTopology) -> None:
+    def __init__(
+        self, topology: LightGroupTopology, *, clock: Callable[[], float] | None = None
+    ) -> None:
         self.topology = topology
+        self._clock = clock or (lambda: asyncio.get_running_loop().time())
         self.failure_event = asyncio.Event()
         self.write_started = asyncio.Event()
         self.watermark_ready = asyncio.Event()
@@ -710,7 +754,7 @@ class LightGroupSyncTracker:
                 self.onset_event.set()
             return
         if value == "OFF":
-            self.terminal_time = asyncio.get_running_loop().time()
+            self.terminal_time = self._clock()
             self.terminal_event.set()
 
     def mark_before_write(self, _sequence: int, started_at: float) -> None:
