@@ -25,6 +25,7 @@ from ..group_config import (
 from ._base import _MixinBase
 
 if TYPE_CHECKING:
+    from ..light_group import LightGroupCapabilities
     from ..model import PoolObject
 
 
@@ -82,6 +83,12 @@ class _CircuitGroupMixin(_MixinBase):
             List of circuit-group parent objects
         """
         return [obj for obj in self._model if _is_group_parent(obj)]
+
+    def get_light_group_capabilities(self, group_objnam: str) -> LightGroupCapabilities:
+        """Return per-action cached eligibility without I/O or a readiness promise."""
+        from ..light_group import _capabilities_for
+
+        return _capabilities_for(self, group_objnam)
 
     async def run_light_group_sync(self, group_objnam: str) -> dict[str, Any]:
         """Run the evidence-bounded Color Sync action for one light group."""

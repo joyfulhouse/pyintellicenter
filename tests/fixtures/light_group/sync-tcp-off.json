@@ -1,0 +1,110 @@
+{
+  "schema_version": 1,
+  "provenance": "Purpose-built regression reconstruction from issue #93 sanitized evidence, 2026-07-14/15; not raw traffic. Final time is a nominal observation schedule. Intermediate target-status times are representative within the recorded range.",
+  "action": "SYNC",
+  "transport": "tcp",
+  "group_objnam": "GROUP",
+  "cached": {
+    "objectList": [
+      {"objnam": "SYS", "params": {"OBJTYP": "SYSTEM", "VER": "1.064", "SERVICE": "AUTO"}},
+      {"objnam": "GROUP", "params": {"OBJTYP": "CIRCUIT", "SUBTYP": "LITSHO", "PARENT": "PARENT", "STATUS": "OFF", "USE": "USE", "SYNC": "OFF", "SET": "OFF", "SWIM": "OFF"}},
+      {"objnam": "CHILD_A", "params": {"OBJTYP": "CIRCUIT", "SUBTYP": "GLOW", "PARENT": "GROUP", "STATUS": "OFF", "USE": "USE"}},
+      {"objnam": "CHILD_B", "params": {"OBJTYP": "CIRCUIT", "SUBTYP": "GLOW", "PARENT": "GROUP", "STATUS": "OFF", "USE": "USE"}},
+      {"objnam": "AUX", "params": {"OBJTYP": "CIRCUIT", "SUBTYP": "LIGHT", "STATUS": "OFF"}},
+      {"objnam": "OTHER_GROUP", "params": {"OBJTYP": "CIRCUIT", "SUBTYP": "LITSHO", "STATUS": "OFF", "SYNC": "OFF", "SET": "OFF", "SWIM": "OFF"}},
+      {"objnam": "ROW_A", "params": {"OBJTYP": "CIRCGRP", "PARENT": "GROUP", "CIRCUIT": "CHILD_A", "LISTORD": "1"}},
+      {"objnam": "ROW_B", "params": {"OBJTYP": "CIRCGRP", "PARENT": "GROUP", "CIRCUIT": "CHILD_B", "LISTORD": "2", "USE": "00000"}},
+      {"objnam": "OTHER_ROW", "params": {"OBJTYP": "CIRCGRP", "PARENT": "OTHER_GROUP", "CIRCUIT": "AUX", "LISTORD": "1", "USE": "USE"}},
+      {"objnam": "IGNORED", "params": {"OBJTYP": "MODULE", "STATUS": "STATUS"}}
+    ]
+  },
+  "baseline": {
+    "objectList": [
+      {"objnam": "SYS", "params": {"OBJTYP": "SYSTEM", "VER": "1.064", "SERVICE": "AUTO"}},
+      {"objnam": "GROUP", "params": {"OBJTYP": "CIRCUIT", "SUBTYP": "LITSHO", "PARENT": "PARENT", "STATUS": "OFF", "USE": "USE", "SYNC": "OFF", "SET": "OFF", "SWIM": "OFF"}},
+      {"objnam": "CHILD_A", "params": {"OBJTYP": "CIRCUIT", "SUBTYP": "GLOW", "PARENT": "GROUP", "STATUS": "OFF", "USE": "USE"}},
+      {"objnam": "CHILD_B", "params": {"OBJTYP": "CIRCUIT", "SUBTYP": "GLOW", "PARENT": "GROUP", "STATUS": "OFF", "USE": "USE"}},
+      {"objnam": "AUX", "params": {"OBJTYP": "CIRCUIT", "SUBTYP": "LIGHT", "STATUS": "OFF"}},
+      {"objnam": "OTHER_GROUP", "params": {"OBJTYP": "CIRCUIT", "SUBTYP": "LITSHO", "STATUS": "OFF", "SYNC": "OFF", "SET": "OFF", "SWIM": "OFF"}},
+      {"objnam": "ROW_A", "params": {"OBJTYP": "CIRCGRP", "PARENT": "GROUP", "CIRCUIT": "CHILD_A", "LISTORD": "1"}},
+      {"objnam": "ROW_B", "params": {"OBJTYP": "CIRCGRP", "PARENT": "GROUP", "CIRCUIT": "CHILD_B", "LISTORD": "2", "USE": "00000"}},
+      {"objnam": "OTHER_ROW", "params": {"OBJTYP": "CIRCGRP", "PARENT": "OTHER_GROUP", "CIRCUIT": "AUX", "LISTORD": "1", "USE": "USE"}},
+      {"objnam": "IGNORED", "params": {"OBJTYP": "MODULE", "STATUS": "STATUS"}}
+    ],
+    "messageID": "baseline-read",
+    "response": "200"
+  },
+  "settled": {
+    "objectList": [
+      {"objnam": "SYS", "params": {"OBJTYP": "SYSTEM", "VER": "1.064", "SERVICE": "AUTO"}},
+      {"objnam": "GROUP", "params": {"OBJTYP": "CIRCUIT", "SUBTYP": "LITSHO", "PARENT": "PARENT", "STATUS": "OFF", "USE": "USE", "SYNC": "OFF", "SET": "OFF", "SWIM": "OFF"}},
+      {"objnam": "CHILD_A", "params": {"OBJTYP": "CIRCUIT", "SUBTYP": "GLOW", "PARENT": "GROUP", "STATUS": "OFF", "USE": "USE"}},
+      {"objnam": "CHILD_B", "params": {"OBJTYP": "CIRCUIT", "SUBTYP": "GLOW", "PARENT": "GROUP", "STATUS": "OFF", "USE": "USE"}},
+      {"objnam": "AUX", "params": {"OBJTYP": "CIRCUIT", "SUBTYP": "LIGHT", "STATUS": "OFF"}},
+      {"objnam": "OTHER_GROUP", "params": {"OBJTYP": "CIRCUIT", "SUBTYP": "LITSHO", "STATUS": "OFF", "SYNC": "OFF", "SET": "OFF", "SWIM": "OFF"}},
+      {"objnam": "ROW_A", "params": {"OBJTYP": "CIRCGRP", "PARENT": "GROUP", "CIRCUIT": "CHILD_A", "LISTORD": "1"}},
+      {"objnam": "ROW_B", "params": {"OBJTYP": "CIRCGRP", "PARENT": "GROUP", "CIRCUIT": "CHILD_B", "LISTORD": "2", "USE": "00000"}},
+      {"objnam": "OTHER_ROW", "params": {"OBJTYP": "CIRCGRP", "PARENT": "OTHER_GROUP", "CIRCUIT": "AUX", "LISTORD": "1", "USE": "USE"}},
+      {"objnam": "IGNORED", "params": {"OBJTYP": "MODULE", "STATUS": "STATUS"}}
+    ],
+    "messageID": "settled-read",
+    "response": "200"
+  },
+  "subscriptions": [
+    {
+      "messageID": "2",
+      "response": "200",
+      "objectList": [
+        {"objnam": "SYS", "params": {"OBJTYP": "SYSTEM", "VER": "1.064", "SERVICE": "AUTO"}},
+        {"objnam": "AUX", "params": {"OBJTYP": "CIRCUIT", "SUBTYP": "LIGHT", "STATUS": "OFF"}},
+        {"objnam": "CHILD_A", "params": {"OBJTYP": "CIRCUIT", "SUBTYP": "GLOW", "PARENT": "GROUP", "STATUS": "OFF", "USE": "USE"}},
+        {"objnam": "CHILD_B", "params": {"OBJTYP": "CIRCUIT", "SUBTYP": "GLOW", "PARENT": "GROUP", "STATUS": "OFF", "USE": "USE"}},
+        {"objnam": "GROUP", "params": {"OBJTYP": "CIRCUIT", "SUBTYP": "LITSHO", "PARENT": "PARENT", "STATUS": "OFF", "USE": "USE", "SYNC": "OFF", "SET": "OFF", "SWIM": "OFF"}},
+        {"objnam": "OTHER_GROUP", "params": {"OBJTYP": "CIRCUIT", "SUBTYP": "LITSHO", "STATUS": "OFF", "SYNC": "OFF", "SET": "OFF", "SWIM": "OFF"}},
+        {"objnam": "OTHER_ROW", "params": {"OBJTYP": "CIRCGRP", "PARENT": "OTHER_GROUP", "CIRCUIT": "AUX", "LISTORD": "1", "USE": "USE"}},
+        {"objnam": "ROW_A", "params": {"OBJTYP": "CIRCGRP", "PARENT": "GROUP", "CIRCUIT": "CHILD_A", "LISTORD": "1"}},
+        {"objnam": "ROW_B", "params": {"OBJTYP": "CIRCGRP", "PARENT": "GROUP", "CIRCUIT": "CHILD_B", "LISTORD": "2", "USE": "00000"}}
+      ]
+    }
+  ],
+  "subscription_settle_seconds": 1.0,
+  "request": {
+    "command": "SetParamList",
+    "messageID": "action-1",
+    "objectList": [
+      {"objnam": "GROUP", "params": {"SYNC": "ON"}}
+    ]
+  },
+  "acknowledgement": {
+    "messageID": "action-1",
+    "response": "200"
+  },
+  "acknowledgement_at": 0.002145,
+  "notification_source": "sender",
+  "connection_continuous": true,
+  "write_watermark": 0,
+  "events": [
+    {"at": 0.219557, "sequence": 1, "frame": {"command": "NotifyList", "objectList": [{"objnam": "GROUP", "params": {"SYNC": "ON"}}]}},
+    {"at": 1.255901, "sequence": 2, "frame": {"command": "NotifyList", "objectList": [{"objnam": "GROUP", "params": {"STATUS": "ON"}}]}},
+    {"at": 1.257, "sequence": 3, "frame": {"command": "NotifyList", "objectList": [{"objnam": "CHILD_A", "params": {"STATUS": "ON"}}]}},
+    {"at": 1.258996, "sequence": 4, "frame": {"command": "NotifyList", "objectList": [{"objnam": "CHILD_B", "params": {"STATUS": "ON"}}]}},
+    {"at": 35.286805, "sequence": 5, "frame": {"command": "NotifyList", "objectList": [{"objnam": "GROUP", "params": {"SYNC": "OFF"}}]}}
+  ],
+  "final_at": 180.0,
+  "final": {
+    "objectList": [
+      {"objnam": "SYS", "params": {"OBJTYP": "SYSTEM", "VER": "1.064", "SERVICE": "AUTO"}},
+      {"objnam": "GROUP", "params": {"OBJTYP": "CIRCUIT", "SUBTYP": "LITSHO", "PARENT": "PARENT", "STATUS": "ON", "USE": "USE", "SYNC": "OFF", "SET": "OFF", "SWIM": "OFF"}},
+      {"objnam": "CHILD_A", "params": {"OBJTYP": "CIRCUIT", "SUBTYP": "GLOW", "PARENT": "GROUP", "STATUS": "ON", "USE": "USE"}},
+      {"objnam": "CHILD_B", "params": {"OBJTYP": "CIRCUIT", "SUBTYP": "GLOW", "PARENT": "GROUP", "STATUS": "ON", "USE": "USE"}},
+      {"objnam": "AUX", "params": {"OBJTYP": "CIRCUIT", "SUBTYP": "LIGHT", "STATUS": "OFF"}},
+      {"objnam": "OTHER_GROUP", "params": {"OBJTYP": "CIRCUIT", "SUBTYP": "LITSHO", "STATUS": "OFF", "SYNC": "OFF", "SET": "OFF", "SWIM": "OFF"}},
+      {"objnam": "ROW_A", "params": {"OBJTYP": "CIRCGRP", "PARENT": "GROUP", "CIRCUIT": "CHILD_A", "LISTORD": "1"}},
+      {"objnam": "ROW_B", "params": {"OBJTYP": "CIRCGRP", "PARENT": "GROUP", "CIRCUIT": "CHILD_B", "LISTORD": "2", "USE": "00000"}},
+      {"objnam": "OTHER_ROW", "params": {"OBJTYP": "CIRCGRP", "PARENT": "OTHER_GROUP", "CIRCUIT": "AUX", "LISTORD": "1", "USE": "USE"}},
+      {"objnam": "IGNORED", "params": {"OBJTYP": "MODULE", "STATUS": "STATUS"}}
+    ],
+    "messageID": "final-read",
+    "response": "200"
+  }
+}

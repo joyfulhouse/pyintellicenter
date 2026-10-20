@@ -320,6 +320,11 @@ space-separated `CIRCUIT` list can still be passed to
 `get_color_light_groups()`; only parent `CIRCUIT` objects are enumerated as
 groups.
 
+`get_light_group_capabilities(parent_objnam)` returns immutable per-action
+cached eligibility decisions and stable reason codes without I/O. It never
+replaces fresh preflight. See [Light-group actions](LIGHT_GROUP_ACTIONS.md) for
+the capability matrix, offline capture validator, and remaining hardware gates.
+
 `run_light_group_sync()` is deliberately narrower than the read helpers. It is
 available only when fresh and cached state both report the exact raw firmware
 token `1.064`, the parent is `CIRCUIT/LITSHO`, membership resolves to exactly two
