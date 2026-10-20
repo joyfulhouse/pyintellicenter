@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Per-action light-group capability decisions with stable reason codes and an
+  offline capture validator reusing the existing Color Sync safety checks (#100).
+  Set/Swim and broader firmware/topology support remain gated on device evidence;
+  Sync retains its existing lifecycle and post-terminal observation window.
+
 ## [0.2.3] - 2026-10-15
 
 ### Fixed
