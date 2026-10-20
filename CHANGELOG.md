@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Read-only typed group create/edit planning, topology diagnostics, static-client
+  edit-request previews, and an offline readback evidence harness (#104).
+  Commissioning remains unavailable pending verified panel write semantics;
+  `apply_group_edit()` fails before I/O. See `docs/GROUP_CONFIGURATION.md` for
+  rename semantics, supported planning scope, and remaining device gates.
+
 ## [0.2.3] - 2026-10-15
 
 ### Fixed

@@ -15,6 +15,13 @@ from ..attributes import (
     LISTORD_ATTR,
     PARENT_ATTR,
 )
+from ..group_config import (
+    GroupConfigurationCapability,
+    GroupEditPlan,
+    GroupSpec,
+    ICGroupConfigurationError,
+    validate_group_edit,
+)
 from ._base import _MixinBase
 
 if TYPE_CHECKING:
@@ -43,6 +50,28 @@ def _member_order(member: PoolObject) -> tuple[int, int, str]:
 
 class _CircuitGroupMixin(_MixinBase):
     """Circuit group convenience methods for ``ICModelController``."""
+
+    @property
+    def group_configuration_capability(self) -> GroupConfigurationCapability:
+        """Return the current evidence gates for group commissioning."""
+        return GroupConfigurationCapability()
+
+    def validate_group_edit(self, group_id: str | None, spec: GroupSpec) -> GroupEditPlan:
+        """Plan an edit or creation (None) without changing the model or panel."""
+        return validate_group_edit(self._model, group_id, spec)
+
+    async def apply_group_edit(self, plan: GroupEditPlan) -> None:
+        """Fail before any I/O until device-verified commissioning is supported.
+
+        A valid plan or static request preview cannot enable writes. There is
+        deliberately no opt-in flag that bypasses the device-evidence gate.
+        """
+        if not isinstance(plan, GroupEditPlan):
+            raise TypeError("plan must be a GroupEditPlan")
+        raise ICGroupConfigurationError(
+            "Group commissioning is unavailable: static client evidence does not "
+            "verify panel write semantics; inspect group_configuration_capability"
+        )
 
     def get_circuit_groups(self) -> list[PoolObject]:
         """Get all circuit objects that act as group parents.

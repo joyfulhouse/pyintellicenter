@@ -1,0 +1,13 @@
+{
+  "evidence": "Synthetic topology. Expected request is static client evidence from Pentair Pool 4.2.21 functions 79341, 81309 and 81311, never captured panel traffic.",
+  "group_id": "GROUP",
+  "objects": [
+    {"objnam": "GROUP", "params": {"OBJTYP": "CIRCUIT", "SUBTYP": "CIRCGRP", "SNAME": "Original", "TIME": "720", "DNTSTP": "OFF"}},
+    {"objnam": "ROW_A", "params": {"OBJTYP": "CIRCGRP", "PARENT": "GROUP", "CIRCUIT": "CHILD_A", "LISTORD": "1", "ACT": "ON"}},
+    {"objnam": "ROW_B", "params": {"OBJTYP": "CIRCGRP", "PARENT": "GROUP", "CIRCUIT": "CHILD_B", "LISTORD": "2", "ACT": "OFF"}},
+    {"objnam": "CHILD_A", "params": {"OBJTYP": "CIRCUIT", "SUBTYP": "GENERIC"}},
+    {"objnam": "CHILD_B", "params": {"OBJTYP": "CIRCUIT", "SUBTYP": "GENERIC"}}
+  ],
+  "spec": {"subtype": "CIRCGRP", "sname": "Renamed features", "time_minutes": 90, "members": [{"circuit": "CHILD_B", "action": "ON"}, {"circuit": "CHILD_A", "action": "OFF"}]},
+  "expected_request": {"command": "SetCommand", "method": "EditGroup", "arguments": {"OBJNAM": "GROUP", "OBJTYP": "CIRCGRP", "SNAME": "Renamed features", "TIME": "90", "OBJLIST": [{"objnam": "CHILD_B", "TIME": "90", "DNTSTP": "OFF", "params": {"ACT": "ON"}}, {"objnam": "CHILD_A", "TIME": "90", "DNTSTP": "OFF", "params": {"ACT": "OFF"}}]}}
+}

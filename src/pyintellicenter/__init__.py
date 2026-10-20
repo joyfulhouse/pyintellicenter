@@ -175,6 +175,16 @@ from .exceptions import (
     ICResponseError,
     ICTimeoutError,
 )
+from .group_config import (
+    GroupConfigurationCapability,
+    GroupDiagnostic,
+    GroupEditPlan,
+    GroupMemberSpec,
+    GroupSpec,
+    ICGroupConfigurationError,
+    compare_group_readback,
+    validate_group_edit,
+)
 from .model import PoolModel, PoolObject
 from .types import (
     NotificationMessage,
@@ -215,6 +225,15 @@ __all__ = [
     # Model classes
     "PoolModel",
     "PoolObject",
+    # Read-only group configuration planning
+    "GroupConfigurationCapability",
+    "GroupDiagnostic",
+    "GroupEditPlan",
+    "GroupMemberSpec",
+    "GroupSpec",
+    "ICGroupConfigurationError",
+    "compare_group_readback",
+    "validate_group_edit",
     # Discovery
     "ICUnit",
     "discover_intellicenter_units",
