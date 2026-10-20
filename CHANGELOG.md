@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Typed firmware observations and a bounded watcher, with request/reconnect/version
+  verification scaffolding (#106). Installation remains disabled pending validated
+  device support contracts; no decline/cancel action is exposed.
+
 ## [0.2.3] - 2026-10-15
 
 ### Fixed

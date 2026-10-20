@@ -175,6 +175,7 @@ from .exceptions import (
     ICResponseError,
     ICTimeoutError,
 )
+from .firmware import FirmwareUpdateCapability, FirmwareUpdatePhase, FirmwareUpdateState
 from .model import PoolModel, PoolObject
 from .types import (
     NotificationMessage,
@@ -212,6 +213,10 @@ __all__ = [
     "ICConnectionHandlerCallbacks",
     "ICConnectionMetrics",
     "ICSystemInfo",
+    # Firmware observations
+    "FirmwareUpdateCapability",
+    "FirmwareUpdatePhase",
+    "FirmwareUpdateState",
     # Model classes
     "PoolModel",
     "PoolObject",

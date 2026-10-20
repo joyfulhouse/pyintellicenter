@@ -31,6 +31,9 @@ SYSTEM_ATTRIBUTES = {
     "ACT3",  # (str) Diagnostic action string
     "ACT4",  # (str) Configuration string
     "ADDRESS",  # Pool Address
+    "AUTO",  # Raw firmware setting; meaning is not validated
+    "IN",  # Raw firmware install/decline observation
+    "PROGRESS",  # Raw firmware progress; units/range/terminal values unknown
     "AVAIL",  # ON/OFF but not sure what it does
     "CITY",  # Pool City
     "COUNTRY",  # Country obviously (example 'United States')

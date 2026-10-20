@@ -35,6 +35,14 @@ state updates, and is the underlying library powering the
 - **Home Assistant Ready**: Convenience helpers for integration development, including
   read-only accessors for temperature, chemistry, sensors, heaters, and schedules
 
+### Firmware Update Observations
+
+The typed firmware status and watcher APIs preserve raw progress values and
+separate availability, acknowledgement, reconnecting, and verified versions.
+Installation remains disabled for all panels pending validated device support.
+See [firmware observations and installation gates](docs/FIRMWARE_UPDATES.md)
+for usage, lifecycle semantics, and remaining device-evidence requirements.
+
 ## Installation
 
 See **[INSTALL.md](INSTALL.md)** for the complete guide.

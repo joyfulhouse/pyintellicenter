@@ -1,0 +1,8 @@
+{
+  "provenance": "Synthetic lifecycle test data only. Not captured from hardware; never register this contract in production.",
+  "source_version": "fixture-source",
+  "target_version": "fixture-target",
+  "required_params": [["UPDATE", "fixture-offer"], ["IN", "fixture-idle"], ["AUTO", "fixture-manual"]],
+  "evidence": "synthetic-test-fixture-only",
+  "initial": {"VER": "fixture-source", "UPDATE": "fixture-offer", "IN": "fixture-idle", "AUTO": "fixture-manual"}
+}

@@ -266,6 +266,7 @@ class TestICBaseController:
         mock_connection.connected = True
         mock_connection.connect = AsyncMock()
         mock_connection.set_disconnect_callback = MagicMock()
+        mock_connection.add_notification_observer = MagicMock(return_value=MagicMock())
         mock_connection.send_request = AsyncMock(
             return_value={
                 "response": "200",
@@ -370,6 +371,7 @@ class TestICModelController:
         mock_connection.connected = True
         mock_connection.connect = AsyncMock()
         mock_connection.set_disconnect_callback = MagicMock()
+        mock_connection.add_notification_observer = MagicMock(return_value=MagicMock())
         mock_connection.set_notification_callback = MagicMock()
         mock_connection.send_request = AsyncMock(
             side_effect=[
@@ -3592,6 +3594,7 @@ class TestTransactionalStart:
         connection = AsyncMock()
         connection.connected = True
         connection.set_disconnect_callback = MagicMock()
+        connection.add_notification_observer = MagicMock(return_value=MagicMock())
         connection.set_notification_callback = MagicMock()
         return connection
 
@@ -3761,6 +3764,7 @@ class TestStartReconcile:
         connection = AsyncMock()
         connection.connected = True
         connection.set_disconnect_callback = MagicMock()
+        connection.add_notification_observer = MagicMock(return_value=MagicMock())
         connection.set_notification_callback = MagicMock()
         return connection
 
