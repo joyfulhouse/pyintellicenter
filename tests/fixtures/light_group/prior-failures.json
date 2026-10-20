@@ -1,0 +1,21 @@
+{
+  "provenance": "Sanitized semantic markers from intellicenter issue #93 evidence dated 2026-07-14/15, firmware 1.064, two distinct GLOW children. No raw device frames or new hardware results.",
+  "persisted_flags": [
+    {"action": "SET", "transport": "tcp"},
+    {"action": "SET", "transport": "websocket"},
+    {"action": "SWIM", "transport": "websocket"}
+  ],
+  "tcp_swim": {
+    "acknowledgement_at": 0.008995,
+    "onset_at": 0.593273,
+    "terminal_at": 74.567605,
+    "child_off": [
+      {"role": "CHILD_A", "at": 83.613525},
+      {"role": "CHILD_B", "at": 83.614324}
+    ]
+  },
+  "client_signals": {
+    "official_browser": "SWIM",
+    "local_sender": "SYNC"
+  }
+}

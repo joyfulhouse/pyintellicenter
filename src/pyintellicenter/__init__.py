@@ -176,6 +176,13 @@ from .exceptions import (
     ICTimeoutError,
 )
 from .firmware import FirmwareUpdateCapability, FirmwareUpdatePhase, FirmwareUpdateState
+from .light_group import (
+    ICLightGroupCapabilityError,
+    LightGroupAction,
+    LightGroupActionDecision,
+    LightGroupCapabilities,
+    LightGroupCapabilityReason,
+)
 from .model import PoolModel, PoolObject
 from .types import (
     NotificationMessage,
@@ -193,10 +200,16 @@ __all__ = [
     # Exceptions
     "ICError",
     "ICLightGroupError",
+    "ICLightGroupCapabilityError",
     "ICConnectionError",
     "ICResponseError",
     "ICCommandError",
     "ICTimeoutError",
+    # Light-group capabilities
+    "LightGroupAction",
+    "LightGroupActionDecision",
+    "LightGroupCapabilities",
+    "LightGroupCapabilityReason",
     # Connection
     "ICConnection",
     "ICProtocol",
