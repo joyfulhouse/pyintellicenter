@@ -175,6 +175,7 @@ from .exceptions import (
     ICResponseError,
     ICTimeoutError,
 )
+from .firmware import FirmwareUpdateCapability, FirmwareUpdatePhase, FirmwareUpdateState
 from .group_config import (
     GroupConfigurationCapability,
     GroupDiagnostic,
@@ -235,6 +236,10 @@ __all__ = [
     "ICConnectionHandlerCallbacks",
     "ICConnectionMetrics",
     "ICSystemInfo",
+    # Firmware observations
+    "FirmwareUpdateCapability",
+    "FirmwareUpdatePhase",
+    "FirmwareUpdateState",
     # Model classes
     "PoolModel",
     "PoolObject",

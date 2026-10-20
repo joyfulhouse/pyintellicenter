@@ -253,6 +253,7 @@ async def test_reconnect_reuses_parent_identity_and_reconciles_rows(evidence):
     connection = AsyncMock()
     connection.connected = True
     connection.set_disconnect_callback = MagicMock()
+    connection.add_notification_observer = MagicMock(return_value=MagicMock())
     connection.set_notification_callback = MagicMock()
 
     async def respond(command, **kwargs):

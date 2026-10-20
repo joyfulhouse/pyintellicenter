@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Typed firmware observations and a bounded watcher, with request/reconnect/version
+  verification scaffolding (#106). Installation remains disabled pending validated
+  device support contracts; no decline/cancel action is exposed.
 - Read-only typed group create/edit planning, topology diagnostics, static-client
   edit-request previews, and an offline readback evidence harness (#104).
   Commissioning remains unavailable pending verified panel write semantics;

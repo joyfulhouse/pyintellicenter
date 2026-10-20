@@ -255,6 +255,7 @@ from .attributes import (
 )
 from .connection import DEFAULT_TCP_PORT, DEFAULT_WEBSOCKET_PORT, ICConnection, TransportType
 from .exceptions import ICCommandError, ICConnectionError, ICError, ICResponseError, ICTimeoutError
+from .firmware import FirmwareUpdateState, _FirmwareLifecycle
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Mapping
@@ -449,6 +450,7 @@ class ICBaseController:
 
         # Metrics
         self._metrics = ICConnectionMetrics()
+        self._firmware = _FirmwareLifecycle(self)
 
         # Object writes share one controller-wide mutation lifecycle. Color Sync
         # marks its long-running lifecycle pending before waiting for older
@@ -489,6 +491,42 @@ class ICBaseController:
     def connected(self) -> bool:
         """Return True if connected."""
         return self._connection is not None and self._connection.connected
+
+    @property
+    def firmware_update(self) -> FirmwareUpdateState:
+        """Return raw firmware observations and evidence-gated capabilities."""
+        return self._firmware.state
+
+    async def request_firmware_install(
+        self, target_version: str, *, verification_timeout: float = 600.0
+    ) -> FirmwareUpdateState:
+        """Request once under a validated contract; no contracts currently ship.
+
+        Acknowledgement is not completion. Timeout/cancellation never replays
+        the request. Use a fresh verification read to resolve an uncertain result.
+        """
+        return await self._firmware.request_install(target_version, verification_timeout)
+
+    async def _send_firmware_request(
+        self, connection: ICConnection, command: str, **kwargs: Any
+    ) -> dict[str, Any]:
+        """Account for firmware requests while retaining the captured connection."""
+        if self._connection is not connection or not connection.connected:
+            raise ICConnectionError("Connection changed before firmware request")
+        with _RequestContext(self._metrics):
+            return await connection.send_request(command, **kwargs)
+
+    async def verify_firmware_update(self) -> FirmwareUpdateState:
+        """Read VER afresh and compare with the explicitly requested target."""
+        return await self._firmware.verify()
+
+    def watch_firmware_update(self) -> AsyncIterator[FirmwareUpdateState]:
+        """Watch current state and coalesced observations until closed/cancelled.
+
+        Closing the iterator removes only its listener. It sends no device
+        command, does not cancel installation, and leaves duplicate protection.
+        """
+        return self._firmware.watch()
 
     def set_disconnected_callback(
         self, callback: Callable[[ICBaseController, Exception | None], None] | None
@@ -540,6 +578,7 @@ class ICBaseController:
 
         connection.set_disconnect_callback(_on_connection_disconnect)
         self._connection = connection
+        self._firmware.attach(connection)
 
         completed = False
         try:
@@ -550,6 +589,7 @@ class ICBaseController:
             _LOGGER.debug("Connected to IC at %s:%s", self._host, self._port)
 
             # Fetch system info
+            firmware_revision = self._firmware.revision
             with _RequestContext(self._metrics):
                 try:
                     response = await connection.send_request(
@@ -562,6 +602,7 @@ class ICBaseController:
                 try:
                     info = response["objectList"][0]
                     self._system_info = ICSystemInfo(info["objnam"], info["params"])
+                    self._firmware.observe_entries([info], snapshot_revision=firmware_revision)
                 except (KeyError, IndexError, TypeError) as err:
                     raise ICResponseError(
                         "MALFORMED", f"unusable system info response: {response!r}"
@@ -574,6 +615,7 @@ class ICBaseController:
                 with contextlib.suppress(Exception):
                     await connection.disconnect()
                 if self._connection is connection:
+                    self._firmware.disconnected()
                     self._connection = None
 
     async def stop(self) -> None:
@@ -584,11 +626,13 @@ class ICBaseController:
         connection can never be disowned when this coroutine resumes.
         """
         connection, self._connection = self._connection, None
+        self._firmware.disconnected(stopped=True)
         if connection:
             await connection.disconnect()
 
     def _on_disconnect(self, exc: Exception | None) -> None:
         """Handle disconnection from connection layer."""
+        self._firmware.disconnected()
         if self._disconnected_callback:
             self._disconnected_callback(self, exc)
 
@@ -1042,7 +1086,11 @@ class ICModelController(
                 # Flush before the batch would exceed the limit (a single
                 # object with more keys than the limit is still sent alone).
                 if query and num_attributes + keys_len > MAX_ATTRIBUTES_PER_QUERY:
+                    firmware_revision = self._firmware.revision
                     res = await self.send_cmd("RequestParamList", {"objectList": query})
+                    self._firmware.observe_entries(
+                        res["objectList"], snapshot_revision=firmware_revision
+                    )
                     self._apply_updates(res["objectList"])
                     query = []
                     num_attributes = 0
@@ -1051,7 +1099,11 @@ class ICModelController(
 
             # Send remaining
             if query:
+                firmware_revision = self._firmware.revision
                 res = await self.send_cmd("RequestParamList", {"objectList": query})
+                self._firmware.observe_entries(
+                    res["objectList"], snapshot_revision=firmware_revision
+                )
                 self._apply_updates(res["objectList"])
 
             # Resume the drain worker for anything added while the queries
@@ -1381,12 +1433,14 @@ class ICModelController(
                 subscription cannot be taken as acknowledged, so the caller
                 treats this as a retryable failure (an empty list is fine).
         """
+        firmware_revision = self._firmware.revision
         res = await self.send_cmd("RequestParamList", {"objectList": batch})
         object_list = res.get("objectList")
         if not isinstance(object_list, list):
             raise ICResponseError(
                 "MALFORMED", f"RequestParamList returned no usable objectList: {res!r}"
             )
+        self._firmware.observe_entries(object_list, snapshot_revision=firmware_revision)
         self._apply_updates(object_list)
 
     # --------------------------------------------------------------------------
