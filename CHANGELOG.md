@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0b1] - 2026-10-20
+
 ### Added
 
 - Typed firmware observations and a bounded watcher, with request/reconnect/version
