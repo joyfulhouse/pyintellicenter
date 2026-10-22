@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-22
+
+### Changed
+
+- Promote 0.3.0b1 to stable without protocol or behavior changes after the
+  IntelliCenter 3.12.0b2 production soak on Home Assistant Yellow / HA 2026.10.2.
+  Retained entity history covers 2026-10-20 18:45 UTC through
+  2026-10-22 17:21 UTC, including two scheduled pool circulation cycles and
+  an intervening HA restart. Current request counters cover only the later
+  process lifetime; they are not cumulative soak counters.
+- Firmware installation, group commissioning, calibration without hardware
+  evidence, and broader light actions remain disabled. This read-only soak
+  does not validate forced reconnects, service-mode writes, heater actuation,
+  calibration, firmware installation, or commissioning.
+
+
 ## [0.3.0b1] - 2026-10-20
 
 ### Added
@@ -884,7 +900,9 @@ First stable release of pyintellicenter.
 - `orjson` for fast JSON serialization
 - Python 3.11+ required
 
-[Unreleased]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.3.0b1...v0.3.0
+[0.3.0b1]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.2.3...v0.3.0b1
 [0.2.3]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/joyfulhouse/pyintellicenter/compare/v0.2.0...v0.2.1
