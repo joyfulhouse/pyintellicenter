@@ -34,6 +34,12 @@ See
 [CONTRIBUTING](https://github.com/joyfulhouse/.github/blob/main/CONTRIBUTING.md)
 for the contribution workflow.
 
+## Access and permission evidence
+
+See [Access capabilities](ACCESS_CAPABILITIES.md) before collecting permission or
+remote-inventory evidence. Synthetic tests verify scoped diagnostic protection;
+they do not validate device authorization or access-management support.
+
 ## Testing Against Real Hardware
 
 A live integration test helper lives in `scripts/test_discovery_live.py`. Set

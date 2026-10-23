@@ -12,6 +12,7 @@ import logging
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
+from ._redaction import _redact_credentials
 from .attributes import (
     ALL_ATTRIBUTES_BY_TYPE,
     CIRCUIT_TYPE,
@@ -138,8 +139,9 @@ class PoolObject:
         else:
             parts.append(f"({self._objtype}):")
 
-        for key in sorted(self._properties):
-            value = self._properties[key]
+        properties = _redact_credentials(self._properties)
+        for key in sorted(properties):
+            value = properties[key]
             if isinstance(value, list):
                 value = "[" + ",".join(f"{{{v}}}" for v in value) + "]"
             parts.append(f"{key}: {value}")
@@ -149,7 +151,7 @@ class PoolObject:
         """Return a detailed string representation for debugging."""
         return (
             f"PoolObject(objnam={self._objnam!r}, objtype={self._objtype!r}, "
-            f"subtype={self._subtype!r}, properties={self._properties!r})"
+            f"subtype={self._subtype!r}, properties={_redact_credentials(self._properties)!r})"
         )
 
     @property
@@ -327,9 +329,8 @@ class PoolModel:
             # all params are stripped during pruning (key==value pattern)
             if OBJTYP_ATTR not in params:
                 _LOGGER.debug(
-                    "Skipping object %s: missing required OBJTYP attribute (params: %s)",
+                    "Skipping object %s: missing required OBJTYP attribute (payload omitted)",
                     objnam,
-                    params,
                 )
                 return None
 
@@ -372,11 +373,11 @@ class PoolModel:
                 objnam = entry["objnam"]
                 params = entry["params"]
             except (KeyError, TypeError):
-                _LOGGER.debug("Skipping malformed object entry: %r", entry)
+                _LOGGER.debug("Skipping malformed object entry (payload omitted)")
                 skipped += 1
                 continue
             if not isinstance(objnam, str) or not isinstance(params, dict):
-                _LOGGER.debug("Skipping object entry with invalid objnam/params: %r", entry)
+                _LOGGER.debug("Skipping object entry with invalid objnam/params (payload omitted)")
                 skipped += 1
                 continue
             if self.add_object(objnam, params) is not None:
@@ -430,12 +431,12 @@ class PoolModel:
             try:
                 objnam = entry["objnam"]
             except (KeyError, TypeError):
-                _LOGGER.debug("Ignoring malformed snapshot entry: %r", entry)
+                _LOGGER.debug("Ignoring malformed snapshot entry (payload omitted)")
                 continue
             if isinstance(objnam, str):
                 present.add(objnam)
             else:
-                _LOGGER.debug("Ignoring snapshot entry with invalid objnam: %r", entry)
+                _LOGGER.debug("Ignoring snapshot entry with invalid objnam (payload omitted)")
 
         removed = [objnam for objnam in self._objects if objnam not in present]
         for objnam in removed:
@@ -496,7 +497,7 @@ class PoolModel:
                 objnam = update["objnam"]
                 params = update["params"]
             except (KeyError, TypeError):
-                _LOGGER.debug("Skipping malformed update entry: %r", update)
+                _LOGGER.debug("Skipping malformed update entry (payload omitted)")
                 continue
 
             # A well-formed entry has a string objnam and a dict of params. Guard
@@ -504,7 +505,7 @@ class PoolModel:
             # and a non-dict params would break update/construction) so neither
             # the lookup below nor the hot path can raise.
             if not isinstance(objnam, str) or not isinstance(params, dict):
-                _LOGGER.debug("Skipping update with invalid objnam/params: %r", update)
+                _LOGGER.debug("Skipping update with invalid objnam/params (payload omitted)")
                 continue
 
             pool_obj = self._objects.get(objnam)

@@ -605,7 +605,7 @@ class ICBaseController:
                     self._firmware.observe_entries([info], snapshot_revision=firmware_revision)
                 except (KeyError, IndexError, TypeError) as err:
                     raise ICResponseError(
-                        "MALFORMED", f"unusable system info response: {response!r}"
+                        "MALFORMED", "unusable system info response (payload omitted)"
                     ) from err
             completed = True
         finally:
@@ -1438,7 +1438,7 @@ class ICModelController(
         object_list = res.get("objectList")
         if not isinstance(object_list, list):
             raise ICResponseError(
-                "MALFORMED", f"RequestParamList returned no usable objectList: {res!r}"
+                "MALFORMED", "RequestParamList returned no usable objectList (payload omitted)"
             )
         self._firmware.observe_entries(object_list, snapshot_revision=firmware_revision)
         self._apply_updates(object_list)
