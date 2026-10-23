@@ -697,7 +697,7 @@ class ICProtocol(ICRequestMixin, ICNotificationMixin, asyncio.Protocol):
                     # Valid JSON with a non-object root (number, string,
                     # array, null): skip the frame; it must never escape
                     # data_received or asyncio aborts the whole connection.
-                    _LOGGER.error("Ignoring non-object JSON frame: %.80s", line)
+                    _LOGGER.error("Ignoring non-object JSON frame (payload omitted)")
                     continue
 
                 self._dispatch_message(decoded)
@@ -880,7 +880,7 @@ class ICWebSocketTransport(ICRequestMixin, ICNotificationMixin):
                     # Valid JSON with a non-object root (number, string,
                     # array, null): skip the frame instead of letting a
                     # TypeError/AttributeError kill the reader.
-                    _LOGGER.error("Ignoring non-object JSON frame: %.80s", message)
+                    _LOGGER.error("Ignoring non-object JSON frame (payload omitted)")
                     continue
 
                 self._dispatch_message(decoded)

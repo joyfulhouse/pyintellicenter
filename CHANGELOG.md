@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Omit rejected protocol/model payloads from diagnostic logs and malformed
+  controller-response exceptions; mask password fields in model string
+  representations while preserving raw read values (#105).
+
+### Documentation
+
+- Record local permission, cloud-account, and physical-remote evidence boundaries,
+  unverified firmware/transport support, and a read-only capture protocol (#105).
+
 ## [0.3.0] - 2026-10-22
 
 ### Changed
