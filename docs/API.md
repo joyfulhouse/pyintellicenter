@@ -249,6 +249,24 @@ controller.set_updated_callback(on_update)
 await controller.stop()
 ```
 
+### Sensor calibration evidence
+
+The sensor helpers read SOURCE, PROBE and CALIB independently. The descriptions
+"calibrated" and "raw" reflect existing API terminology, not a verified equation
+for every firmware. Pentair Pool 4.2.21's initialization (Hermes function 83042,
+`0x013d467a`, relative `0x86e` through `0x8a2`) adds CALIB to SOURCE, conflicting
+with the previously documented `SOURCE = PROBE + CALIB` assumption. Do not infer
+offsets or physical success from that equation or from a write acknowledgement.
+
+No supported calibration bounds or typed calibration setter are established
+here. Activation requires sanitized device evidence for exact firmware, SENSE
+subtype and panel MODE: bounds/precision, unit transitions, actual channel/body
+mapping, healthy/error probe states, independent write/readback and persistence.
+The integration's [evidence checklist](https://github.com/joyfulhouse/intellicenter/blob/main/docs/SENSOR_CALIBRATION.md)
+tracks these requirements under [#185](https://github.com/joyfulhouse/intellicenter/issues/185).
+The integration support registry remains empty; synthetic tests are not captures.
+These documentation clarifications change no accessor behavior or dependency.
+
 ### Per-object subscriptions
 
 `set_updated_callback` is a single overwrite-slot (and `ICConnectionHandler`
