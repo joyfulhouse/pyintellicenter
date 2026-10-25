@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Specify the correlated device evidence still required for group create/edit,
   uncertain outcomes, reconciliation, deletion and equipment associations.
+- Record alert-preference evidence gaps, targeted readback and preservation
+  requirements, and metadata caching/offline policy; preference reads/writes
+  remain unavailable pending device evidence (#102).
 
 ## [0.3.1] - 2026-10-23
 

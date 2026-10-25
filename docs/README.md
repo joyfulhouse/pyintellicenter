@@ -14,6 +14,7 @@ Documentation for pyintellicenter.
 | Document | Description |
 |---|---|
 | [API.md](API.md) | Detailed API reference for all public classes and functions |
+| [ALERT_PREFERENCES.md](ALERT_PREFERENCES.md) | Alert-preference evidence gaps, readback requirements and metadata/offline policy |
 | [GROUP_CONFIGURATION.md](GROUP_CONFIGURATION.md) | Read-only group planning, static request evidence, and commissioning gates |
 | [STORED_HISTORY.md](STORED_HISTORY.md) | History evidence, capture requirements, and bounded retrieval acceptance contract |
 
