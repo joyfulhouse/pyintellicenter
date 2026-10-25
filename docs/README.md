@@ -14,6 +14,7 @@ Documentation for pyintellicenter.
 | Document | Description |
 |---|---|
 | [API.md](API.md) | Detailed API reference for all public classes and functions |
+| [ADVANCED_CONFIGURATION.md](ADVANCED_CONFIGURATION.md) | Advanced-setting schema gaps, device evidence and partial-save reconciliation requirements |
 | [ALERT_PREFERENCES.md](ALERT_PREFERENCES.md) | Alert-preference evidence gaps, readback requirements and metadata/offline policy |
 | [FDR_EVENTS.md](FDR_EVENTS.md) | Offline typed FDR observations and local/HA evidence gates |
 | [GROUP_CONFIGURATION.md](GROUP_CONFIGURATION.md) | Read-only group planning, static request evidence, and commissioning gates |
