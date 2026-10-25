@@ -12,7 +12,7 @@ comments, and the analysis and comments in
 [PR #108](https://github.com/joyfulhouse/pyintellicenter/pull/108) and
 [integration PR #189](https://github.com/joyfulhouse/intellicenter/pull/189).
 Those analysis branches contain app-code observations, not panel captures.
-No configured MCP resources or device captures were available in this sandbox.
+No configured MCP resources or IntelliBlue device captures were available in this sandbox.
 Repository memory recall was unavailable. No live device action was performed.
 
 The static source is Pentair Pool 4.2.21 / 21615, package
