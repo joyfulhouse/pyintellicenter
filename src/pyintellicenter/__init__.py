@@ -167,6 +167,7 @@ from .discovery import (
     find_unit_by_host,
     find_unit_by_name,
 )
+from .events import EventObservationReason, EventState, observe_fdr_event
 from .exceptions import (
     ICCommandError,
     ICConnectionError,
@@ -240,6 +241,10 @@ __all__ = [
     "FirmwareUpdateCapability",
     "FirmwareUpdatePhase",
     "FirmwareUpdateState",
+    # Offline read-only FDR observations (local support not established)
+    "EventObservationReason",
+    "EventState",
+    "observe_fdr_event",
     # Model classes
     "PoolModel",
     "PoolObject",
