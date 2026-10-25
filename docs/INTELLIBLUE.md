@@ -86,9 +86,9 @@ ordinary pump telemetry with a purifier-derived status.
 Consumers need dependency IDs and structural/value change notifications for
 reassignment, member changes, removal and reconnect. Exclude disconnected cached
 observations from current-state claims. A connected transport or one notification
-does not certify freshness of all fields: the current model has no per-field age
-or snapshot-completeness guarantee, so freshness stays unverified until such a
-contract is validated and implemented. Do not invent an arbitrary timeout.
+does not certify freshness of all fields. Receipt timestamps alone cannot prove
+hardware freshness or snapshot completeness; purifier freshness stays unverified
+until such a contract is validated and implemented. Do not invent an arbitrary timeout.
 
 Restriction consumers may report observed context with provenance and unknown
 dependencies; neither a category nor a relationship proves panel enforcement.
