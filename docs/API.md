@@ -530,3 +530,11 @@ unit.port  # TCP port (6681)
 unit.ws_port  # WebSocket port (6680)
 unit.model  # Model info (if available)
 ```
+
+## Field receipt provenance
+
+`ICModelController.field_receipt(objnam, attribute)` exposes local receipt age and
+connection generation independently of cached parameter values. Missing receipts
+remain unknown; recent receipt is not a guarantee of device freshness or complete
+inventory. See [Field receipt provenance](FIELD_RECEIPTS.md) for lifecycle,
+unchanged-value, removal, and compatibility semantics.

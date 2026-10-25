@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Offline typed read-only FDR/FDP event observations preserve raw status/ID and
   unknown, stale and unavailable states. Automatic subscriptions and HA delivery
   remain gated on local device evidence; no inactive value is assumed (#107).
+- Read-only `ICModelController.field_receipt()` metadata for per-field local
+  receipt age and connection generation. Reconnect omissions, unchanged values,
+  and removed/recreated objects remain distinct from cached model state; receipt
+  does not establish panel freshness or command completion (intellicenter #187).
 
 ### Fixed
 
