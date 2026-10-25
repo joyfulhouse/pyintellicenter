@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Offline typed read-only FDR/FDP event observations preserve raw status/ID and
+  unknown, stale and unavailable states. Automatic subscriptions and HA delivery
+  remain gated on local device evidence; no inactive value is assumed (#107).
+
 ### Fixed
 
 - Reject malformed and duplicate-ID snapshots in the offline group evidence
