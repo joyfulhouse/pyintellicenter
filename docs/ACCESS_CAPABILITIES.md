@@ -148,3 +148,38 @@ and transport, app passcode-flow traces with secrets removed, observed existing
 security-disabled behavior, and physical-remote inventory read arguments/schema.
 Cloud invitations/accounts require a separate cloud contract. Issue #105 remains
 open; this report and synthetic regression tests do not close hardware research.
+
+## Follow-up audit: 2026-10-25
+
+Reviewed current issue #105 and tracker intellicenter #188 (including comments),
+merged access PR #114 and release PR #115, the current analysis branch for #108,
+and the companion integration analysis PR #189. None supplies device-captured
+permission or physical-remote request/response evidence. Historical delay/light
+capture plans contain synthetic `PASSWRD` examples, not permission captures;
+equipment soak results do not fill the access matrix above. Configured MCP
+resource and resource-template listings expose no additional capture source.
+The repository memory skill is installed, but no recall tool is exposed in this
+session; memory is not evidence of device behavior.
+
+Library 0.3.1 masks credential fields in object string representations and omits
+rejected payloads from its own diagnostic failures. Consumers serializing raw
+`PoolObject.properties` must still redact at their export boundary. In particular,
+Home Assistant diagnostics export raw properties rather than these string
+representations; library masking alone cannot protect that export. Unstructured
+exception text must also be omitted rather than assumed safe after key redaction.
+
+The next evidence submission must include the following, with credentials and
+personal identifiers removed as described above:
+
+| Question | Required evidence before a supported read API |
+|---|---|
+| Permission schema | Correlated request/response pairs and field JSON types for each actual panel/module firmware and TCP or WebSocket transport; include absent, echoed, malformed, denied and timeout results where observed. |
+| Role and passcode behavior | Existing authorized app-session traces showing record selection, whether credentials cross the wire, and session/reconnect/expiry ordering. Record app-side versus panel-side enforcement separately; read success cannot prove write authority. |
+| Security disabled | Owner-observed existing security mode correlated with the same session and returned field values. Do not disable security for collection or infer admin from missing records. |
+| Physical remotes | Existing app `GetRemotes` request with exact argument names, types and values replaced by stable aliases, plus response envelope, inventory record schema, empty result, denial and reconnect observations. Do not guess arguments or execute deletion. |
+| Administration | Separately authorized recovery-capable testing establishing enforcement, denial, mutation readback and recovery. No write API is enabled by completion of the read investigation. |
+
+These are outstanding evidence requirements, not assertions that the scenarios
+have been tested. The cloud identity/invitation contract remains a separate
+investigation. No library release or integration dependency change is required
+for this report; the integration can continue using published 0.3.1.
