@@ -67,10 +67,10 @@ class _SensorMixin(_MixinBase):
     def get_sensor_probe_reading(self, sensor_objnam: str) -> int | None:
         """Get the raw, uncalibrated probe reading from a sensor.
 
-        Each temperature sensor exposes two readings: SOURCE (the calibrated
-        value, after the CALIB offset is applied) and PROBE (the raw value
-        directly from the sensor hardware). Comparing the two reveals the
-        calibration offset currently in effect (SOURCE - PROBE == CALIB).
+        Returns the panel's PROBE attribute, traditionally described as raw.
+        The relationship between SOURCE, PROBE and CALIB requires correlation
+        on the specific firmware and unit mode; do not derive an offset by
+        subtracting these readings. See docs/API.md, Sensor calibration evidence.
 
         Args:
             sensor_objnam: Object name of the sensor
@@ -83,10 +83,9 @@ class _SensorMixin(_MixinBase):
     def get_sensor_calibration(self, sensor_objnam: str) -> int | None:
         """Get the calibration offset currently applied to a sensor.
 
-        The CALIB attribute stores the offset (in the system's temperature
-        units) IntelliCenter adds to the raw PROBE reading to produce the
-        calibrated SOURCE reading: ``SOURCE = PROBE + CALIB``. A value of 0
-        means no calibration is applied.
+        Returns the panel's CALIB attribute without calculating it from SOURCE
+        or PROBE. Offset units, bounds, precision and persistence require device
+        evidence for the specific firmware, sensor subtype and panel unit mode.
 
         Args:
             sensor_objnam: Object name of the sensor
