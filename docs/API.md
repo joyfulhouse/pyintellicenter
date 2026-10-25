@@ -229,8 +229,8 @@ available = controller.get_available_light_effects("C0003")
 # Schedule helpers
 enabled = controller.is_schedule_enabled("SCH01")  # STATUS=ON
 circuit = controller.get_schedule_circuit("SCH01")  # objnam of controlled circuit
-start = controller.get_schedule_start_time("SCH01")  # "HH,MM,SS" 24-hour
-stop = controller.get_schedule_stop_time("SCH01")  # "HH,MM,SS" 24-hour
+start = controller.get_schedule_start_time("SCH01")  # Raw TIME string, no conversion
+stop = controller.get_schedule_stop_time("SCH01")  # Raw TIMOUT string, no conversion
 days = controller.get_schedule_days("SCH01")  # e.g. "MTWRFAU"
 
 
