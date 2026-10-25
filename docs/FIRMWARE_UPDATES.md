@@ -117,6 +117,56 @@ device evidence for the exact hardware and source/target firmware combination:
 5. Separate authorized evidence for decline and any cancel capability. Never use
    decline as an assumed cancellation operation.
 
+### Evidence intake and support matrix (#106)
+
+The 2026-10-25 review checked the owning issue and comments, merged lifecycle
+PR #110, the linked static-analysis PRs #108 / intellicenter #189, repository
+history and firmware fixtures. No correlated real-panel install capture was
+found. The configured resource catalogs supplied no additional device evidence.
+The support matrix therefore remains:
+
+| Scope | Proven behavior | Missing before installation can be enabled |
+| --- | --- | --- |
+| Every real hardware/source/target combination | No validated install contract | All device gates below |
+| Static app asset identified above | Install/decline request construction and queried keys | Eligibility, acceptance, progress semantics, terminal/failure states, reboot timing and version proof |
+| Synthetic fixture | Client lifecycle and request/observation isolation | Hardware compatibility; this fixture cannot certify a real panel |
+| Decline / cancellation | Distinct decline builder; no validated device effect | Independent acceptance and effect evidence for each operation |
+
+Attach sanitized evidence to #106 with a stable capture identifier and an
+ordered timeline. Retain field types and exact tokens; redact identifiers
+consistently so command/response/notification correlation remains reviewable.
+Record hardware model/revision, exact raw source and target version strings,
+transport, app build, role, topology and target-offer provenance. Include
+elapsed times, connection generations, request correlation, and whether each
+observation is a snapshot, subscription response, notification or independent
+panel observation. Do not publish credentials, addresses or private panel IDs.
+
+| Case | Required evidence and expected client outcome |
+| --- | --- |
+| Eligibility | Complete fresh baseline for every proposed required parameter, including offer and target; missing/echoed keys, unsupported versions, roles or topology must fail closed |
+| Acceptance / rejection | Exact request and correlated response; distinguish rejection from missing/malformed acknowledgement; `200` establishes acknowledgement only |
+| Progress | Ordered exact values/types before dispatch, during the send/ack window and after acknowledgement; establish units, range, repeats, regressions and missing-progress behavior independently |
+| Device failure | Independently confirmed panel failure and its correlated local state; a request rejection is not an installation failure code |
+| Disconnect / reconnect | Actual interruption and independent reboot observation if available; elapsed reconnect bounds, connection replacement, restored subscriptions and stale-message handling; socket loss alone proves no reboot |
+| Completion | Fresh explicit `VER` response on the current connection, equal to the independently established target and different from baseline; progress and cached/version notifications cannot substitute |
+| Unresolved outcome | No progress, unchanged/unexpected/missing version, timeout or caller cancellation must remain unknown; demonstrate no install replay across reconnect or application restart |
+| Decline / cancel | Separately authorized action, correlated response and independent observed effect in each claimed state; never infer cancellation from `IN=NO` or closing a watcher |
+
+Collect read-only baselines first. A future install capture needs explicit
+authorization for that device and target; repository implementation permission
+does not authorize installation or panel mutation. Do not deliberately induce
+destructive failures to fill this matrix. Use existing authorized captures or
+naturally occurring failures where available; unsupported cases remain gated.
+
+The default 600-second client observation deadline is a software bound, not a
+measured firmware installation duration or reconnect SLA. Evidence must justify
+any supported device-specific bounds. Later fresh reads may reconcile an
+uncertain dispatched request, but must never automatically reinstall. Duplicate
+protection currently ends with the controller instance: a future HA install
+surface must also retain an unresolved-operation guard across reload/restart,
+or establish an independently validated fresh reconciliation procedure before
+allowing another request. Do not treat process recreation as retry permission.
+
 `tests/fixtures/firmware/synthetic_contract.json` is deliberately synthetic. It
 exercises the guarded lifecycle, not device compatibility; it must never enter
 the production registry. Existing sanitized test/server fixtures validate the
