@@ -17,6 +17,7 @@ Documentation for pyintellicenter.
 | [ADVANCED_CONFIGURATION.md](ADVANCED_CONFIGURATION.md) | Advanced-setting schema gaps, device evidence and partial-save reconciliation requirements |
 | [ALERT_PREFERENCES.md](ALERT_PREFERENCES.md) | Alert-preference evidence gaps, readback requirements and metadata/offline policy |
 | [FDR_EVENTS.md](FDR_EVENTS.md) | Offline typed FDR observations and local/HA evidence gates |
+| [SCHEDULE_MANAGEMENT.md](SCHEDULE_MANAGEMENT.md) | Schedule evidence gaps, capture requirements and mutation delivery contract |
 | [GROUP_CONFIGURATION.md](GROUP_CONFIGURATION.md) | Read-only group planning, static request evidence, and commissioning gates |
 | [STORED_HISTORY.md](STORED_HISTORY.md) | History evidence, capture requirements, and bounded retrieval acceptance contract |
 | [INTELLIBLUE.md](INTELLIBLUE.md) | Purifier evidence gates and proposed association contract for consumers |

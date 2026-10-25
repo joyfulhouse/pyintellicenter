@@ -66,7 +66,8 @@ class _ScheduleMixin(_MixinBase):
     def get_schedule_start_time(self, sched_objnam: str) -> str | None:
         """Get the start time of a schedule.
 
-        Returns the time in 'HH,MM,SS' 24-hour format (e.g., '21,00,00').
+        Returns TIME unchanged as a string. No format normalization or timezone
+        conversion is performed; START mode semantics are not interpreted.
 
         Args:
             sched_objnam: Object name of the schedule
@@ -83,7 +84,8 @@ class _ScheduleMixin(_MixinBase):
     def get_schedule_stop_time(self, sched_objnam: str) -> str | None:
         """Get the stop time of a schedule.
 
-        Returns the time in 'HH,MM,SS' 24-hour format (e.g., '09,00,00').
+        Returns TIMOUT unchanged as a string. No format normalization or timezone
+        conversion is performed; STOP mode semantics are not interpreted.
 
         Args:
             sched_objnam: Object name of the schedule
