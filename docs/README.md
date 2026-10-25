@@ -19,6 +19,7 @@ Documentation for pyintellicenter.
 | [FDR_EVENTS.md](FDR_EVENTS.md) | Offline typed FDR observations and local/HA evidence gates |
 | [GROUP_CONFIGURATION.md](GROUP_CONFIGURATION.md) | Read-only group planning, static request evidence, and commissioning gates |
 | [STORED_HISTORY.md](STORED_HISTORY.md) | History evidence, capture requirements, and bounded retrieval acceptance contract |
+| [INTELLIBLUE.md](INTELLIBLUE.md) | Purifier evidence gates and proposed association contract for consumers |
 
 ---
 
