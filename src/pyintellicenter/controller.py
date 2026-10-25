@@ -879,6 +879,9 @@ class ICModelController(
         """
         super().__init__(host, port, keepalive_interval, transport, notification_batching)
         self._model = model
+        self._receipt_generation = 0
+        self._field_receipts: dict[str, dict[str, float]] = {}
+        self._receipt_objects: dict[str, PoolObject] = {}
         self._updated_callback: (
             Callable[[ICModelController, Mapping[str, dict[str, Any] | None]], None] | None
         ) = None
@@ -918,6 +921,44 @@ class ICModelController(
     def model(self) -> PoolModel:
         """Return the model."""
         return self._model
+
+    def field_receipt(self, objnam: str, attribute: str) -> dict[str, Any] | None:
+        """Describe local receipt of a modeled field, independently of its value.
+
+        Age measures time since ingestion, not panel sampling time. It proves
+        neither validity, snapshot completeness, nor physical action. Direct
+        model edits and command acknowledgements do not create receipts.
+        Missing receipts (including fields omitted after reconnect) return None.
+        Unchanged received values refresh receipts without firing subscriptions.
+        """
+        if self._model[objnam] is not self._receipt_objects.get(objnam):
+            return None
+        received = self._field_receipts.get(objnam, {}).get(attribute)
+        if received is None:
+            return None
+        return {
+            "age_seconds": max(0.0, time.monotonic() - received),
+            "connection_generation": self._receipt_generation,
+            "current_connection": self._receipt_generation > 0 and self.connected,
+        }
+
+    def _record_field_receipts(self, entries: list[ObjectEntry]) -> None:
+        """Record only fields actually ingested for accepted model objects."""
+        received = time.monotonic()
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            objnam, params = entry.get("objnam"), entry.get("params")
+            if not isinstance(objnam, str) or not isinstance(params, dict):
+                continue
+            if objnam in self._model:
+                obj = self._model[objnam]
+                assert obj is not None
+                if self._receipt_objects.get(objnam) is not obj:
+                    self._field_receipts.pop(objnam, None)
+                    self._receipt_objects[objnam] = obj
+                receipts = self._field_receipts.setdefault(objnam, {})
+                receipts.update(dict.fromkeys(params, received))
 
     def set_updated_callback(
         self,
@@ -1027,7 +1068,14 @@ class ICModelController(
         self._monitor_paused = True
         await self._cancel_monitor_task()
 
+        self._receipt_generation += 1
+        self._field_receipts.clear()
+        self._receipt_objects.clear()
         await super().start()
+        # Old transport callbacks may run while base startup closes that socket.
+        # Discard their receipts before installing the new notification callback.
+        self._field_receipts.clear()
+        self._receipt_objects.clear()
 
         completed = False
         try:
@@ -1046,6 +1094,7 @@ class ICModelController(
             # gone. Pruning first keeps ghosts out of the tracking queries.
             removed = self._model.reconcile(all_objects)
             ingested = self._model.add_objects(all_objects)
+            self._record_field_receipts(all_objects)
 
             # Partial-snapshot visibility comes from the ingest result:
             # add_objects() returns the ingested objnams and itself emits one
@@ -1153,6 +1202,7 @@ class ICModelController(
         """
         added_objnams: set[str] = set()
         updates = self._model.process_updates(changes_as_list, added_objnams)
+        self._record_field_receipts(changes_as_list)
 
         # Update ICSystemInfo if changed
         if self._system_info and self._system_info.objnam in updates:
