@@ -62,7 +62,7 @@ SYSTEM_ATTRIBUTES = {
     STATUS_ATTR,  # ON/OFF
     "STOP",  # same value as START
     "TEMPNC",  # ON/OFF
-    "TIMZON",  # (int) Time Zone (example '-8' for US Pacific)
+    "TIMZON",  # Observed '-8'; target/units/fractional write behavior unvalidated
     UPDATE_ATTR,  # (int) Firmware update available flag (1=available)
     VACFLO_ATTR,  # ON/OFF, vacation mode
     "VACTIM",  # ON/OFF
@@ -75,20 +75,22 @@ SYSTEM_ATTRIBUTES = {
 # Note: there are 2 clocks in the system
 # one only contains the SOURCE attribute
 # the other everything but SOURCE
+# Historical read observations below are not validated write schemas.
+# See docs/ADVANCED_CONFIGURATION.md for TIME/MIN and ownership evidence gaps.
 SYSTIM_ATTRIBUTES = {
     CALIB_ATTR,  # (int) Clock calibration offset
     "CLK24A",  # clock mode, 'AMPM' or 'HR24'
-    "DAY",  # in 'MM,DD,YY' format
-    "DLSTIM",  # ON/OFF, ON for following DST
+    "DAY",  # Reported 'MM,DD,YY'; date/year write convention unvalidated
+    "DLSTIM",  # ON/OFF setting; transition/offset behavior unvalidated
     HNAME_ATTR,  # same as objnam
     "LOCX",  # (float) longitude
     "LOCY",  # (float) latitude
-    "MIN",  # in 'HH,MM,SS' format (24h clock)
+    "MIN",  # Reported 'HH,MM,SS'; not a validated alias for app's TIME write
     READY_ATTR,  # (ON/OFF) Ready state
     SNAME_ATTR,  # unused really, likely equals to OBJNAM
-    SOURCE_ATTR,  # set to URL if time is from the internet
+    SOURCE_ATTR,  # Observed URL; allowed writes/source interlocks unvalidated
     STATIC_ATTR,  # (ON/OFF) not sure, only seen 'ON'
-    "TIMZON",  # (int) timezone (example '-8' for US Pacific)
+    "TIMZON",  # Observed '-8'; authoritative owner/units not established
     "ZIP",  # ZipCode
 }
 
