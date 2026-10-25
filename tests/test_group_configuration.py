@@ -227,6 +227,40 @@ def test_offline_harness_reports_gates_and_rejects_unknown_writes(evidence):
         report_evidence({**evidence, "spec": {**evidence["spec"], "BODY": "POOL"}})
 
 
+@pytest.mark.parametrize("snapshot_key", ["objects", "readback_objects"])
+@pytest.mark.parametrize(
+    "bad_entry",
+    [
+        None,
+        {},
+        {"objnam": "ORPHAN", "params": {}},
+        {"objnam": "ORPHAN", "params": {"OBJTYP": " "}},
+        {"objnam": "00000", "params": {"OBJTYP": "CIRCUIT"}},
+    ],
+)
+def test_offline_harness_rejects_incomplete_snapshots(evidence, snapshot_key, bad_entry):
+    data = copy.deepcopy(evidence)
+    data[snapshot_key] = [*data["objects"], bad_entry]
+    with pytest.raises(ValueError, match=snapshot_key):
+        report_evidence(data)
+
+
+@pytest.mark.parametrize("snapshot_key", ["objects", "readback_objects"])
+def test_offline_harness_rejects_duplicate_ids_instead_of_merging(evidence, snapshot_key):
+    data = copy.deepcopy(evidence)
+    duplicate = copy.deepcopy(data["objects"][0])
+    duplicate["params"]["SNAME"] = "Contradictory snapshot"
+    data[snapshot_key] = [*data["objects"], duplicate]
+    with pytest.raises(ValueError, match="duplicates an object ID"):
+        report_evidence(data)
+
+
+@pytest.mark.parametrize("snapshot_key", ["objects", "readback_objects"])
+def test_offline_harness_requires_snapshot_lists(evidence, snapshot_key):
+    with pytest.raises(ValueError, match="full object list"):
+        report_evidence({**evidence, snapshot_key: {}})
+
+
 @pytest.mark.asyncio
 async def test_reconnect_reuses_parent_identity_and_reconciles_rows(evidence):
     """Exercise the existing lifecycle; plans never create row entities or subscriptions."""

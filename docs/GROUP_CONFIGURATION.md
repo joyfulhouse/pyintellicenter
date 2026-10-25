@@ -122,6 +122,11 @@ It reports validation diagnostics, the capability gate, and an edit preview
 when available. Exit status 0 means locally valid (commissioning stays disabled),
 2 means invalid input/plan, and 1 means a supplied readback differs or is incomplete.
 Unknown fields fail rather than becoming arbitrary device parameters.
+Both `objects` and `readback_objects` must be full object lists with unique,
+concrete IDs and a nonblank `params.OBJTYP` for every entry. Malformed entries
+and duplicate IDs are rejected instead of silently skipped or merged by the
+runtime model loader. This catches malformed supplied evidence; it cannot
+detect objects omitted from the source capture or certify its provenance.
 
 To compare previously collected, sanitized evidence, add `readback_objects` as
 a separate full object list. A create comparison additionally requires
@@ -144,6 +149,32 @@ the caller must establish that model's completeness, freshness, and provenance.
 A `200` acknowledgement or optimistic local update cannot establish completion.
 
 ## Remaining Device Gates
+
+### Evidence collection handoff
+
+The remaining request is still open in substance even though #104 was closed
+after the planning delivery. Static expectations in this repository and the
+read-only topology observations in [HA #93](https://github.com/joyfulhouse/intellicenter/issues/93)
+do not satisfy the following commissioning gates. Collect captures only within
+separately authorized device work; implementation permission is not permission
+to run these mutations.
+
+| Gate | Minimum independently reviewable evidence |
+|---|---|
+| Create identity | Correlated empty-create request/response, complete before/after snapshots, and how the new parent ID is obtained independently of SNAME; then the separate membership step and its readback. |
+| Edit schema | Feature and light requests preserving their respective ID casing, reordered/added/removed members, and full readback proving replace or patch behavior and preservation of unrelated fields. |
+| Limits | Firmware/model/transport and topology, accepted and rejected names/timers/member counts/types/body combinations, and dependency errors. Planning bounds alone are insufficient. |
+| Uncertain outcomes | Correlated rejection, partial application, timeout and disconnect evidence with independent snapshots showing exactly which fields changed. A response code alone proves no physical result. |
+| Lifecycle and identity | Authoritative reconnect snapshots after create/edit/removal, subscription additions/removals, and HA entity registry IDs before/after rename and row replacement. Existing synthetic regression tests are not device evidence. |
+| Associations/deletion | Concrete supported equipment type, association/dependency graph, exact request/response and independent readback of affected objects and dependents, including rejection and uncertain outcomes. |
+
+Preserve request correlation IDs, relative ordering/times, field casing, unknown
+fields, and reference relationships when sanitizing. Record firmware and transport
+for every capture. Keep independently fetched configuration separate from
+acknowledgements, notifications and optimistic client state. Do not trigger
+failure modes or destructive deletion solely to fill this matrix without the
+applicable device authorization. An offline comparison is a diagnostic aid,
+not an automatic decision to enable a writer.
 
 Before enabling a firmware/topology-specific writer, obtain sanitized correlated
 requests/responses and independent before/after reads covering:

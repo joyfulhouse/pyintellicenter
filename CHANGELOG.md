@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Reject malformed and duplicate-ID snapshots in the offline group evidence
+  harness instead of silently skipping or merging supplied objects (#104).
+
+### Documentation
+
+- Specify the correlated device evidence still required for group create/edit,
+  uncertain outcomes, reconciliation, deletion and equipment associations.
+
 ## [0.3.1] - 2026-10-23
 
 ### Security

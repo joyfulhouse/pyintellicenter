@@ -18,6 +18,32 @@ from pyintellicenter import (
 )
 
 
+def _load_snapshot(objects: Any, path: str) -> PoolModel:
+    """Reject ambiguous evidence instead of using tolerant runtime ingestion."""
+    if not isinstance(objects, list):
+        raise ValueError(f"{path} must be a full object list")
+    seen: set[str] = set()
+    for index, entry in enumerate(objects):
+        location = f"{path}[{index}]"
+        if not isinstance(entry, dict):
+            raise ValueError(f"{location} must be an object entry")
+        objnam = entry.get("objnam")
+        params = entry.get("params")
+        if not isinstance(objnam, str) or not objnam.strip() or objnam == "00000":
+            raise ValueError(f"{location} requires a concrete objnam")
+        if objnam in seen:
+            raise ValueError(f"{location} duplicates an object ID")
+        seen.add(objnam)
+        if not isinstance(params, dict) or not isinstance(params.get("OBJTYP"), str):
+            raise ValueError(f"{location} requires params with OBJTYP")
+        if not params["OBJTYP"].strip():
+            raise ValueError(f"{location} requires a nonblank OBJTYP")
+    model = PoolModel()
+    if len(model.add_objects(objects)) != len(objects):
+        raise ValueError(f"{path} contains objects rejected by the model")
+    return model
+
+
 def report_evidence(data: dict[str, Any]) -> dict[str, Any]:
     """Plan against explicit objects; optionally compare a separate readback."""
     allowed = {
@@ -34,8 +60,7 @@ def report_evidence(data: dict[str, Any]) -> dict[str, Any]:
     spec_data = dict(data["spec"])
     spec_data["members"] = tuple(GroupMemberSpec(**member) for member in spec_data["members"])
     spec = GroupSpec(**spec_data)
-    model = PoolModel()
-    model.add_objects(data["objects"])
+    model = _load_snapshot(data["objects"], "objects")
     controller = ICModelController("offline.invalid", model)
     plan = controller.validate_group_edit(data["group_id"], spec)
     report: dict[str, Any] = {
@@ -48,8 +73,7 @@ def report_evidence(data: dict[str, Any]) -> dict[str, Any]:
     except ICGroupConfigurationError as error:
         report["preview_unavailable"] = str(error)
     if "readback_objects" in data:
-        readback = PoolModel()
-        readback.add_objects(data["readback_objects"])
+        readback = _load_snapshot(data["readback_objects"], "readback_objects")
         report["readback_diagnostics"] = [
             asdict(problem)
             for problem in compare_group_readback(
