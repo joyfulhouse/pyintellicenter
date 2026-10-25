@@ -123,6 +123,7 @@ async def test_acknowledgement_does_not_create_receipt(controller):
 async def test_old_transport_receipt_during_base_start_is_discarded(controller):
     async def close_old_and_connect():
         controller._apply_updates([{"objnam": "C1", "params": {"FREEZE": "ON"}}])
+        assert controller.field_receipt("C1", "FREEZE")["current_connection"] is False
 
     controller.get_all_objects = AsyncMock(
         return_value=[{"objnam": "C1", "params": {"OBJTYP": "CIRCUIT"}}]

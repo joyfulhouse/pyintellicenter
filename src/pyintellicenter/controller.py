@@ -880,6 +880,7 @@ class ICModelController(
         super().__init__(host, port, keepalive_interval, transport, notification_batching)
         self._model = model
         self._receipt_generation = 0
+        self._receipt_connection: ICConnection | None = None
         self._field_receipts: dict[str, dict[str, float]] = {}
         self._receipt_objects: dict[str, PoolObject] = {}
         self._updated_callback: (
@@ -939,7 +940,11 @@ class ICModelController(
         return {
             "age_seconds": max(0.0, time.monotonic() - received),
             "connection_generation": self._receipt_generation,
-            "current_connection": self._receipt_generation > 0 and self.connected,
+            "current_connection": (
+                self._receipt_connection is not None
+                and self._receipt_connection is self._connection
+                and self.connected
+            ),
         }
 
     def _record_field_receipts(self, entries: list[ObjectEntry]) -> None:
@@ -1069,6 +1074,7 @@ class ICModelController(
         await self._cancel_monitor_task()
 
         self._receipt_generation += 1
+        self._receipt_connection = None
         self._field_receipts.clear()
         self._receipt_objects.clear()
         await super().start()
@@ -1076,6 +1082,7 @@ class ICModelController(
         # Discard their receipts before installing the new notification callback.
         self._field_receipts.clear()
         self._receipt_objects.clear()
+        self._receipt_connection = self._connection
 
         completed = False
         try:
