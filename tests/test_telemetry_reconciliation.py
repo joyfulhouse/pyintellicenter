@@ -441,14 +441,23 @@ async def test_failure_backoff_cap_reset_queue_exemption_and_missed_ticks(clock,
     """Scheduled recovery backs off an outage, ignores queue-only timeouts, then resumes cadence."""
     async with running(clock) as (ctrl, server):
         caplog.set_level("DEBUG", logger="pyintellicenter.controller")
-        ctrl.send_cmd = AsyncMock(
-            side_effect=[
+        outcomes = iter(
+            [
                 ICTimeoutError("queued"),
                 *[ICTimeoutError("sent", delivery_uncertain=True) for _ in range(6)],
                 {"objectList": []},
                 {"objectList": []},
             ]
         )
+
+        async def slow_request(*args, **kwargs):
+            outcome = next(outcomes)
+            if isinstance(outcome, Exception):
+                clock.now += 10
+                raise outcome
+            return outcome
+
+        ctrl.send_cmd = AsyncMock(side_effect=slow_request)
         delays = [await clock.tick() for _ in range(8)]
         assert delays == [60, 120, 240, 480, 900, 900, 900, 60]
         assert (

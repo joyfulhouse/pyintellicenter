@@ -1240,12 +1240,13 @@ class ICModelController(
                     delay,
                 )
                 failed = True
+                deadline = time.monotonic() + delay
             else:
                 if failed:
                     _LOGGER.debug("Telemetry reconciliation recovered")
                 failed = False
                 delay = interval
-            deadline += delay
+                deadline += delay
             now = time.monotonic()
             if deadline <= now:
                 deadline += (math.floor((now - deadline) / delay) + 1) * delay
