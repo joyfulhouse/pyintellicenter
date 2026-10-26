@@ -64,10 +64,8 @@ def clock(monkeypatch):
 class AliasServer(MockIntelliCenterServer):
     """Record subscription order and notify only the first shared-storage alias."""
 
-    def __init__(self, air_first="SOURCE", water_first="SOURCE"):
+    def __init__(self):
         super().__init__()
-        self.air_first = air_first
-        self.water_first = water_first
         self.subscriptions = []
         self.reads = []
         self.websockets = []
@@ -183,7 +181,7 @@ async def running(clock, *, transport="tcp", model=None, interval=60.0, server=N
 async def test_first_alias_only_recovers_via_callbacks(clock, transport, air_first, water_first):
     """Start -> first-alias-only push -> next interval -> all telemetry subscribers recover."""
     model = OrderedModel(air_first, water_first)
-    server = AliasServer(air_first, water_first)
+    server = AliasServer()
     async with running(clock, transport=transport, model=model, server=server) as (ctrl, server):
         assert clock.delay == 60
         assert server.reads == []
