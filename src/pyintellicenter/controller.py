@@ -15,7 +15,9 @@ import asyncio
 import contextlib
 import inspect
 import logging
+import math
 import time
+from bisect import bisect_right
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
@@ -864,6 +866,8 @@ class ICModelController(
         keepalive_interval: float | None = None,
         transport: TransportType = "tcp",
         notification_batching: bool = True,
+        *,
+        telemetry_reconcile_interval: float | None = 60.0,
     ) -> None:
         """Initialize the controller.
 
@@ -876,7 +880,14 @@ class ICModelController(
             notification_batching: Forwarded to ``ICConnection``. ``True``
                 (default) batches NotifyList notifications; pass ``False`` to
                 opt back into per-frame delivery.
+            telemetry_reconcile_interval: Authoritative telemetry read interval,
+                30-900 seconds (default 60). ``None`` disables reconciliation.
         """
+        if telemetry_reconcile_interval is not None and (
+            not math.isfinite(telemetry_reconcile_interval)
+            or not 30 <= telemetry_reconcile_interval <= 900
+        ):
+            raise ValueError("telemetry_reconcile_interval must be finite and within [30, 900]")
         super().__init__(host, port, keepalive_interval, transport, notification_batching)
         self._model = model
         self._receipt_generation = 0
@@ -910,6 +921,12 @@ class ICModelController(
         self._pending_monitor: set[str] = set()
         self._monitor_task: asyncio.Task[None] | None = None
         self._monitor_paused = False
+        self._telemetry_reconcile_interval = telemetry_reconcile_interval
+        self._telemetry_task: asyncio.Task[None] | None = None
+        self._telemetry_initialized = False
+        self._telemetry_cursor: tuple[int, str] | None = None
+        self._telemetry_inflight: set[tuple[str, str]] = set()
+        self._telemetry_dirty: set[tuple[str, str]] = set()
 
     def __repr__(self) -> str:
         return (
@@ -1071,6 +1088,8 @@ class ICModelController(
         # spawning paused until that subscription is in place so a NotifyList
         # arriving mid-start() cannot race it with a duplicate request.
         self._monitor_paused = True
+        self._telemetry_initialized = False
+        await self._cancel_telemetry_task()
         await self._cancel_monitor_task()
 
         self._receipt_generation += 1
@@ -1167,6 +1186,13 @@ class ICModelController(
             self._monitor_paused = False
             if self._pending_monitor:
                 self._ensure_monitor_worker()
+            self._telemetry_initialized = True
+            self._telemetry_cursor = None
+            if self._telemetry_reconcile_interval is not None:
+                self._telemetry_task = asyncio.create_task(
+                    self._telemetry_worker(), name="intellicenter-telemetry-reconcile"
+                )
+                self._telemetry_task.add_done_callback(self._on_telemetry_task_done)
             completed = True
         finally:
             if not completed:
@@ -1178,8 +1204,152 @@ class ICModelController(
     async def stop(self) -> None:
         """Stop the controller: cancel the monitor worker, then disconnect."""
         self._monitor_paused = True
+        self._telemetry_initialized = False
+        await self._cancel_telemetry_task()
         await self._cancel_monitor_task()
         await super().stop()
+
+    async def _cancel_telemetry_task(self) -> None:
+        task = self._telemetry_task
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    def _on_telemetry_task_done(self, task: asyncio.Task[None]) -> None:
+        if self._telemetry_task is task:
+            self._telemetry_task = None
+        if not task.cancelled() and (exc := task.exception()) is not None:
+            _LOGGER.warning("Telemetry reconciliation worker stopped: %s", exc)
+
+    async def _telemetry_worker(self) -> None:
+        interval = self._telemetry_reconcile_interval
+        assert interval is not None
+        delay = interval
+        deadline = time.monotonic() + delay
+        failed = False
+        unexpected_logged = False
+        while self._telemetry_initialized:
+            await asyncio.sleep(max(0.0, deadline - time.monotonic()))
+            try:
+                await self._reconcile_telemetry()
+            except Exception as err:
+                if not isinstance(err, ICTimeoutError) or err.delivery_uncertain:
+                    delay = min(delay * 2, 900.0)
+                if not unexpected_logged and not isinstance(
+                    err, (ICError, OSError, ValueError, TypeError, KeyError)
+                ):
+                    _LOGGER.exception(
+                        "Unexpected error reconciling telemetry; next read in %.0fs", delay
+                    )
+                    unexpected_logged = True
+                else:
+                    _LOGGER.log(
+                        logging.DEBUG if failed else logging.WARNING,
+                        "Telemetry reconciliation failed: %s; next read in %.0fs",
+                        err,
+                        delay,
+                    )
+                failed = True
+                deadline = time.monotonic() + delay
+            else:
+                if failed:
+                    _LOGGER.debug("Telemetry reconciliation recovered")
+                failed = False
+                unexpected_logged = False
+                delay = interval
+                deadline += delay
+            now = time.monotonic()
+            if deadline <= now:
+                deadline += (math.floor((now - deadline) / delay) + 1) * delay
+
+    async def _reconcile_telemetry(self) -> None:
+        connection = self._connection
+        generation = self._receipt_generation
+        if connection is None or not self.connected or not self._telemetry_initialized:
+            return
+        targets: list[dict[str, Any]] = []
+        for entry in self._model.attributes_to_track():
+            obj = self._model[entry["objnam"]]
+            if obj is None:
+                continue
+            keys: set[str] = set()
+            if obj.objtype == "SENSE":
+                keys = {"SOURCE", "PROBE"}
+            elif obj.objtype == "BODY":
+                keys = {"TEMP", "LSTTMP"}
+            elif obj.objtype == "CHEM" and obj.subtype == "ICHLOR":
+                keys = {"SALT"}
+            keys.intersection_update(entry["keys"])
+            if keys:
+                targets.append({"objnam": obj.objnam, "keys": sorted(keys)})
+        # Two-key objects first keep every nonfinal batch full, preserving
+        # ceil(keys / 50) ticks without splitting an object's telemetry.
+        targets.sort(key=lambda entry: (-len(entry["keys"]), entry["objnam"]))
+        if not targets:
+            self._telemetry_cursor = None
+            return
+        # A single-batch inventory must never inherit an incomplete rotation.
+        if sum(len(entry["keys"]) for entry in targets) <= MAX_ATTRIBUTES_PER_QUERY:
+            self._telemetry_cursor = None
+        cursor = (
+            bisect_right(
+                targets,
+                self._telemetry_cursor,
+                key=lambda entry: (-len(entry["keys"]), entry["objnam"]),
+            )
+            if self._telemetry_cursor is not None
+            else 0
+        )
+        if cursor == len(targets):
+            cursor = 0
+        query: list[dict[str, Any]] = []
+        count = 0
+        for entry in targets[cursor:]:
+            if count + len(entry["keys"]) > MAX_ATTRIBUTES_PER_QUERY:
+                break
+            query.append(entry)
+            count += len(entry["keys"])
+        objects = {entry["objnam"]: self._model[entry["objnam"]] for entry in query}
+        requested = {(entry["objnam"], key) for entry in query for key in entry["keys"]}
+        self._telemetry_inflight = requested
+        self._telemetry_dirty = set()
+        try:
+            response = await self.send_cmd("GetParamList", {"objectList": query})
+            if (
+                self._connection is not connection
+                or not self.connected
+                or not self._telemetry_initialized
+                or self._receipt_generation != generation
+            ):
+                return
+            entries = response.get("objectList")
+            if not isinstance(entries, list):
+                raise ICResponseError("MALFORMED", "unusable telemetry response (payload omitted)")
+            filtered: dict[str, dict[str, Any]] = {}
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                objnam, params = entry.get("objnam"), entry.get("params")
+                if not isinstance(objnam, str) or not isinstance(params, dict):
+                    continue
+                if objnam not in objects or self._model[objnam] is not objects[objnam]:
+                    continue
+                for key, value in params.items():
+                    pair = (objnam, key)
+                    if pair in requested and pair not in self._telemetry_dirty:
+                        filtered.setdefault(objnam, {})[key] = value
+            self._apply_updates(
+                [{"objnam": objnam, "params": params} for objnam, params in filtered.items()]
+            )
+            last = query[-1]
+            self._telemetry_cursor = (
+                None
+                if cursor + len(query) == len(targets)
+                else (-len(last["keys"]), last["objnam"])
+            )
+        finally:
+            self._telemetry_inflight = set()
+            self._telemetry_dirty = set()
 
     async def _cancel_monitor_task(self) -> None:
         """Cancel and await the drain worker, if one is running."""
@@ -1207,6 +1377,18 @@ class ICModelController(
         queued for a RequestParamList so IntelliCenter starts pushing their
         monitored attributes (a newly-added object is not monitored otherwise).
         """
+        if self._telemetry_inflight:
+            for entry in changes_as_list:
+                if (
+                    isinstance(entry, dict)
+                    and isinstance(entry.get("objnam"), str)
+                    and isinstance(entry.get("params"), dict)
+                ):
+                    self._telemetry_dirty.update(
+                        (entry["objnam"], key)
+                        for key in entry["params"]
+                        if (entry["objnam"], key) in self._telemetry_inflight
+                    )
         added_objnams: set[str] = set()
         updates = self._model.process_updates(changes_as_list, added_objnams)
         self._record_field_receipts(changes_as_list)
