@@ -19,15 +19,25 @@ and ICHLOR SALT through independent authoritative reads. LSTTMP is separate
 storage, and ICHEM is excluded. The default 60-second interval can be configured
 with the keyword-only `telemetry_reconcile_interval` (finite 30-900 seconds), or
 disabled with `None`. At most one request and 50 pairs are read per tick. While
-reads succeed, inventories of at most 50 target pairs are fully read every tick
-(one interval plus request latency). Larger stable target sets are covered in
-`R = ceil(target_pairs / 50)` intervals, plus request latency. A change during a
-multi-tick rotation can add one rotation after the target set settles: at most
-`2 * R` intervals after the last change, plus request latency, using the settled
-pair count. Continuous churn can extend this, so current pair count alone gives
-no fixed bound while changes continue. Failures back off to at most 900 seconds.
-Queued-but-unsent timeouts do not increase backoff. Startup
-waits one interval before its first scheduled read, and stop awaits cancellation.
+reads succeed, inventories of at most 50 target pairs are fully read every
+completed reconciliation tick. Larger inventories with stable membership and
+tracked keys are covered within `R = ceil(target_pairs / 50)` completed ticks;
+after the final target-set change, within `2 * R` completed ticks using the
+settled pair count. Continuous churn has no finite coverage bound.
+
+Ticks are scheduled every `interval` (60 seconds by default); overrunning a slot
+skips missed ticks without bursts. Without scheduling delays, a tick taking `d`
+seconds occupies
+`max(1, floor(d / interval) + 1)` interval slots before the next start:
+`ceil(d / interval)` slots unless completion lands exactly on a boundary, when
+one more slot is skipped. Here `d` includes the request and local processing;
+scheduling delays add elapsed time. Request duration includes queueing, write
+and response, bounded by the existing total deadline
+(`ICConnection.__init__`: `request_total_timeout=60.0` seconds by default).
+
+Failures back off to at most 900 seconds. Queued-but-unsent timeouts do not
+increase backoff. Startup waits one interval before its first scheduled read,
+and stop awaits cancellation.
 
 Check debug logs for reconciliation failures/recovery and use `field_receipt()`
 to distinguish local field ingestion from value changes. An unchanged read can

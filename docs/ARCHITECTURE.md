@@ -87,25 +87,33 @@ finite values in [30, 900], and accepts `None` to disable. Startup already reads
 the snapshot, so the worker waits one interval before its first read. Each tick
 sends at most one GetParamList with at most 50 pairs and one entry per object;
 two-key targets precede single-key targets so full batches rotate fairly without
-splitting objects. Inventories of at most 50 target pairs ignore any continuation
-from an older, larger inventory and are fully read every tick. While reads
-succeed, their bound is one interval plus request latency. Larger inventories
-with stable membership and tracked keys are covered by a full rotation within
-`R = ceil(target_pairs / 50)` intervals, plus request latency.
+splitting objects. While reads succeed, inventories of at most 50 target pairs
+are fully read every completed reconciliation tick. Larger inventories with
+stable membership and tracked keys are covered within
+`R = ceil(target_pairs / 50)` completed ticks; after the final target-set change,
+within `2 * R` completed ticks using the settled pair count. Continuous churn has
+no finite coverage bound.
 
 For multi-tick inventories, stable sort keys and `bisect_right` resume after the
 last-read object even when earlier objects disappear. Completing a rotation
 clears the cursor, so later insertions cannot prevent the next wrap. A target-set
 change can place an affected target behind the cursor and defer it to the next
-rotation. After the final change, the remaining rotation and one full rotation
-cover every target within `2 * R` intervals, plus request latency; `R` uses the
-settled inventory. Thus a transient change adds at most one rotation. Repeated
-ongoing insertions/removals can keep extending a rotation; there is no fixed
-bound based only on the current pair count during continuous churn.
+rotation. The remaining rotation and one full rotation give the `2 * R` tick
+bound after changes stop. Single-batch inventories ignore any continuation from
+an older, larger inventory.
+
+Ticks are scheduled every `interval` (60 seconds by default); overrunning a slot
+skips missed ticks without bursts. Without scheduling delays, a tick taking `d`
+seconds occupies
+`max(1, floor(d / interval) + 1)` interval slots before the next start:
+`ceil(d / interval)` slots unless completion lands exactly on a boundary, when
+one more slot is skipped. Here `d` includes the request and local processing;
+scheduling delays add elapsed time. Request duration includes queueing, write
+and response, bounded by the existing total deadline
+(`ICConnection.__init__`: `request_total_timeout=60.0` seconds by default).
 
 Failures double the next delay up to 900 seconds, reset on success;
-known queued-but-unsent timeouts do
-not grow backoff. The monotonic schedule skips missed ticks and never bursts.
+known queued-but-unsent timeouts do not grow backoff.
 No outer timeout cancels an in-flight transport request; existing request
 deadlines and metrics apply. A reconciliation request shares the connection
 request lock, so it can delay queued user commands by at most the existing
