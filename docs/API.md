@@ -266,12 +266,18 @@ SOLAR inclusion is inferred; salt reconciliation is defensive and its staleness
 cause is **UNVERIFIED**.
 
 Each tick sends at most one request containing at most 50 object-key pairs, with
-one entry per object. Fair rotation covers larger inventories. While reads
-succeed, every target is re-read within
-`ceil(target_keys / 50) * interval + request latency`; typical installations with
-at most 50 target keys use one interval (60 seconds by default). Request deadlines
-remain those of `send_cmd`; missed ticks are skipped without bursts. Failures
-double the delay up to 900 seconds, resetting after success. Timeouts that never
+one entry per object. While reads succeed, inventories of at most 50 target pairs
+are fully read every tick: the bound is one interval plus request latency
+(60-second default interval). Larger inventories with stable membership and
+tracked keys are covered within `R = ceil(target_pairs / 50)` intervals, plus
+request latency. A target-set change during a multi-tick rotation can defer an
+affected target to the following rotation. Once changes stop, this adds at most
+one rotation: coverage completes within `2 * R` intervals after the last change,
+plus request latency, using the settled inventory's pair count. Repeated ongoing
+changes can extend this; current pair count alone gives no fixed bound during
+continuous churn. Request deadlines remain those of `send_cmd`; missed ticks are
+skipped without bursts. Failures double the delay up to 900 seconds, resetting
+after success. Timeouts that never
 left the request-lock queue do not increase backoff.
 
 Accepted readbacks go through ordinary model ingress, refreshing field receipts

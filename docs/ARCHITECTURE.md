@@ -87,15 +87,31 @@ finite values in [30, 900], and accepts `None` to disable. Startup already reads
 the snapshot, so the worker waits one interval before its first read. Each tick
 sends at most one GetParamList with at most 50 pairs and one entry per object;
 two-key targets precede single-key targets so full batches rotate fairly without
-splitting objects. While reads succeed, the bound is
-`ceil(target_keys / 50) * interval + request latency`. Failures double the next
-delay up to 900 seconds, reset on success; known queued-but-unsent timeouts do
+splitting objects. Inventories of at most 50 target pairs ignore any continuation
+from an older, larger inventory and are fully read every tick. While reads
+succeed, their bound is one interval plus request latency. Larger inventories
+with stable membership and tracked keys are covered by a full rotation within
+`R = ceil(target_pairs / 50)` intervals, plus request latency.
+
+For multi-tick inventories, stable sort keys and `bisect_right` resume after the
+last-read object even when earlier objects disappear. Completing a rotation
+clears the cursor, so later insertions cannot prevent the next wrap. A target-set
+change can place an affected target behind the cursor and defer it to the next
+rotation. After the final change, the remaining rotation and one full rotation
+cover every target within `2 * R` intervals, plus request latency; `R` uses the
+settled inventory. Thus a transient change adds at most one rotation. Repeated
+ongoing insertions/removals can keep extending a rotation; there is no fixed
+bound based only on the current pair count during continuous churn.
+
+Failures double the next delay up to 900 seconds, reset on success;
+known queued-but-unsent timeouts do
 not grow backoff. The monotonic schedule skips missed ticks and never bursts.
 No outer timeout cancels an in-flight transport request; existing request
 deadlines and metrics apply. A reconciliation request shares the connection
 request lock, so it can delay queued user commands by at most the existing
-response deadline. The first failure logs a warning (or an exception traceback
-for an unexpected error); subsequent failures and recovery log at debug level.
+response deadline. The first expected failure logs a warning and the first
+unexpected error logs a traceback, even after a known failure. Repeated failures
+and recovery log at debug level; success resets both logging gates.
 
 The worker captures the connection, receipt generation and PoolObject identities.
 After awaiting the response it rejects obsolete state and accepts only requested
@@ -103,8 +119,9 @@ pairs. A batch-local dirty set records any requested pair observed through
 `_apply_updates` while the read is in flight, even if that observation repeats
 the current value; those pairs are dropped. A notification still queued at apply
 time applies later and wins by last write. A push queued before the request can
-therefore temporarily overwrite a fresher readback until the next tick; this is
-an accepted bounded limitation. No permanent per-field revision counters exist.
+therefore temporarily overwrite a fresher readback until that field's next
+reconciliation read, subject to the same inventory bounds. This is an accepted
+limitation. No permanent per-field revision counters exist.
 
 Readbacks are coalesced to one entry per object and synchronously applied through
 `self._apply_updates`, preserving receipts, subscribers, legacy callbacks and HA

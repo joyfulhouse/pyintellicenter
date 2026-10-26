@@ -19,9 +19,14 @@ and ICHLOR SALT through independent authoritative reads. LSTTMP is separate
 storage, and ICHEM is excluded. The default 60-second interval can be configured
 with the keyword-only `telemetry_reconcile_interval` (finite 30-900 seconds), or
 disabled with `None`. At most one request and 50 pairs are read per tick. While
-reads succeed, recovery is bounded by
-`ceil(target_keys / 50) * interval + request latency`; failures back off to at
-most 900 seconds. Queued-but-unsent timeouts do not increase backoff. Startup
+reads succeed, inventories of at most 50 target pairs are fully read every tick
+(one interval plus request latency). Larger stable target sets are covered in
+`R = ceil(target_pairs / 50)` intervals, plus request latency. A change during a
+multi-tick rotation can add one rotation after the target set settles: at most
+`2 * R` intervals after the last change, plus request latency, using the settled
+pair count. Continuous churn can extend this, so current pair count alone gives
+no fixed bound while changes continue. Failures back off to at most 900 seconds.
+Queued-but-unsent timeouts do not increase backoff. Startup
 waits one interval before its first scheduled read, and stop awaits cancellation.
 
 Check debug logs for reconciliation failures/recovery and use `field_receipt()`

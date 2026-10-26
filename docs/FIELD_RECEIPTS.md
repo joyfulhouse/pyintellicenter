@@ -34,10 +34,17 @@ connection attempt. Removed/replaced object identities cannot inherit receipts.
 The default-on [telemetry reconciliation worker](API.md#authoritative-telemetry-reconciliation)
 refreshes receipts only for accepted requested fields. A response from an obsolete
 connection/generation, a replaced object, or a pair observed during the request
-does not create a readback receipt. Omitted fields remain untouched. Its normal
-success bound is `ceil(target_keys / 50) * interval + request latency` (60-second
-default interval). Receipt age remains local ingestion age, not device sample
-age. SOLAR coverage is inferred; ICHLOR salt is defensive with cause **UNVERIFIED**.
+does not create a readback receipt. Omitted fields remain untouched. While reads
+succeed, inventories of at most 50 target pairs are fully read every tick (one
+interval plus request latency, with a 60-second default interval). Larger stable
+target sets are covered within `R = ceil(target_pairs / 50)` intervals, plus
+request latency. Changes during a multi-tick rotation can defer an affected
+target by at most one additional rotation after the target set settles: at most
+`2 * R` intervals after the last change, plus request latency, using the settled
+pair count. Continuous churn can extend this; current pair count alone gives no
+fixed bound while changes continue. Receipt age remains local ingestion age, not
+device sample age. SOLAR coverage is inferred; ICHLOR salt is defensive with cause
+**UNVERIFIED**.
 The [firmware alias RCA](https://github.com/joyfulhouse/intellicenter/issues/212#issuecomment-6422806614)
 explains the temperature limitation; unit tests are not physical firmware validation.
 

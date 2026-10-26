@@ -477,6 +477,49 @@ async def test_mid_rotation_inventory_change_preserves_progress(clock, change):
             assert len({entry["objnam"] for entry in query}) == len(query)
 
 
+@pytest.mark.parametrize(
+    "salt_count, removed",
+    [(0, ("s00",)), (0, ("s00", "s02")), (1, ("s00", "s02"))],
+    ids=["50-pairs", "48-pairs", "49-pairs"],
+)
+async def test_shrink_to_single_batch_recovers_existing_alias(clock, salt_count, removed):
+    """An inventory shrinking to one batch recovers every surviving alias on the next tick."""
+    server = AliasServer()
+    server._objects.clear()
+    for index in range(26):
+        server.add_object(f"s{index:02}", "SENSE", "AIR", "Any", SOURCE="0", PROBE="0")
+    for index in range(salt_count):
+        server.add_object(f"c{index:02}", "CHEM", "ICHLOR", "Any", SALT="0")
+    async with running(clock, server=server) as (ctrl, server):
+        await clock.tick()
+        assert [entry["objnam"] for entry in server.reads[0]] == [
+            f"s{index:02}" for index in range(25)
+        ]
+        for objnam in removed:
+            ctrl.model.remove_object(objnam)
+            server._objects.pop(objnam)
+        server.update_object("s01", SOURCE="1", PROBE="2")
+        pushed = asyncio.Event()
+        ctrl.subscribe("s01", lambda *_: pushed.set())
+        await server.send_notification([{"objnam": "s01", "params": {"SOURCE": "1"}}])
+        await asyncio.wait_for(pushed.wait(), 3)
+        assert ctrl.model["s01"]["PROBE"] == "0"
+        seen = []
+        ctrl.subscribe(None, lambda _, updates: seen.append(dict(updates)))
+        pairs = 2 * (26 - len(removed)) + salt_count
+        for _ in range(2):
+            await clock.tick()
+            query = server.reads[-1]
+            assert ctrl.model["s01"]["PROBE"] == "2"
+            assert {entry["objnam"] for entry in query} == set(ctrl.model.objects)
+            assert sum(len(entry["keys"]) for entry in query) == pairs <= 50
+            assert len(query) == len(ctrl.model.objects)
+            assert ctrl._telemetry_cursor is None
+            assert ctrl.field_receipt("s01", "PROBE")["age_seconds"] == 0
+        assert len(server.reads) == 3
+        assert seen == [{"s01": {"PROBE": "2"}}]
+
+
 async def test_completed_rotation_insertion_recovers_existing_alias(clock):
     """A sensor added after a completed read cannot delay recovery of an existing starved alias."""
     server = AliasServer()

@@ -1288,6 +1288,9 @@ class ICModelController(
         if not targets:
             self._telemetry_cursor = None
             return
+        # A single-batch inventory must never inherit an incomplete rotation.
+        if sum(len(entry["keys"]) for entry in targets) <= MAX_ATTRIBUTES_PER_QUERY:
+            self._telemetry_cursor = None
         cursor = (
             bisect_right(
                 targets,

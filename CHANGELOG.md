@@ -34,8 +34,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   seconds. The keyword-only `telemetry_reconcile_interval` accepts finite 30-900
   second intervals or `None` to disable. One request per tick reads at most 50
   tracked SENSE SOURCE/PROBE, BODY TEMP/LSTTMP and ICHLOR SALT pairs, with fair
-  rotation, capped backoff and awaited shutdown. While reads succeed, the bound
-  is `ceil(target_keys / 50) * interval + request latency`.
+  rotation, capped backoff and awaited shutdown. While reads succeed, inventories
+  of at most 50 target pairs are fully read every tick (one interval plus request
+  latency); larger stable target sets are covered within
+  `R = ceil(target_pairs / 50)` intervals, plus request latency. Changes during a
+  multi-tick rotation may delay an affected target by one additional rotation
+  once the target set settles: at most `2 * R` intervals after the last change,
+  plus request latency, using the settled pair count. Continuous churn can extend
+  this; no fixed bound follows from current pair count while changes continue.
 
 ### Documentation
 
