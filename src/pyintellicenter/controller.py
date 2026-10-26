@@ -1227,6 +1227,7 @@ class ICModelController(
         delay = interval
         deadline = time.monotonic() + delay
         failed = False
+        unexpected_logged = False
         while self._telemetry_initialized:
             await asyncio.sleep(max(0.0, deadline - time.monotonic()))
             try:
@@ -1234,12 +1235,13 @@ class ICModelController(
             except Exception as err:
                 if not isinstance(err, ICTimeoutError) or err.delivery_uncertain:
                     delay = min(delay * 2, 900.0)
-                if not failed and not isinstance(
+                if not unexpected_logged and not isinstance(
                     err, (ICError, OSError, ValueError, TypeError, KeyError)
                 ):
                     _LOGGER.exception(
                         "Unexpected error reconciling telemetry; next read in %.0fs", delay
                     )
+                    unexpected_logged = True
                 else:
                     _LOGGER.log(
                         logging.DEBUG if failed else logging.WARNING,
@@ -1253,6 +1255,7 @@ class ICModelController(
                 if failed:
                     _LOGGER.debug("Telemetry reconciliation recovered")
                 failed = False
+                unexpected_logged = False
                 delay = interval
                 deadline += delay
             now = time.monotonic()
@@ -1336,7 +1339,11 @@ class ICModelController(
                 [{"objnam": objnam, "params": params} for objnam, params in filtered.items()]
             )
             last = query[-1]
-            self._telemetry_cursor = (-len(last["keys"]), last["objnam"])
+            self._telemetry_cursor = (
+                None
+                if cursor + len(query) == len(targets)
+                else (-len(last["keys"]), last["objnam"])
+            )
         finally:
             self._telemetry_inflight = set()
             self._telemetry_dirty = set()

@@ -477,6 +477,34 @@ async def test_mid_rotation_inventory_change_preserves_progress(clock, change):
             assert len({entry["objnam"] for entry in query}) == len(query)
 
 
+async def test_completed_rotation_insertion_recovers_existing_alias(clock):
+    """A sensor added after a completed read cannot delay recovery of an existing starved alias."""
+    server = AliasServer()
+    server._objects.clear()
+    server.add_object("s00", "SENSE", "AIR", "Existing", SOURCE="0", PROBE="0")
+    async with running(clock, server=server) as (ctrl, server):
+        await clock.tick()
+        assert [entry["objnam"] for entry in server.reads[0]] == ["s00"]
+        server.update_object("s00", SOURCE="1", PROBE="1")
+        pushed = asyncio.Event()
+        ctrl.subscribe("s00", lambda *_: pushed.set())
+        await server.send_notification([{"objnam": "s00", "params": {"SOURCE": "1"}}])
+        await asyncio.wait_for(pushed.wait(), 3)
+        assert ctrl.model["s00"]["SOURCE"] == "1" and ctrl.model["s00"]["PROBE"] == "0"
+        server.add_object("s01", "SENSE", "AIR", "Added", SOURCE="1", PROBE="1")
+        ctrl.model.add_object(
+            "s01", {"OBJTYP": "SENSE", "SUBTYP": "AIR", "SOURCE": "0", "PROBE": "0"}
+        )
+        seen = []
+        ctrl.subscribe(None, lambda _, updates: seen.append(dict(updates)))
+        await clock.tick()
+        assert ctrl.model["s00"]["PROBE"] == "1"
+        assert [entry["objnam"] for entry in server.reads[1]] == ["s00", "s01"]
+        assert sum(len(entry["keys"]) for entry in server.reads[1]) == 4
+        assert len(server.reads) == 2
+        assert seen == [{"s00": {"PROBE": "1"}, "s01": {"SOURCE": "1", "PROBE": "1"}}]
+
+
 async def test_unexpected_model_error_backs_off_and_recovers(clock, monkeypatch, caplog):
     """A transient exception in a consumer's model ingress cannot permanently stop scheduled reads."""
     async with running(clock) as (ctrl, server):
@@ -485,6 +513,15 @@ async def test_unexpected_model_error_backs_off_and_recovers(clock, monkeypatch,
         process_updates = ctrl.model.process_updates
         entered = asyncio.Event()
         attempts = 0
+        send_cmd = ctrl.send_cmd
+        first_request = True
+
+        async def timeout_then_read(*args, **kwargs):
+            nonlocal first_request
+            if first_request:
+                first_request = False
+                raise ICTimeoutError("outage", delivery_uncertain=True)
+            return await send_cmd(*args, **kwargs)
 
         def transient_failure(*args, **kwargs):
             nonlocal attempts
@@ -495,10 +532,12 @@ async def test_unexpected_model_error_backs_off_and_recovers(clock, monkeypatch,
             return process_updates(*args, **kwargs)
 
         monkeypatch.setattr(ctrl.model, "process_updates", transient_failure)
+        monkeypatch.setattr(ctrl, "send_cmd", timeout_then_read)
         server.update_object("air", SOURCE="68", PROBE="64")
         seen = []
         ctrl.subscribe("air", lambda _, updates: seen.append(dict(updates)))
-        for delay in (120, 240):
+        assert await clock.tick() == 120
+        for delay in (240, 480):
             entered.clear()
             clock.advance()
             await asyncio.wait_for(entered.wait(), 3)
@@ -515,6 +554,10 @@ async def test_unexpected_model_error_backs_off_and_recovers(clock, monkeypatch,
         errors = [record for record in caplog.records if record.exc_info]
         assert len(errors) == 1 and errors[0].exc_info[0] is RuntimeError
         assert sum("Telemetry reconciliation recovered" in r.message for r in caplog.records) == 1
+        attempts = 0
+        assert await clock.tick() == 120
+        errors = [record for record in caplog.records if record.exc_info]
+        assert len(errors) == 2 and errors[1].exc_info[0] is RuntimeError
 
 
 async def test_failure_backoff_cap_reset_queue_exemption_and_missed_ticks(clock, caplog):
