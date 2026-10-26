@@ -17,6 +17,7 @@ import inspect
 import logging
 import math
 import time
+from bisect import bisect_right
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
@@ -923,7 +924,7 @@ class ICModelController(
         self._telemetry_reconcile_interval = telemetry_reconcile_interval
         self._telemetry_task: asyncio.Task[None] | None = None
         self._telemetry_initialized = False
-        self._telemetry_cursor = 0
+        self._telemetry_cursor: tuple[int, str] | None = None
         self._telemetry_inflight: set[tuple[str, str]] = set()
         self._telemetry_dirty: set[tuple[str, str]] = set()
 
@@ -1186,7 +1187,7 @@ class ICModelController(
             if self._pending_monitor:
                 self._ensure_monitor_worker()
             self._telemetry_initialized = True
-            self._telemetry_cursor = 0
+            self._telemetry_cursor = None
             if self._telemetry_reconcile_interval is not None:
                 self._telemetry_task = asyncio.create_task(
                     self._telemetry_worker(), name="intellicenter-telemetry-reconcile"
@@ -1230,15 +1231,22 @@ class ICModelController(
             await asyncio.sleep(max(0.0, deadline - time.monotonic()))
             try:
                 await self._reconcile_telemetry()
-            except (ICError, OSError, ValueError, TypeError, KeyError) as err:
+            except Exception as err:
                 if not isinstance(err, ICTimeoutError) or err.delivery_uncertain:
                     delay = min(delay * 2, 900.0)
-                _LOGGER.log(
-                    logging.DEBUG if failed else logging.WARNING,
-                    "Telemetry reconciliation failed: %s; next read in %.0fs",
-                    err,
-                    delay,
-                )
+                if not failed and not isinstance(
+                    err, (ICError, OSError, ValueError, TypeError, KeyError)
+                ):
+                    _LOGGER.exception(
+                        "Unexpected error reconciling telemetry; next read in %.0fs", delay
+                    )
+                else:
+                    _LOGGER.log(
+                        logging.DEBUG if failed else logging.WARNING,
+                        "Telemetry reconciliation failed: %s; next read in %.0fs",
+                        err,
+                        delay,
+                    )
                 failed = True
                 deadline = time.monotonic() + delay
             else:
@@ -1275,9 +1283,19 @@ class ICModelController(
         # ceil(keys / 50) ticks without splitting an object's telemetry.
         targets.sort(key=lambda entry: (-len(entry["keys"]), entry["objnam"]))
         if not targets:
-            self._telemetry_cursor = 0
+            self._telemetry_cursor = None
             return
-        cursor = self._telemetry_cursor % len(targets)
+        cursor = (
+            bisect_right(
+                targets,
+                self._telemetry_cursor,
+                key=lambda entry: (-len(entry["keys"]), entry["objnam"]),
+            )
+            if self._telemetry_cursor is not None
+            else 0
+        )
+        if cursor == len(targets):
+            cursor = 0
         query: list[dict[str, Any]] = []
         count = 0
         for entry in targets[cursor:]:
@@ -1317,7 +1335,8 @@ class ICModelController(
             self._apply_updates(
                 [{"objnam": objnam, "params": params} for objnam, params in filtered.items()]
             )
-            self._telemetry_cursor = (cursor + len(query)) % len(targets)
+            last = query[-1]
+            self._telemetry_cursor = (-len(last["keys"]), last["objnam"])
         finally:
             self._telemetry_inflight = set()
             self._telemetry_dirty = set()

@@ -435,6 +435,88 @@ async def test_inventory_rotation_respects_bound_and_rebuilds_targets(clock, int
         )
 
 
+@pytest.mark.parametrize("change", ["remove_before_cursor", "remove_cursor", "add_before_cursor"])
+async def test_mid_rotation_inventory_change_preserves_progress(clock, change):
+    """A caller changes the live inventory between ticks without starving surviving targets."""
+    model = PoolModel(attribute_map={"SENSE": {"SOURCE", "PROBE"}, "CHEM": {"SALT"}})
+    server = AliasServer()
+    server._objects.clear()
+    for index in range(26):
+        server.add_object(f"s{index:02}", "SENSE", "AIR", "Any", SOURCE="0", PROBE="0")
+    for index in range(8):
+        server.add_object(f"c{index:02}", "CHEM", "ICHLOR", "Any", SALT="0")
+    async with running(clock, model=model, server=server) as (ctrl, server):
+        for index in range(26):
+            server.update_object(f"s{index:02}", SOURCE="1", PROBE="1")
+        for index in range(8):
+            server.update_object(f"c{index:02}", SALT="1")
+        await clock.tick()
+        assert [entry["objnam"] for entry in server.reads[0]] == [
+            f"s{index:02}" for index in range(25)
+        ]
+        if change == "add_before_cursor":
+            server.add_object("r99", "SENSE", "AIR", "Added", SOURCE="1", PROBE="1")
+            model.add_object("r99", {"OBJTYP": "SENSE", "SUBTYP": "AIR", "SOURCE": "0"})
+        else:
+            removed = "s00" if change == "remove_before_cursor" else "s24"
+            model.remove_object(removed)
+            server._objects.pop(removed)
+        await clock.tick()
+        assert model["s25"]["SOURCE"] == model["s25"]["PROBE"] == "1"
+        assert [entry["objnam"] for entry in server.reads[1]] == [
+            "s25",
+            *[f"c{index:02}" for index in range(8)],
+        ]
+        assert all(model[f"c{index:02}"]["SALT"] == "1" for index in range(8))
+        await clock.tick()
+        if change == "add_before_cursor":
+            assert model["r99"]["SOURCE"] == model["r99"]["PROBE"] == "1"
+        assert len(server.reads) == 3
+        for query in server.reads:
+            assert sum(len(entry["keys"]) for entry in query) <= 50
+            assert len({entry["objnam"] for entry in query}) == len(query)
+
+
+async def test_unexpected_model_error_backs_off_and_recovers(clock, monkeypatch, caplog):
+    """A transient exception in a consumer's model ingress cannot permanently stop scheduled reads."""
+    async with running(clock) as (ctrl, server):
+        caplog.set_level("DEBUG", logger="pyintellicenter.controller")
+        worker = ctrl._telemetry_task
+        process_updates = ctrl.model.process_updates
+        entered = asyncio.Event()
+        attempts = 0
+
+        def transient_failure(*args, **kwargs):
+            nonlocal attempts
+            attempts += 1
+            entered.set()
+            if attempts <= 2:
+                raise RuntimeError("temporary model ingress failure")
+            return process_updates(*args, **kwargs)
+
+        monkeypatch.setattr(ctrl.model, "process_updates", transient_failure)
+        server.update_object("air", SOURCE="68", PROBE="64")
+        seen = []
+        ctrl.subscribe("air", lambda _, updates: seen.append(dict(updates)))
+        for delay in (120, 240):
+            entered.clear()
+            clock.advance()
+            await asyncio.wait_for(entered.wait(), 3)
+            assert not worker.done(), (
+                "an unexpected ingress exception must not terminate the worker"
+            )
+            assert await clock.paused() == delay
+            assert ctrl.model["air"]["SOURCE"] == "70"
+            assert seen == []
+        assert await clock.tick() == 60
+        assert ctrl._telemetry_task is worker
+        assert len(server.reads) == attempts == 3
+        assert seen == [{"air": {"SOURCE": "68", "PROBE": "64"}}]
+        errors = [record for record in caplog.records if record.exc_info]
+        assert len(errors) == 1 and errors[0].exc_info[0] is RuntimeError
+        assert sum("Telemetry reconciliation recovered" in r.message for r in caplog.records) == 1
+
+
 async def test_failure_backoff_cap_reset_queue_exemption_and_missed_ticks(clock, caplog):
     """Scheduled recovery backs off an outage, ignores queue-only timeouts, then resumes cadence."""
     async with running(clock) as (ctrl, server):

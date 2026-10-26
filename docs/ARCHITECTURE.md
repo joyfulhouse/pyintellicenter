@@ -92,8 +92,10 @@ splitting objects. While reads succeed, the bound is
 delay up to 900 seconds, reset on success; known queued-but-unsent timeouts do
 not grow backoff. The monotonic schedule skips missed ticks and never bursts.
 No outer timeout cancels an in-flight transport request; existing request
-deadlines and metrics apply. The first failure logs a warning, subsequent
-failures and recovery log at debug level.
+deadlines and metrics apply. A reconciliation request shares the connection
+request lock, so it can delay queued user commands by at most the existing
+response deadline. The first failure logs a warning (or an exception traceback
+for an unexpected error); subsequent failures and recovery log at debug level.
 
 The worker captures the connection, receipt generation and PoolObject identities.
 After awaiting the response it rejects obsolete state and accepts only requested
