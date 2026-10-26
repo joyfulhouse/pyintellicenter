@@ -19,8 +19,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Bound telemetry staleness from firmware shared-snapshot alias notification
+  suppression using independent authoritative reads through normal model ingress
+  ([intellicenter #212 RCA](https://github.com/joyfulhouse/intellicenter/issues/212#issuecomment-6422806614)).
+  Preserve newer observations and reject obsolete connection/object readbacks.
+  ICHLOR salt reconciliation is defensive (cause **UNVERIFIED**); SOLAR inclusion
+  is inferred. Unit tests are not physical firmware validation.
 - Reject malformed and duplicate-ID snapshots in the offline group evidence
   harness instead of silently skipping or merging supplied objects (#104).
+
+### Changed
+
+- Enable default-on telemetry reconciliation in `ICModelController` every 60
+  seconds. The keyword-only `telemetry_reconcile_interval` accepts finite 30-900
+  second intervals or `None` to disable. One request per tick reads at most 50
+  tracked SENSE SOURCE/PROBE, BODY TEMP/LSTTMP and ICHLOR SALT pairs, with fair
+  rotation, capped backoff and awaited shutdown. While reads succeed, the bound
+  is `ceil(target_keys / 50) * interval + request latency`.
 
 ### Documentation
 

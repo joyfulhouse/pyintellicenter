@@ -101,6 +101,7 @@ controller = ICModelController(
     model=model,
     port=6681,
     keepalive_interval=90.0,
+    telemetry_reconcile_interval=60.0,  # Keyword-only; None disables scheduled reads
 )
 
 await controller.start()
@@ -248,6 +249,38 @@ def on_update(controller, changes):
 controller.set_updated_callback(on_update)
 await controller.stop()
 ```
+
+### Authoritative telemetry reconciliation
+
+`ICModelController(..., telemetry_reconcile_interval=60.0)` enables periodic
+`GetParamList` readbacks over TCP or WebSocket. The keyword-only interval must be
+finite and within 30-900 seconds; invalid values raise `ValueError`. `None`
+disables the worker. The first read occurs one interval after successful startup.
+`stop()` awaits cancellation; every successful restart replaces the worker.
+
+Targets are tracked `SENSE` `SOURCE`/`PROBE`, `BODY` `TEMP`/`LSTTMP`, and `CHEM`
+subtype `ICHLOR` `SALT`, selected by object type rather than name. Missing values
+are eligible. `ICHEM` is excluded. Values are independent authoritative reads:
+there is no alias copying, calibration arithmetic, or derived temperature.
+SOLAR inclusion is inferred; salt reconciliation is defensive and its staleness
+cause is **UNVERIFIED**.
+
+Each tick sends at most one request containing at most 50 object-key pairs, with
+one entry per object. Fair rotation covers larger inventories. While reads
+succeed, every target is re-read within
+`ceil(target_keys / 50) * interval + request latency`; typical installations with
+at most 50 target keys use one interval (60 seconds by default). Request deadlines
+remain those of `send_cmd`; missed ticks are skipped without bursts. Failures
+double the delay up to 900 seconds, resetting after success. Timeouts that never
+left the request-lock queue do not increase backoff.
+
+Accepted readbacks go through ordinary model ingress, refreshing field receipts
+and invoking subscribers, the legacy callback, and subclass update hooks for
+changed values. Unchanged readbacks refresh receipts without value-change events.
+Replaced objects, obsolete connections/generations, unsolicited fields and fields
+observed during an in-flight read are discarded. Omitted fields stay untouched.
+See [Architecture](ARCHITECTURE.md#authoritative-telemetry-reconciliation) for the
+firmware limitation and validation boundaries.
 
 ### Sensor calibration evidence
 

@@ -19,7 +19,7 @@ else:
 
 This is a local receipt API, **not a guarantee of panel freshness**. It records
 fields in the initial object snapshot and model update ingress (subscription
-responses, monitoring backfill and notifications). Raw query responses not applied
+responses, monitoring backfill, telemetry reconciliation and notifications). Raw query responses not applied
 to the model do not create receipts. Direct model edits, requested writes and
 command acknowledgements do not create receipts. Null, malformed field values and
 unsupported field echoes can have receipts; interpret value validity separately.
@@ -27,9 +27,19 @@ Receipts contain no parameter values or wall-clock timestamps.
 
 Receiving an unchanged value refreshes its receipt without changing the existing
 value-change callback/subscription contract. Download or query receipts when
-needed; there is no receipt-only event or polling task. Queries do not scan the
+needed; there is no receipt-only event or receipt polling task. Queries do not scan the
 model. Metadata is bounded by fields ingested for modeled objects within the
 connection attempt. Removed/replaced object identities cannot inherit receipts.
+
+The default-on [telemetry reconciliation worker](API.md#authoritative-telemetry-reconciliation)
+refreshes receipts only for accepted requested fields. A response from an obsolete
+connection/generation, a replaced object, or a pair observed during the request
+does not create a readback receipt. Omitted fields remain untouched. Its normal
+success bound is `ceil(target_keys / 50) * interval + request latency` (60-second
+default interval). Receipt age remains local ingestion age, not device sample
+age. SOLAR coverage is inferred; ICHLOR salt is defensive with cause **UNVERIFIED**.
+The [firmware alias RCA](https://github.com/joyfulhouse/intellicenter/issues/212#issuecomment-6422806614)
+explains the temperature limitation; unit tests are not physical firmware validation.
 
 Every connection attempt clears receipts even when cached model properties
 survive. A snapshot or subscription response omitting a field does not establish

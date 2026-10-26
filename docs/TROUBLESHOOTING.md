@@ -4,6 +4,35 @@ Common problems with pyintellicenter and how to resolve them.
 
 ## Common Issues
 
+### Temperature or salt stays stale on a healthy connection
+
+Firmware can suppress notifications for later aliases of shared temperature
+storage after notifying the first subscribed alias. Changing subscription order
+changes the winner and does not resolve the defect. See the
+[issue #212 RCA](https://github.com/joyfulhouse/intellicenter/issues/212#issuecomment-6422806614).
+Reloading recovers a snapshot temporarily; firmware 3.014 is not established as
+a fix. Salt staleness has a separate **UNVERIFIED** cause: its inclusion is
+defensive. SOLAR reconciliation is inferred, not validated alias behavior.
+
+`ICModelController` now reconciles tracked SENSE SOURCE/PROBE, BODY TEMP/LSTTMP
+and ICHLOR SALT through independent authoritative reads. LSTTMP is separate
+storage, and ICHEM is excluded. The default 60-second interval can be configured
+with the keyword-only `telemetry_reconcile_interval` (finite 30-900 seconds), or
+disabled with `None`. At most one request and 50 pairs are read per tick. While
+reads succeed, recovery is bounded by
+`ceil(target_keys / 50) * interval + request latency`; failures back off to at
+most 900 seconds. Queued-but-unsent timeouts do not increase backoff. Startup
+waits one interval before its first scheduled read, and stop awaits cancellation.
+
+Check debug logs for reconciliation failures/recovery and use `field_receipt()`
+to distinguish local field ingestion from value changes. An unchanged read can
+refresh its receipt without firing a callback. Readbacks never synthesize
+temperatures or copy SOURCE into PROBE/body TEMP. An old salt timestamp alone
+does not establish a mismatch; compare a direct SALT read with the cached value.
+Tests exercise synthetic aliases and loopback TCP/WebSocket recovery; unit tests
+are not physical firmware validation. Water/body order reversal and physical
+3.014 verification remain hardware follow-up work.
+
 ### Connection refused / timeout
 
 **Symptom:** `ICConnectionError` immediately on `handler.start()`.
