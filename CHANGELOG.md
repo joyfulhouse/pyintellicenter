@@ -34,22 +34,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   seconds. The keyword-only `telemetry_reconcile_interval` accepts finite 30-900
   second intervals or `None` to disable. One request per tick reads at most 50
   tracked SENSE SOURCE/PROBE, BODY TEMP/LSTTMP and ICHLOR SALT pairs, with fair
-  rotation, capped backoff and awaited shutdown. While reads succeed, inventories
-  of at most 50 target pairs are fully read every completed reconciliation tick.
-  Larger inventories with stable membership and tracked keys are covered within
-  `R = ceil(target_pairs / 50)` completed ticks; after the final target-set change,
-  within `2 * R` completed ticks using the settled pair count. Continuous churn has
-  no finite coverage bound.
-
-  Ticks are scheduled every `interval` (60 seconds by default); overrunning a slot
-  skips missed ticks without bursts. Without scheduling delays, a tick taking `d`
-  seconds occupies
-  `max(1, floor(d / interval) + 1)` interval slots before the next start:
-  `ceil(d / interval)` slots unless completion lands exactly on a boundary, when
-  one more slot is skipped. Here `d` includes the request and local processing;
-  scheduling delays add elapsed time. Request duration includes queueing, write
-  and response, bounded by the existing total deadline
-  (`ICConnection.__init__`: `request_total_timeout=60.0` seconds by default).
+  rotation, capped backoff and awaited shutdown; see the
+  [coverage and timing guarantees](docs/ARCHITECTURE.md#authoritative-telemetry-reconciliation).
 
 ### Documentation
 

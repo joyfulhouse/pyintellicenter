@@ -34,22 +34,9 @@ connection attempt. Removed/replaced object identities cannot inherit receipts.
 The default-on [telemetry reconciliation worker](API.md#authoritative-telemetry-reconciliation)
 refreshes receipts only for accepted requested fields. A response from an obsolete
 connection/generation, a replaced object, or a pair observed during the request
-does not create a readback receipt. Omitted fields remain untouched. While reads
-succeed, inventories of at most 50 target pairs are fully read every completed
-reconciliation tick. Larger inventories with stable membership and tracked keys
-are covered within `R = ceil(target_pairs / 50)` completed ticks; after the final
-target-set change, within `2 * R` completed ticks using the settled pair count.
-Continuous churn has no finite coverage bound.
-
-Ticks are scheduled every `interval` (60 seconds by default); overrunning a slot
-skips missed ticks without bursts. Without scheduling delays, a tick taking `d`
-seconds occupies
-`max(1, floor(d / interval) + 1)` interval slots before the next start:
-`ceil(d / interval)` slots unless completion lands exactly on a boundary, when
-one more slot is skipped. Here `d` includes the request and local processing;
-scheduling delays add elapsed time. Request duration includes queueing, write
-and response, bounded by the existing total deadline
-(`ICConnection.__init__`: `request_total_timeout=60.0` seconds by default).
+does not create a readback receipt. Omitted fields remain untouched. Receipt
+refresh coverage follows the [reconciliation bounds](ARCHITECTURE.md#authoritative-telemetry-reconciliation)
+for completed ticks, inventory changes and skipped slots.
 
 Receipt age remains local ingestion age, not device sample age. SOLAR coverage
 is inferred; ICHLOR salt is defensive with cause
